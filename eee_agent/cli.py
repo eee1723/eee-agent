@@ -113,50 +113,126 @@ def run_prompt(text: str) -> int:
 
 
 # --------------------------------------------------------------------------- #
-# stdio: JSON-lines for the PySide6 panel
+# stdio: JSON-lines for the PySide6 panel (rich runtime events + stop)
 # --------------------------------------------------------------------------- #
-async def _astream(agent, text: str):
-    """Yield (kind, payload) events from a single agent turn."""
+def _emit(obj: dict) -> None:
+    print(json.dumps(obj, default=str), flush=True)
+
+
+def _todo_dict(t):
+    """Normalize a deepagents todo (dict or object) to {title, status}."""
+    if isinstance(t, dict):
+        return {"title": t.get("title") or t.get("description") or str(t)[:80],
+                "status": t.get("status")}
+    return {"title": getattr(t, "title", None) or getattr(t, "description", None)
+            or str(t)[:80],
+            "status": getattr(t, "status", None)}
+
+
+async def _run_turn(agent, text: str):
+    """Run one agent turn, emitting rich JSON-line events. Cancellable (stop)."""
+    import time
     from eee_agent.config import recursion_limit
 
+    start = time.time()
+    tok_in = tok_out = 0
+    step = 0
+
+    def metric():
+        _emit({"type": "metric", "step": step, "tokens_in": tok_in,
+               "tokens_out": tok_out, "elapsed": round(time.time() - start, 1)})
+
     try:
-        async for chunk, metadata in agent.astream(
+        async for mode, data in agent.astream(
             {"messages": [{"role": "user", "content": text}]},
-            stream_mode="messages",
+            stream_mode=["messages", "updates"],
             config={"recursion_limit": recursion_limit()},
         ):
-            cls = chunk.__class__.__name__
-            content = getattr(chunk, "content", "")
-            if cls == "AIMessageChunk" and content:
-                yield ("token", {"text": content})
-            elif cls == "ToolMessage":
-                yield ("tool", {"name": getattr(chunk, "name", "tool"),
-                                 "content": str(content)[:500]})
-        yield ("done", {})
+            if mode == "messages":
+                chunk, metadata = data
+                cls = chunk.__class__.__name__
+                if isinstance(metadata, dict):
+                    st = metadata.get("langgraph_step")
+                    if st is not None:
+                        step = st
+                content = getattr(chunk, "content", "")
+                if cls == "AIMessageChunk":
+                    # reasoning/thinking content (DeepSeek reasoning_content / Claude thinking)
+                    ak = getattr(chunk, "additional_kwargs", {}) or {}
+                    rc = ak.get("reasoning_content") if isinstance(ak, dict) else None
+                    if rc:
+                        _emit({"type": "thinking", "text": str(rc)})
+                    if content:
+                        _emit({"type": "token",
+                               "text": content if isinstance(content, str) else str(content)})
+                    for tc in (getattr(chunk, "tool_call_chunks", None) or []):
+                        if isinstance(tc, dict) and tc.get("name"):
+                            _emit({"type": "tool_call", "name": tc.get("name"),
+                                   "args": tc.get("args", "")})
+                            metric()
+                    um = getattr(chunk, "usage_metadata", None)
+                    if isinstance(um, dict):
+                        tok_in += um.get("input_tokens", 0)
+                        tok_out += um.get("output_tokens", 0)
+                elif cls == "ToolMessage":
+                    _emit({"type": "tool_result",
+                           "name": getattr(chunk, "name", "tool"),
+                           "content": str(content)[:600]})
+                    metric()
+            elif mode == "updates":
+                if isinstance(data, dict):
+                    for _node, upd in data.items():
+                        if isinstance(upd, dict) and "todos" in upd:
+                            _emit({"type": "todo",
+                                   "tasks": [_todo_dict(t) for t in (upd["todos"] or [])]})
+        _emit({"type": "done", "step": step, "tokens_in": tok_in,
+               "tokens_out": tok_out, "elapsed": round(time.time() - start, 1)})
+    except asyncio.CancelledError:
+        _emit({"type": "cancelled", "step": step, "tokens_in": tok_in,
+               "tokens_out": tok_out, "elapsed": round(time.time() - start, 1)})
+        raise
     except Exception as e:  # noqa: BLE001
-        yield ("error", {"text": f"{type(e).__name__}: {e}"})
+        _emit({"type": "error", "text": f"{type(e).__name__}: {e}"})
 
 
 async def stdio() -> int:
+    import threading
     from eee_agent.app import build_agent
 
     agent = build_agent()
     loop = asyncio.get_event_loop()
-    print(json.dumps({"type": "ready"}), flush=True)
+    inbox: asyncio.Queue = asyncio.Queue()
+
+    def _reader():
+        while True:
+            line = sys.stdin.readline()
+            if not line:
+                break
+            try:
+                asyncio.run_coroutine_threadsafe(inbox.put(line), loop)
+            except Exception:
+                break
+
+    threading.Thread(target=_reader, daemon=True).start()
+    _emit({"type": "ready"})
+
+    current = None
     while True:
-        line = await loop.run_in_executor(None, sys.stdin.readline)
-        if not line:
-            break
+        line = await inbox.get()
         try:
             msg = json.loads(line)
         except json.JSONDecodeError:
-            print(json.dumps({"type": "error", "text": "malformed JSON line"}),
-                  flush=True)
+            _emit({"type": "error", "text": "malformed JSON line"})
             continue
-        if msg.get("type") != "user":
+        kind = msg.get("type")
+        if kind == "stop":
+            if current is not None and not current.done():
+                current.cancel()
             continue
-        async for kind, payload in _astream(agent, msg.get("text", "")):
-            print(json.dumps({"type": kind, **payload}), flush=True)
+        if kind == "user":
+            if current is not None and not current.done():
+                current.cancel()
+            current = asyncio.create_task(_run_turn(agent, msg.get("text", "")))
     return 0
 
 
