@@ -35,6 +35,20 @@ import start_rpc
 start_rpc.start()
         ]]></scriptCode>
       </scriptItem>
+      <scriptItem id="eee_start_phoenix">
+        <label>Start Phoenix Tracing Server</label>
+        <scriptCode><![CDATA[
+import sys, hou
+_root = hou.getenv("EEE_PATH")
+if not _root:
+    raise RuntimeError("EEE_PATH not set. Run houdini_side/install_menu.py, then restart Houdini.")
+_l = _root + "/houdini_side"
+if _l not in sys.path:
+    sys.path.insert(0, _l)
+import start_phoenix
+start_phoenix.start()
+        ]]></scriptCode>
+      </scriptItem>
       <separatorItem/>
       <scriptItem id="eee_help">
         <label>Install / Help</label>
