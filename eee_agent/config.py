@@ -46,9 +46,12 @@ def repo_root() -> str:
 
 
 def recursion_limit() -> int:
-    """langgraph step budget per run. Default 25 is far too low for multi-step
-    modeling; raised to 120. Lower if the agent loops."""
-    return int(os.getenv("EEE_RECURSION_LIMIT", "120"))
+    """langgraph step budget per run (env: EEE_RECURSION_LIMIT).
+
+    Default 999 — generous headroom for long-horizon procedural modeling and for
+    the recommended Claude swap (DeepSeek V4 Pro tends to over-iterate near the
+    old 120 cap; see CLAUDE.md "Known limitation"). Lower if the agent loops."""
+    return int(os.getenv("EEE_RECURSION_LIMIT", "999"))
 
 
 def resolve_path(path: str) -> str:

@@ -1,15 +1,23 @@
 """Component-based procedural modeling tools.
 
 Implements the locked architecture (Phase C): a SOP **subnet** work container
-under a geo, with **spare parms** as the user-facing parameter interface (the
-single source of truth), **component subnets** (`comp_*`) each with `OUT_geo` +
-`OUT_anchors`, and **anchor** dependencies wired via `object_merge` path refs
-(DAG, cycle-checked). Components reference root parms via `ch("../p_nameX")`
-expressions (relative path computed by the tool, never hand-written by the agent).
+under a geo, with **spare parms** (with min/max ranges) as the user-facing
+parameter interface (the single source of truth), and **component subnets**
+(`comp_*`) that expose real OUTPUT PORTS via internal `output` nodes:
+`geo_port` (port 0 = the component's geometry) and `anchors_port`
+(port 1 = its anchor points). Anchor dependencies are wired as REAL connections
+between component subnets (consumer input <- producer anchors port) — no
+object_merge path refs — so the work subnet's auto-layout follows the DAG.
+Components reference root parms via `ch("../p_nameX")` expressions (relative
+path computed by the tool, never hand-written by the agent).
 
 All HOM APIs below were verified against Houdini 21.0.440 via hython:
-subnet, addSpareParmTuple, setExpression('ch("../p_x")'), object_merge objpath1,
-copytopoints pack.
+subnet, addSpareParmTuple, setExpression('ch("../p_x")'), the `output` SOP node +
+its `outputidx` parm (multi-output subnet ports — a vanilla subnet's *effective*
+output is normally just the render-flag node; `output` nodes with explicit
+outputidx promote distinct routable ports), setInput(input_idx, node, output_idx),
+subnet indirectInputs(), copytopoints pack, FloatParmTemplate
+setMinValue/setMaxValue/setMinIsStrict.
 """
 from __future__ import annotations
 
@@ -22,6 +30,12 @@ from eee_agent.bridge import hou_client, serialize
 MARKER_PARM = "__proc_root__"
 COMP_PREFIX = "comp_"
 DEFAULT_GEO = "proc_geo"
+
+# component subnet OUTPUT PORTS — promoted by internal `output` nodes
+GEO_PORT = "geo_port"          # outputidx 0 — the component's geometry
+ANCHORS_PORT = "anchors_port"  # outputidx 1 — anchor points for children
+GEO_OUTIDX = 0
+ANCHORS_OUTIDX = 1
 
 # module-level cache of the active work container path (survives across tool
 # calls within one agent process)
@@ -77,15 +91,36 @@ def _get_work(hou):
     raise RuntimeError("no work container — call ensure_work_container first")
 
 
-def _spare_parm_templates(hou, name: str, parm_type: str, size: int, default, label: str):
-    """Build the right ParmTemplate for the type. Verified Float; Int/String same shape."""
+def _spare_parm_templates(hou, name: str, parm_type: str, size: int, default, label: str,
+                          mn: Optional[float], mx: Optional[float], strict: bool):
+    """Build the right ParmTemplate for the type, applying min/max range limits.
+
+    Float/int parms get a slider range (mn..mx); if strict, the bounds are hard
+    clamps (user cannot exceed them). Verified: FloatParmTemplate has
+    setMinValue/setMaxValue + setMinIsStrict/setMaxIsStrict.
+    """
     label = label or name
+
+    def _apply_rng(tpl):
+        try:
+            if mn is not None:
+                tpl.setMinValue(float(mn))
+                if strict:
+                    tpl.setMinIsStrict(True)
+            if mx is not None:
+                tpl.setMaxValue(float(mx))
+                if strict:
+                    tpl.setMaxIsStrict(True)
+        except Exception:
+            pass  # range not applicable to this template type
+        return tpl
+
     if parm_type == "float":
         dv = tuple(float(x) for x in (default or [0.0] * size))
-        return hou.FloatParmTemplate(name, label, size, dv)
+        return _apply_rng(hou.FloatParmTemplate(name, label, size, dv))
     if parm_type == "int":
         dv = tuple(int(x) for x in (default or [0] * size))
-        return hou.IntParmTemplate(name, label, size, dv)
+        return _apply_rng(hou.IntParmTemplate(name, label, size, dv))
     if parm_type == "string":
         dv = tuple(str(x) for x in (default or [""] * size))
         return hou.StringParmTemplate(name, label, size, dv)
@@ -97,31 +132,6 @@ def _spare_parm_templates(hou, name: str, parm_type: str, size: int, default, la
 def _components(hou, work) -> List[str]:
     return [str(c.path()) for c in work.children()
             if str(c.name()).startswith(COMP_PREFIX) and str(c.type().name()) == "subnet"]
-
-
-def _producer_of_object_merge(hou, om, work) -> Optional[str]:
-    """Resolve an object_merge's objpath1 to the owning component path, or None."""
-    try:
-        raw = str(om.parm("objpath1").eval())
-    except Exception:
-        return None
-    if not raw:
-        return None
-    # resolve relative to the object_merge node, then find comp_ ancestor under work
-    try:
-        target = om.node(raw)
-    except Exception:
-        target = None
-    if target is None:
-        return None
-    tp = str(target.path())
-    wp = str(work.path())
-    if not tp.startswith(wp + "/"):
-        return None
-    rest = tp[len(wp) + 1:].split("/")
-    if rest and rest[0].startswith(COMP_PREFIX):
-        return wp + "/" + rest[0]
-    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -172,7 +182,9 @@ def ensure_work_container(name: str = "proc_model") -> dict:
 
 @tool
 def add_root_parm(name: str, parm_type: str = "float", size: int = 1,
-                  default: Optional[List[float]] = None, label: str = "") -> dict:
+                  default: Optional[List[float]] = None, label: str = "",
+                  min: Optional[float] = None, max: Optional[float] = None,
+                  strict: bool = False) -> dict:
     """Add a user-facing parameter to the work container (the single source of truth).
 
     The parm is stored as a spare parm named ``p_<name>`` on the work container
@@ -186,6 +198,9 @@ def add_root_parm(name: str, parm_type: str = "float", size: int = 1,
       size: channel count (1 scalar, 3 vector, ...). toggle ignores this.
       default: list of default values (length = size).
       label: UI label.
+      min: minimum value (sets the slider range; applies to all channels). float/int only.
+      max: maximum value (sets the slider range; applies to all channels). float/int only.
+      strict: if True, min/max are hard clamps (user cannot exceed them); else soft range.
     """
     pname = "p_" + name
     comps = [pname + ("xyzw"[i] if size > 1 else "") for i in range(size)]
@@ -194,9 +209,10 @@ def add_root_parm(name: str, parm_type: str = "float", size: int = 1,
         work = _get_work(hou)
         if work.parmTuple(pname) is not None:
             return {"name": pname, "exists": True, "components": comps}
-        tpl = _spare_parm_templates(hou, pname, parm_type, size, default, label)
+        tpl = _spare_parm_templates(hou, pname, parm_type, size, default, label, min, max, strict)
         work.addSpareParmTuple(tpl)
-        return {"name": pname, "components": comps, "default": default}
+        return {"name": pname, "components": comps, "default": default,
+                "min": min, "max": max, "strict": strict}
 
     res, err = hou_client.run(_fn)
     if err is not None:
@@ -208,10 +224,13 @@ def add_root_parm(name: str, parm_type: str = "float", size: int = 1,
 def make_component(name: str) -> dict:
     """Create a component subnet inside the work container.
 
-    Scaffolds two null outputs inside it: ``OUT_geo`` (the component's geometry)
-    and ``OUT_anchors`` (the anchor point cloud it produces for children to
-    consume). Build the component's nodes, then wire your final geo into OUT_geo
-    and your anchor-generating node into OUT_anchors (via expose_anchors).
+    Scaffolds two null taps — ``OUT_geo`` (your final geometry) and ``OUT_anchors``
+    (your anchor points) — promoted to real subnet OUTPUT PORTS by two ``output``
+    nodes: ``geo_port`` (output port 0) and ``anchors_port`` (output port 1). Wire
+    your final geo into ``OUT_geo``; expose your anchor node via expose_anchors
+    (which wires it into ``OUT_anchors``). Other components consume your anchors by
+    connecting their input to your port 1 (see wire_anchor). assemble_output merges
+    every component's port 0 (geo).
     """
     comp_name = COMP_PREFIX + name
 
@@ -220,11 +239,20 @@ def make_component(name: str) -> dict:
         if work.node(comp_name) is not None:
             return {"component": str(work.path()) + "/" + comp_name, "exists": True}
         comp = work.createNode("subnet", comp_name)
-        comp.createNode("null", "OUT_geo")
-        comp.createNode("null", "OUT_anchors")
+        out_geo = comp.createNode("null", "OUT_geo")
+        out_anc = comp.createNode("null", "OUT_anchors")
+        # promote ports via `output` nodes with explicit outputidx (verified: a
+        # vanilla subnet's distinct outputs require explicit outputidx on each)
+        gp = comp.createNode("output", GEO_PORT)
+        gp.setInput(0, out_geo)
+        gp.parm("outputidx").set(GEO_OUTIDX)
+        ap = comp.createNode("output", ANCHORS_PORT)
+        ap.setInput(0, out_anc)
+        ap.parm("outputidx").set(ANCHORS_OUTIDX)
         return {"component": str(comp.path()),
-                "out_geo": str(comp.path()) + "/OUT_geo",
-                "out_anchors": str(comp.path()) + "/OUT_anchors"}
+                "out_geo": str(out_geo.path()),
+                "out_anchors": str(out_anc.path()),
+                "geo_port": GEO_OUTIDX, "anchors_port": ANCHORS_OUTIDX}
 
     res, err = hou_client.run(_fn)
     if err is not None:
@@ -236,9 +264,10 @@ def make_component(name: str) -> dict:
 def expose_anchors(component_path: str, node_path: str, anchor_type: str = "") -> dict:
     """Designate `node_path` as the anchor output of `component_path`.
 
-    Wires node_path -> the component's OUT_anchors (pass-through). The anchor
-    points should carry ``s@anchor_type`` (set via set_vex) so consumers can
-    filter. Records anchor_type as metadata on the component.
+    Wires node_path -> the component's OUT_anchors (which is already promoted to
+    the component's anchors_port, output port 1). The anchor points should carry
+    ``s@anchor_type`` (set via set_vex) so consumers can filter. Records anchor_type
+    as metadata on the component.
     """
     def _fn(hou):
         comp = hou.node(component_path)
@@ -251,13 +280,19 @@ def expose_anchors(component_path: str, node_path: str, anchor_type: str = "") -
         if out is None:
             out = comp.createNode("null", "OUT_anchors")
         out.setInput(0, src)
+        # ensure the anchors_port promoter exists (defensive for older components)
+        ap = comp.node(ANCHORS_PORT)
+        if ap is None:
+            ap = comp.createNode("output", ANCHORS_PORT)
+            ap.setInput(0, out)
+            ap.parm("outputidx").set(ANCHORS_OUTIDX)
         if anchor_type:
             try:
                 comp.setComment("anchor_type=" + anchor_type)
             except Exception:
                 pass
         return {"component": component_path, "out_anchors": str(out.path()),
-                "anchor_type": anchor_type}
+                "anchors_port": ANCHORS_OUTIDX, "anchor_type": anchor_type}
 
     res, err = hou_client.run(_fn)
     if err is not None:
@@ -266,12 +301,22 @@ def expose_anchors(component_path: str, node_path: str, anchor_type: str = "") -
 
 
 @tool
-def wire_anchor(producer_component: str, consumer_component: str) -> dict:
-    """Wire producer's OUT_anchors into the consumer (creates an object_merge in
-    the consumer referencing the producer's anchors). Establishes the dependency
-    edge producer -> consumer. Refuses if it would create a cycle.
+def wire_anchor(producer_component: str, consumer_component: str,
+                consumer_input: int = 0) -> dict:
+    """Connect a consumer's INPUT port to a producer's anchor OUTPUT port, so the
+    consumer can instance children onto the producer's anchors. This is a REAL wire
+    in the work subnet (not an object_merge path ref) — the dependency is visible
+    to auto-layout.
 
-    Both must be `comp_*` subnets under the same work container.
+    Creates an ``in_anchors`` null inside the consumer (wired from the consumer's
+    external input connector). Connect your ``copy_to_points`` "points" input to
+    that node (its path is in the result) to consume the anchors. Establishes the
+    dependency edge producer -> consumer. Refuses if it would create a cycle.
+
+    Args:
+      producer_component: path of the comp_* that produces anchors (OUT_anchors wired).
+      consumer_component: path of the comp_* that consumes them.
+      consumer_input: which input connector on the consumer to use (0..3); default 0.
     """
     def _fn(hou):
         work = _get_work(hou)
@@ -279,24 +324,31 @@ def wire_anchor(producer_component: str, consumer_component: str) -> dict:
         cons = hou.node(consumer_component)
         if prod is None or cons is None:
             raise RuntimeError("producer or consumer not found")
-        prod_anchors = prod.node("OUT_anchors")
-        if prod_anchors is None:
-            raise RuntimeError(f"producer has no OUT_anchors: {producer_component}")
+        prod_anchors_port = prod.node(ANCHORS_PORT)
+        out_anc = prod.node("OUT_anchors")
+        if prod_anchors_port is None or out_anc is None or out_anc.input(0) is None:
+            raise RuntimeError(f"producer has no anchors exposed: {producer_component}")
 
-        # cycle check: would adding producer->consumer close a loop? i.e. does
-        # consumer already (transitively) depend on producer?
+        # cycle check: adding producer->consumer must not close a loop
         edges = _build_edges(hou, work)
         if _reaches(edges, consumer_component, producer_component):
             raise RuntimeError("cycle: consumer already depends on producer")
 
-        om_name = "in_anchors_" + str(prod.name())
-        om = cons.node(om_name)
-        if om is None:
-            om = cons.createNode("object_merge", om_name)
-        rel = _rel(str(om.path()), str(prod_anchors.path()))
-        om.parm("objpath1").set(rel)
+        # real wire in the WORK subnet: consumer input <- producer anchors port
+        out_idx = int(prod_anchors_port.parm("outputidx").eval())
+        cons.setInput(consumer_input, prod, out_idx)
+
+        # internal tap so the agent can reference the incoming anchors by path
+        prod_short = str(prod.name())[len(COMP_PREFIX):] or "src"
+        in_name = "in_anchors_" + prod_short
+        in_node = cons.node(in_name)
+        if in_node is None:
+            in_node = cons.createNode("null", in_name)
+        in_node.setInput(0, cons.indirectInputs()[consumer_input])
         return {"edge": f"{producer_component} -> {consumer_component}",
-                "object_merge": str(om.path()), "objpath": rel}
+                "consumer_anchors_input": str(in_node.path()),
+                "producer_anchors_port": out_idx,
+                "consumer_input": consumer_input}
 
     res, err = hou_client.run(_fn)
     if err is not None:
@@ -305,28 +357,32 @@ def wire_anchor(producer_component: str, consumer_component: str) -> dict:
 
 
 def _build_edges(hou, work) -> List[List[str]]:
-    """All anchor edges [producer_comp, consumer_comp] under work."""
+    """All anchor edges [producer_comp, consumer_comp] under work, read from the
+    REAL input wires between component subnets (consumer input <- producer).
+    Inter-component wires are anchor wires by convention (geometry only flows to
+    the final merge, which is not a component)."""
+    comps = _components(hou, work)
+    compset = set(comps)
     edges = []
-    for comp_path in _components(hou, work):
-        comp = hou.node(comp_path)
-        for child in comp.children():
-            if str(child.type().name()) == "object_merge":
-                prod = _producer_of_object_merge(hou, child, work)
-                if prod:
-                    edges.append([prod, comp_path])
+    for cp in comps:
+        cons = hou.node(cp)
+        try:
+            for src, _out_idx, _in_idx in cons.inputsWithIndices():
+                if src is None:
+                    continue
+                sp = str(src.path())
+                if sp in compset and sp != cp:
+                    edges.append([sp, cp])
+        except Exception:
+            pass
     return edges
 
 
 def _reaches(edges: List[List[str]], src: str, dst: str) -> bool:
-    """Does dst depend on src? i.e. is there a path src -> ... -> dst (producer->consumer)?
-    Cycle when adding producer->consumer: occurs if consumer already reaches producer
-    as a producer (consumer -> ... -> producer). We check: from consumer, can we reach
-    producer following consumer->producer (reverse) edges? Equivalent: does producer
-    already depend on consumer? Here edges are producer->consumer, so 'consumer depends
-    on producer' = producer->...->consumer exists. We refuse if producer->consumer is
-    already reachable (i.e. producer can already reach consumer)."""
-    # producer can reach consumer already?
-    adj = {}
+    """Following producer->consumer edges, can we reach dst from src?
+    Used for cycle detection: adding producer->consumer closes a loop iff consumer
+    already reaches producer, i.e. _reaches(edges, consumer, producer)."""
+    adj: Dict[str, List[str]] = {}
     for p, c in edges:
         adj.setdefault(p, []).append(c)
     stack = [src]
@@ -389,23 +445,20 @@ def set_expression(node_path: str, parm: str, root_parm: Optional[str] = None,
 
 @tool
 def assemble_output(component_paths: List[str], name: str = "OUT") -> dict:
-    """Merge every component's OUT_geo into the work container's final output.
-
-    Uses an ``object_merge`` with path references (cross-subnet safe — ``merge`` via
-    setInput cannot cross subnet boundaries, but object_merge path refs can). This is
-    the final assembly step: call after all components are built and wired.
+    """Merge every component's geometry (output port 0) into the work container's
+    final output via a real ``merge`` node wired to each component. Real wires (no
+    object_merge) so the work subnet auto-layouts in dependency order. Call after
+    all components are built and wired.
     """
     def _fn(hou):
         work = _get_work(hou)
-        om = work.createNode("object_merge", name)
-        om.parm("numobj").set(len(component_paths))
-        paths = []
+        mg = work.createNode("merge", name)
         for i, cp in enumerate(component_paths):
-            out_geo_path = cp.rstrip("/") + "/OUT_geo"
-            rel = _rel(str(om.path()), out_geo_path)
-            om.parm("objpath" + str(i + 1)).set(rel)
-            paths.append(out_geo_path)
-        return {"out": str(om.path()), "merged": paths}
+            comp = hou.node(cp)
+            if comp is None:
+                raise RuntimeError(f"component not found: {cp}")
+            mg.setInput(i, comp, GEO_OUTIDX)  # each component's geo port (output 0)
+        return {"out": str(mg.path()), "merged": list(component_paths)}
 
     res, err = hou_client.run(_fn)
     if err is not None:
@@ -415,9 +468,9 @@ def assemble_output(component_paths: List[str], name: str = "OUT") -> dict:
 
 @tool
 def work_status() -> dict:
-    """Dump the current work container's structure: spare parms (name/type/value),
-    components (their OUT_geo/OUT_anchors + anchor_type), anchor edges (who->who),
-    and cook health. Call this to know exactly where the build stands."""
+    """Dump the current work container's structure: spare parms (name/value),
+    components (their OUT_geo/OUT_anchors ports + anchor_type), and anchor edges
+    (who->who, read from the real wires). Call this to know where the build stands."""
     def _fn(hou):
         work = _get_work(hou)
         # spare parms (spareParms() — verified; spareParmTuples() does not exist)
@@ -438,13 +491,15 @@ def work_status() -> dict:
         comps = []
         for cp in _components(hou, work):
             comp = hou.node(cp)
+            out_anc = comp.node("OUT_anchors")
+            has_anchors = out_anc is not None and out_anc.input(0) is not None
             comps.append({
                 "path": cp,
                 "out_geo": (str(comp.node("OUT_geo").path()) if comp.node("OUT_geo") else None),
-                "out_anchors": (str(comp.node("OUT_anchors").path()) if comp.node("OUT_anchors") else None),
+                "anchors_port": ANCHORS_OUTIDX if has_anchors else None,
                 "comment": str(comp.comment() or ""),
             })
-        # edges
+        # edges (real wires)
         edges = _build_edges(hou, work)
         return {"work": str(work.path()), "parms": parms, "components": comps,
                 "anchor_edges": edges}
@@ -458,18 +513,21 @@ def work_status() -> dict:
 @tool
 def anchor_graph() -> dict:
     """Report the anchor dependency DAG: edges, cycles, and unconsumed anchors
-    (components whose OUT_anchors nobody consumes). Use to verify the build is
-    wired correctly before exporting."""
+    (components that PRODUCE anchors — OUT_anchors wired — that nobody consumes).
+    Use to verify the build is wired correctly before exporting."""
     def _fn(hou):
         work = _get_work(hou)
         comps = _components(hou, work)
         edges = _build_edges(hou, work)
         consumed = {e[0] for e in edges}
-        unconsumed = [c for c in comps
-                      if c not in consumed
-                      and hou.node(c).node("OUT_anchors") is not None]
+        unconsumed = []
+        for c in comps:
+            out_anc = hou.node(c).node("OUT_anchors")
+            produces = out_anc is not None and out_anc.input(0) is not None
+            if produces and c not in consumed:
+                unconsumed.append(c)
         # cycle detection (DFS)
-        adj = {}
+        adj: Dict[str, List[str]] = {}
         for p, c in edges:
             adj.setdefault(p, []).append(c)
         cycles = []

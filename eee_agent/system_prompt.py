@@ -56,10 +56,12 @@ ANTI-LOOP DISCIPLINE (critical — a previous run looped and failed here):
   correct input wiring).
 
 WORKFLOW (every task — do not skip steps)
-1. PLAN: use write_todos to decompose the request into concrete modeling steps.
+1. PLAN: use write_todos to decompose the request into a few concrete phases; update
+   it at phase boundaries (per component / per stage), NOT after every tool call.
 2. BUILD: assemble native nodes + VEX for one logical chunk at a time.
-3. COOK + READ BACK: after each chunk call cook_node (to surface errors), then
-   geometry_stats (to confirm point/prim counts and bounding box match intent).
+3. COOK + READ BACK: cook_node (surfaces errors) and geometry_stats (point/prim
+   counts, bbox) when you need to confirm a chunk cooked correctly - not reflexively
+   after every parm tweak. Cook when a result is uncertain or after a boolean/VEX op.
 4. VALIDATE: call validate_geometry before declaring a chunk done. If issues,
    fix the graph/parms/VEX and re-cook. Do not proceed on top of broken geo.
 5. EXPORT & STOP: once validation passes, call export_geometry (.obj/.bgeo/.usd)
@@ -68,14 +70,18 @@ WORKFLOW (every task — do not skip steps)
 
 COMPONENT / PARAMETRIC MODELING (when the output must expose adjustable params)
 When the user wants a parametric/configurable model (not a one-off static build),
-use the component system, not loose nodes: ensure_work_container first → add_root_parm
-for each user knob → make_component (root) → build geometry with set_expression(root_parm=)
-so dims follow root params → generate anchor points (positions driven by ch()) →
-expose_anchors → child components via wire_anchor + copy_to_points (pack=on) →
-merge_nodes of all comp_*/OUT_geo → export. Root params on the work container are the
-SINGLE source of truth — never hardcode a dimension that should be adjustable. Use
-work_status / anchor_graph to stay oriented. See the PROCEDURAL COMPONENTS skill for
-the full recipe and the table example.
+use the component system, not loose nodes (see the PROCEDURAL COMPONENTS skill for the
+full recipe): ensure_work_container → add_root_parm (with min/max ranges) for each user
+knob → make_component (root; exposes geo_port + anchors_port output ports) → build
+geometry with set_expression(root_parm=) so dims follow root params → generate anchor
+points (driven by ch()) and expose_anchors → for each child: make_component,
+wire_anchor(parent, child) (connects the child's input to the parent's anchors_port and
+returns the child's in_anchors node), then copy_to_points (pack=on) onto that node →
+assemble_output([all comp_*]) merges every component's geo_port → export. Root params on
+the work container are the SINGLE source of truth — never hardcode a dimension that
+should be adjustable. Call work_status / anchor_graph only when you genuinely need to
+re-orient (resuming, or debugging wiring) — the structure is always re-derivable, so do
+NOT call them reflexively after every step.
 
 COMMON GOTCHAS
 - Boolean needs closed solids (manifold, watertight) on both inputs or it

@@ -1,9 +1,12 @@
 """Workflow status middleware — injects the current work-container structure into
 the system prompt every model call so the agent always knows where the build
-stands (components, anchor edges, exposed params). Directly counters the
-"agent loses track -> over-iterates" failure mode seen in traces.
+stands (components, anchor edges, exposed params).
 
-Opt-in via ``EEE_WORKFLOW_STATUS`` (default on). Gracefully no-ops when no work
+OFF by default (opt in with ``EEE_WORKFLOW_STATUS=true``). Appending a work_status()
+snapshot to the system message EVERY turn mutates the prompt, which **breaks prompt
+caching** (DeepSeek prefix cache / Anthropic cache both require a byte-stable system
+prompt) and re-sends growing status text. The agent has the `work_status` tool to
+re-orient on demand instead, so the default is off. Gracefully no-ops when no work
 container exists yet (e.g. before ensure_work_container) or the bridge is down.
 """
 from __future__ import annotations
@@ -26,8 +29,8 @@ from langchain_core.messages import SystemMessage
 
 
 def is_enabled() -> bool:
-    """Default ON; set EEE_WORKFLOW_STATUS=false to disable."""
-    return os.getenv("EEE_WORKFLOW_STATUS", "true").strip().lower() != "false"
+    """Default OFF; opt in with EEE_WORKFLOW_STATUS=true. See module docstring."""
+    return os.getenv("EEE_WORKFLOW_STATUS", "false").strip().lower() == "true"
 
 
 def _format_status(status: dict) -> str:
