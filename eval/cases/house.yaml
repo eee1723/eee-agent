@@ -1,0 +1,23 @@
+# Each case = one agent run + assertions on the exported geometry.
+# Run with:  python -m eval.run_eval            (runs the agent per case)
+#       or:  python -m eval.run_eval --dry      (evaluate already-exported files)
+
+- name: 3-storey house with windows
+  prompt: "Build a 3-storey house with windows on each floor and a flat roof, then export to output/house.obj"
+  export_path: output/house.obj
+  expect:
+    min_verts: 50          # a real house, not an empty export
+    max_verts: 500000      # not exploded
+    min_faces: 20
+    bbox_min: [-100, -100, -100]   # sanity envelope (agent may center at origin)
+    bbox_max: [100, 100, 100]
+
+- name: simple box tower (smoke)
+  prompt: "Build a simple 4m tall box tower 2x2m, then export to output/tower.obj"
+  export_path: output/tower.obj
+  expect:
+    min_verts: 8
+    max_verts: 1000
+    min_faces: 6
+    bbox_min: [-2, -1, -2]
+    bbox_max: [2, 5, 2]

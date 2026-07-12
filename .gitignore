@@ -1,0 +1,44 @@
+# --- secrets / env ---
+.env
+.env.local
+*.env.local
+
+# --- agent venv (machine-specific Python build; rebuild per machine, see SETUP.md) ---
+.venv/
+
+# --- ContextSeek local memory store + seed marker (machine-local) ---
+.contextseek/
+.contextseek_seeded
+
+# --- generated geometry / exports / hip files ---
+output/
+*.hip
+*.hiplc
+*.hipnc
+*.bgeo
+*.bgeo.sc
+*.obj
+*.usd
+*.usda
+*.ply
+# (keep examples/ committed if you add sample prompts there — it's not excluded)
+
+# --- python ---
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+
+# --- Phoenix local data (if run locally) ---
+*.phoenix*
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- editor ---
+.vscode/
+.idea/

@@ -1,0 +1,31 @@
+[project]
+name = "eee-agent"
+version = "0.1.0"
+description = "deepagents-based procedural modeling agent for SideFX Houdini 21"
+requires-python = ">=3.11"
+dependencies = [
+    # agent harness + model abstraction
+    "deepagents>=0.2",
+    "langchain>=1.0",
+    "langchain-openai>=1.0",      # DeepSeek is OpenAI-compatible; also OpenAI provider
+    "langchain-anthropic>=0.3",   # Anthropic provider (optional swap)
+    "langgraph>=1.0",
+    # Houdini RPC bridge. MUST match Houdini's bundled rpyc EXACTLY:
+    # Houdini 21.0.440 ships rpyc 4.1.0; rpyc 5.x/6.x use an incompatible wire
+    # protocol ("ValueError: invalid message type: 18"). Re-check + re-pin if
+    # Houdini is upgraded.
+    "rpyc==4.1.0",
+    # misc
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+eval = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["eee_agent*"]
