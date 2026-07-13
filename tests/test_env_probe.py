@@ -1,7 +1,38 @@
+import os
+import re
+import subprocess
+import tempfile
 from pathlib import Path
+
+import pytest
 
 
 PROBE = Path("scripts/env_probe.sh")
+
+
+def _bash_command() -> str:
+    git_bash = Path(r"C:\Program Files\Git\bin\bash.exe")
+    if os.name == "nt" and git_bash.is_file():
+        return str(git_bash)
+    return "bash"
+
+
+def _run_probe_with_env_file(contents: bytes) -> subprocess.CompletedProcess[str]:
+    with tempfile.TemporaryDirectory(prefix=".env-probe-test-", dir=Path.cwd()) as tmp:
+        env_file = Path(tmp, "fixture.env")
+        env_file.write_bytes(contents)
+        env = os.environ.copy()
+        env["EEE_PROBE_ENV_FILE"] = env_file.relative_to(Path.cwd()).as_posix()
+        return subprocess.run(
+            [_bash_command(), "-x", PROBE.as_posix()],
+            cwd=Path.cwd(),
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
 
 
 def test_probe_is_tracked_in_the_foundation_branch() -> None:
@@ -34,3 +65,70 @@ def test_probe_sets_placeholder_inside_python_harness() -> None:
         '"'
     )
     assert shell_assignment not in text
+
+
+def test_probe_python_processes_are_side_effect_free() -> None:
+    text = PROBE.read_text(encoding="utf-8")
+    python_flags = re.findall(
+        r'"(?:\$[A-Z_]+(?:/[^"\n]*)?|[^"\n]*python\.exe)" '
+        r'(?:(-B) )?(?:-c|--version)',
+        text,
+    )
+    assert len(python_flags) >= 5
+    assert all(flag == "-B" for flag in python_flags)
+
+    harness = text[text.index("printf 'agent harness:") :]
+    import_agent = "from eee_agent.app import build_agent"
+    side_effect_guards = (
+        "os.environ['EEE_CONTEXTSEEK'] = 'false'",
+        "os.environ['EEE_TRACING'] = ''",
+        "os.environ.setdefault('DEEPSEEK_API_KEY', 'probe-placeholder-not-used')",
+    )
+    assert import_agent in harness
+    assert all(guard in harness for guard in side_effect_guards)
+    assert all(harness.index(guard) < harness.index(import_agent) for guard in side_effect_guards)
+    assert "set +e" in text
+    assert text.rstrip().endswith("exit 0")
+
+
+def test_probe_uses_python_dotenv_without_shell_secret() -> None:
+    text = PROBE.read_text(encoding="utf-8")
+    assert "from dotenv import dotenv_values" in text
+    assert "KEY=$(" not in text
+    assert "grep -E '^DEEPSEEK_API_KEY='" not in text
+
+
+@pytest.mark.parametrize(
+    ("contents", "expected_status"),
+    [
+        pytest.param(
+            b'OTHER=value\r\nDEEPSEEK_API_KEY=""\r\n',
+            "[WARN] DEEPSEEK_API_KEY is empty or a placeholder",
+            id="crlf-quoted-empty",
+        ),
+        pytest.param(
+            b'DEEPSEEK_API_KEY="sk-your-deepseek-key"\n',
+            "[WARN] DEEPSEEK_API_KEY is empty or a placeholder",
+            id="quoted-placeholder",
+        ),
+        pytest.param(
+            b"OTHER=value\n",
+            "[WARN] DEEPSEEK_API_KEY is missing",
+            id="missing-key",
+        ),
+        pytest.param(
+            b'DEEPSEEK_API_KEY="sk-your-deepseek-key"\n'
+            b'DEEPSEEK_API_KEY="unit-test-secret"\n',
+            "[ok]   DEEPSEEK_API_KEY is set",
+            id="duplicate-effective-last-value",
+        ),
+    ],
+)
+def test_probe_reports_effective_dotenv_key_status(
+    contents: bytes, expected_status: str
+) -> None:
+    result = _run_probe_with_env_file(contents)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0
+    assert expected_status in output
+    assert "unit-test-secret" not in output
