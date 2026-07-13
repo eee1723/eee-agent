@@ -245,6 +245,24 @@ def test_domain_event_timestamp_snapshots_mutable_timezone() -> None:
     assert event.to_dict()["timestamp"] == "2026-07-13T04:00:00+00:00"
 
 
+def test_domain_event_timestamp_rejects_datetime_subclasses() -> None:
+    class WireCorruptingDatetime(datetime):
+        def astimezone(self, tz: tzinfo | None = None) -> "WireCorruptingDatetime":
+            return self
+
+        def isoformat(self, sep: str = "T", timespec: str = "auto") -> str:
+            return "not-a-valid-wire-timestamp"
+
+    timestamp = WireCorruptingDatetime(
+        2026, 7, 13, 4, 0, tzinfo=timezone.utc
+    )
+
+    with pytest.raises(TypeError, match="timestamp must be a datetime"):
+        DomainEvent.create(
+            event_type="run.created", payload={}, timestamp=timestamp
+        )
+
+
 @pytest.mark.parametrize(
     "event_id",
     [None, 1, False, type("StrSubclass", (str,), {})(_VALID_EVENT_ID)],

@@ -83,7 +83,7 @@ class DomainEvent:
             raise TypeError("schema_version must be the integer 1")
         if self.schema_version != 1:
             raise ValueError("only schema_version 1 is supported")
-        if not isinstance(self.timestamp, datetime):
+        if type(self.timestamp) is not datetime:
             raise TypeError("timestamp must be a datetime")
         if self.timestamp.tzinfo is None or self.timestamp.utcoffset() is None:
             raise ValueError("timestamp must be timezone-aware")
