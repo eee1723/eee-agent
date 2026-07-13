@@ -94,3 +94,68 @@ def test_artifact_ref_rejects_invalid_media_type(media_type: str) -> None:
 )
 def test_artifact_ref_accepts_concrete_media_types(media_type: str) -> None:
     assert _make_artifact_ref(media_type=media_type).media_type == media_type
+
+@pytest.mark.parametrize(
+    "device_name",
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"COM{number}" for number in range(1, 10)]
+    + [f"LPT{number}" for number in range(1, 10)],
+)
+@pytest.mark.parametrize("extension", ["", ".txt"])
+def test_artifact_ref_rejects_windows_reserved_device_components(
+    device_name: str, extension: str
+) -> None:
+    component = f"{device_name.lower()}{extension}"
+    with pytest.raises(ValueError, match="artifact path"):
+        _make_artifact_ref(relative_path=f"runs/{component}")
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "runs/file.txt:stream",
+        "runs/name<report.json",
+        "runs/name>report.json",
+        'runs/name"report.json',
+        "runs/name|report.json",
+        "runs/name?report.json",
+        "runs/name*report.json",
+    ],
+)
+def test_artifact_ref_rejects_windows_invalid_component_characters(
+    path: str,
+) -> None:
+    with pytest.raises(ValueError, match="artifact path"):
+        _make_artifact_ref(relative_path=path)
+
+@pytest.mark.parametrize("code_point", range(0x20))
+def test_artifact_ref_rejects_ascii_control_characters(code_point: int) -> None:
+    path = f"runs/name{chr(code_point)}report.json"
+    with pytest.raises(ValueError, match="artifact path"):
+        _make_artifact_ref(relative_path=path)
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "runs/name ",
+        "runs/name.",
+        "runs/name /report.json",
+        "runs/name./report.json",
+    ],
+)
+def test_artifact_ref_rejects_components_ending_in_space_or_period(
+    path: str,
+) -> None:
+    with pytest.raises(ValueError, match="artifact path"):
+        _make_artifact_ref(relative_path=path)
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "runs/My Report/report v1.final.json",
+        "runs/vendor.example/package-1.0/artifact.tar.gz",
+        "runs/com10/lpt0/console.json",
+        "runs/AUXILIARY/COM1-data/LPT9_report.json",
+    ],
+)
+def test_artifact_ref_accepts_windows_safe_components(path: str) -> None:
+    assert _make_artifact_ref(relative_path=path).relative_path == path

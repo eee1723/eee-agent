@@ -12,6 +12,21 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MEDIA_TYPE_RE = re.compile(
     r"^[A-Za-z0-9!#$%&'+.^_`|~-]+/[A-Za-z0-9!#$%&'+.^_`|~-]+$"
 )
+# Windows reserves these device basenames even when a component has an extension.
+_WINDOWS_RESERVED_COMPONENT_RE = re.compile(
+    r"(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?",
+    flags=re.IGNORECASE | re.ASCII,
+)
+# NTFS ADS separators, Windows punctuation restrictions, and ASCII controls.
+_WINDOWS_INVALID_COMPONENT_CHAR_RE = re.compile(r'[\x00-\x1f<>:"|?*]')
+
+
+def _is_unsafe_windows_component(component: str) -> bool:
+    return (
+        _WINDOWS_INVALID_COMPONENT_CHAR_RE.search(component) is not None
+        or component.endswith((" ", "."))
+        or _WINDOWS_RESERVED_COMPONENT_RE.fullmatch(component) is not None
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +57,8 @@ class ArtifactRef:
             or path == PurePosixPath(".")
             or str(path) != self.relative_path
         ):
+            raise ValueError(f"unsafe artifact path: {self.relative_path!r}")
+        if any(_is_unsafe_windows_component(component) for component in path.parts):
             raise ValueError(f"unsafe artifact path: {self.relative_path!r}")
         if not isinstance(self.sha256, str) or not _SHA256_RE.fullmatch(self.sha256):
             raise ValueError("sha256 must contain exactly 64 lowercase hex characters")
