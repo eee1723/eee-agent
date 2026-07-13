@@ -115,42 +115,95 @@ Task 5, durable domain events:
 - Final event suite passed 83/83, core passed 270/270, full passed 292/292.
 - Specification and code-quality reviews approved.
 
-### Implemented, Review Incomplete
+### Completed And Approved (Tasks 6-12, resumed on the new computer 2026-07-13)
 
-Task 6, provider contracts and registry:
+Task 6, provider contracts and registry — COMPLETE:
 
-- Commits:
-  - `ddb8c62 feat: add provider contracts and registry`
-  - `5223136 fix: align provider contracts with specification`
-  - `76b1af9 test: align provider contract specification`
-- Production contracts, registry, environment secret resolver, and package exports
-  are implemented.
-- The first specification review found nullable annotation, exact-message, and
-  exact-test-block differences. `5223136` fixed production differences.
-- The second specification review found only literal test-block differences.
-  `76b1af9` replaced the test block as requested.
-- A final specification re-review was started but its agent connection failed
-  before returning a verdict.
-- Code-quality review for Task 6 has not started.
-- Last full suite before the literal test-only alignment: 296 passed.
-- Post-`76b1af9` focused provider contract suite: 4 passed.
+- Range `35e2cd5..76b1af9` passed the final independent specification re-review
+  (APPROVED, no findings) and an independent code-quality review.
+- Code-quality follow-up added boundary/secret/immutability coverage in
+  `4fb4a80 test: cover provider contract boundaries and secret resolution`.
+- Full suite 316 passed after Task 6.
 
-Resume Task 6 by doing these steps in order:
+Task 7, DeepSeek V4 Anthropic adapter — COMPLETE (`b979b0d`):
 
-1. Re-run independent specification review over `35e2cd5..76b1af9`.
-2. Fix and re-review any specification issue before proceeding.
-3. Run an independent code-quality review over the approved cumulative range.
-4. Return quality findings to the Task 6 implementation worker and re-review.
-5. Only after both reviews approve, mark Task 6 complete and begin Task 7.
+- `ChatAnthropic` against `https://api.deepseek.com/anthropic`, exact model names
+  only, aliases rejected, thinking enabled/effort max/output_version v1, image
+  input disabled. No-network `_get_request_payload` contract proves thinking +
+  tool_use survive before tool_result replay (acceptance §19.8), verified against
+  pinned langchain-anthropic 1.4.8. Spec review APPROVED; code-quality gaps
+  (thinking-disabled path, guard clauses, trailing-slash, leak check) covered.
 
-### Not Started
+Task 8, standard adapters + provider-neutral factory — COMPLETE (`e333c5d`):
 
-- Task 7: DeepSeek V4 Anthropic adapter and no-network thinking/tool replay payload.
-- Task 8: Anthropic/OpenAI adapters and provider-neutral model factory.
-- Task 9: normalized provider events and legacy Panel JSON-lines compatibility.
-- Task 10: explicit Deep Agents harness without implicit general-purpose/task.
-- Task 11: runtime dependency version report and CLI command.
-- Task 12: configuration documentation and final Foundation verification.
+- `model.py` imports no concrete provider class (exit criterion #5);
+  anthropic.py/openai.py wrap native `ChatAnthropic`/`ChatOpenAI` (exit #10).
+  `config.LlmConfig` extended with validated thinking/effort/max_output_tokens.
+  Code-quality fixes over the plan: OpenAI propagates max_tokens, EEE_LLM_EFFORT
+  normalized, factory uses explicit per-provider branches with a rejecting else.
+
+Task 9, normalized provider events — COMPLETE (`c2937e6`):
+
+- The 8 provider-neutral event types (spec §12.4) + `normalize_message_chunk`;
+  `cli.py` routes its streaming branch through `_legacy_stream_events` keeping
+  reasoning/text separate (§11.2). Added tests/ package `__init__.py` markers to
+  disambiguate the core/providers test_events.py basename collision. Locked the
+  legacy tool_call/tool_call_args/usage dict shapes and the name-less arg path.
+
+Task 10, explicit Deep Agents harness — COMPLETE (`dcd63d7`):
+
+- `configure_deepagents_harness()` registers
+  `HarnessProfile(general_purpose_subagent=enabled=False)` for both "anthropic"
+  (DeepSeek via ChatAnthropic) and "openai" keys before `create_deep_agent`. The
+  compiled graph has no implicit `task` tool while the Houdini tool surface
+  (e.g. create_node) is intact (spec §5 contract test, acceptance #9). Verified
+  the real deepagents 0.6.12 constructor signatures. Test parametrized over
+  deepseek+openai and is self-contained.
+
+Task 11, runtime version report + CLI — COMPLETE (`0b12e1a`):
+
+- `runtime_version_report()` (eee_agent/python/platform/dependencies) exported
+  from core and surfaced via `python -m eee_agent.cli versions` (exit #11, §17).
+  PackageNotFoundError degrades a missing dist to None. Tests lock the field set,
+  the rpyc==4.1.0 Houdini wire-compat pin, and the missing-distribution path.
+
+Task 12, configuration documentation + final verification — COMPLETE (`5eb338c`):
+
+- `.env.example` documents the strict DeepSeek V4 transport (official Anthropic
+  endpoint, thinking/effort/max_tokens, alias warning). EEE_TRACING stays
+  commented.
+
+### Foundation Final Verification (2026-07-13, new computer)
+
+- `uv lock --check`: exit 0 (66 packages, lock matches).
+- `uv sync --frozen --extra eval`: exit 0 (venv matches lock exactly).
+- Full offline pytest: **369 passed, 1 skipped** (skip = WSL probe, diagnostic).
+- `compileall eee_agent houdini_side eval`: exit 0.
+- Agent graph smoke: `CompiledStateGraph`; implicit `task` absent, `create_node`
+  present.
+- `python -m eee_agent.cli versions`: valid JSON with all locked versions
+  (deepagents 0.6.12, langchain-anthropic 1.4.8, rpyc 4.1.0, langgraph 1.2.9).
+- `bash scripts/env_probe.sh`: exit 0; Houdini 21.0.440 found, Houdini rpyc 4.1.0
+  == venv rpyc 4.1.0, build_agent() compiles.
+- Diff scope: only Foundation files touched; README/CLAUDE.md/install_menu.py
+  unchanged (respects the main-worktree preserve rule). No test placeholder
+  values leaked into product code or config.
+
+**Foundation milestone is COMPLETE.** All 12 Foundation exit criteria are met.
+Foundation branch tip: `5eb338c` (after Task 12). The next milestone is Runtime
+(Session/Run service, SQLite persistence, WebSocket protocol, event replay).
+
+### Known Machine-Config Caveat (not a Foundation defect)
+
+The Foundation `uv.lock` intentionally omits optional tracing deps (Phoenix /
+openinference are later milestones). If a machine's `.env` sets
+`EEE_TRACING=phoenix` (a leftover from the pre-Foundation venv that shipped
+openinference), `build_agent()` raises `ModuleNotFoundError: openinference` at
+startup. `.env.example` keeps `EEE_TRACING` commented for this reason. To run
+Foundation on such a machine, comment out `EEE_TRACING` in `.env` (or install
+openinference separately). All Foundation tests are self-contained against this
+(via monkeypatch). A graceful-degradation guard in `setup_tracing` is a candidate
+follow-up but is out of the Foundation plan's stated scope.
 
 Runtime, SQLite, WebSocket, Restricted HoudiniBridge, docked UI, strict modeling
 validators, capture/vision, Phoenix/LangSmith integration changes, and evaluation
@@ -296,18 +349,26 @@ git -C E:\eee-agent worktree add -b feature/foundation `
 Start a new development conversation from the Foundation worktree and use:
 
 ```text
-Continue EEE Agent development in the current feature/foundation worktree.
-First read, in order:
-1. docs/superpowers/specs/2026-07-13-houdini-general-agent-architecture-design.md
-2. docs/superpowers/plans/2026-07-13-foundation.md
-3. docs/handoffs/2026-07-13-foundation-migration.md
+Foundation is COMPLETE on feature/foundation (tip 5eb338c after Task 12). To
+verify on a new machine, checkout feature/foundation, then run:
 
-Do not restart planning or alter the approved architecture. Resume Foundation
-Task 6 at the pending final specification re-review for range
-35e2cd5..76b1af9. After specification approval, perform independent code-quality
-review, fix and re-review any findings, then continue Tasks 7-12 using fresh
-implementation, specification-review, and code-quality-review subagents. Preserve
-unrelated user changes and use official provider/Houdini APIs rather than guesses.
+  uv sync --extra eval --python 3.11
+  uv lock --check
+  uv run --extra eval pytest -q        # expect 369 passed, 1 skipped
+  uv run python -m eee_agent.cli versions
+
+Then read, in order:
+1. docs/superpowers/specs/2026-07-13-houdini-general-agent-architecture-design.md
+2. docs/handoffs/2026-07-13-foundation-migration.md (Foundation Progress + Final
+   Verification sections record exactly what shipped and the open caveats).
+
+Do not restart planning or alter the approved architecture. The next milestone is
+Runtime (spec §18.2: Session/Run service, SQLite persistence, WebSocket token
+protocol, streaming, event replay). Produce a detailed Runtime implementation
+plan — mirroring the Foundation plan's task-by-task structure — and get it
+approved before writing Runtime code. Continue to use fresh implementation,
+specification-review, and code-quality-review subagents, preserve unrelated user
+changes, and prefer official provider/Houdini APIs over guesses.
 ```
 
 ## Migration Completion Checklist
