@@ -129,6 +129,54 @@ def _todo_dict(t):
             "status": getattr(t, "status", None)}
 
 
+def _legacy_stream_events(chunk) -> list[dict[str, object]]:
+    """Map provider-neutral events onto the current JSON-lines protocol."""
+    from eee_agent.providers.events import (
+        ReasoningDelta,
+        TextDelta,
+        ToolCallArgumentsDelta,
+        ToolCallStarted,
+        UsageUpdated,
+    )
+    from eee_agent.providers.normalize import normalize_message_chunk
+
+    legacy: list[dict[str, object]] = []
+    for event in normalize_message_chunk(chunk):
+        if isinstance(event, ReasoningDelta):
+            legacy.append({"type": "thinking", "text": event.text})
+        elif isinstance(event, TextDelta):
+            legacy.append({"type": "token", "text": event.text})
+        elif isinstance(event, ToolCallStarted):
+            legacy.append(
+                {
+                    "type": "tool_call",
+                    "id": event.call_id,
+                    "name": event.name,
+                    "index": event.index,
+                    "args": "",
+                }
+            )
+        elif isinstance(event, ToolCallArgumentsDelta):
+            legacy.append(
+                {
+                    "type": "tool_call_args",
+                    "id": event.call_id,
+                    "index": event.index,
+                    "args": event.arguments_delta,
+                }
+            )
+        elif isinstance(event, UsageUpdated):
+            legacy.append(
+                {
+                    "type": "usage",
+                    "tokens_in": event.input_tokens,
+                    "tokens_out": event.output_tokens,
+                    "tokens_total": event.total_tokens,
+                }
+            )
+    return legacy
+
+
 async def _run_turn(agent, text: str):
     """Run one agent turn, emitting rich JSON-line events. Cancellable (stop)."""
     import time
@@ -157,23 +205,15 @@ async def _run_turn(agent, text: str):
                         step = st
                 content = getattr(chunk, "content", "")
                 if cls == "AIMessageChunk":
-                    # reasoning/thinking content (DeepSeek reasoning_content / Claude thinking)
-                    ak = getattr(chunk, "additional_kwargs", {}) or {}
-                    rc = ak.get("reasoning_content") if isinstance(ak, dict) else None
-                    if rc:
-                        _emit({"type": "thinking", "text": str(rc)})
-                    if content:
-                        _emit({"type": "token",
-                               "text": content if isinstance(content, str) else str(content)})
-                    for tc in (getattr(chunk, "tool_call_chunks", None) or []):
-                        if isinstance(tc, dict) and tc.get("name"):
-                            _emit({"type": "tool_call", "name": tc.get("name"),
-                                   "args": tc.get("args", "")})
+                    for legacy in _legacy_stream_events(chunk):
+                        legacy_type = legacy["type"]
+                        if legacy_type == "usage":
+                            tok_in += int(legacy["tokens_in"])
+                            tok_out += int(legacy["tokens_out"])
+                            continue
+                        _emit(legacy)
+                        if legacy_type == "tool_call":
                             metric()
-                    um = getattr(chunk, "usage_metadata", None)
-                    if isinstance(um, dict):
-                        tok_in += um.get("input_tokens", 0)
-                        tok_out += um.get("output_tokens", 0)
                 elif cls == "ToolMessage":
                     _emit({"type": "tool_result",
                            "name": getattr(chunk, "name", "tool"),
