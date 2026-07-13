@@ -20,3 +20,17 @@ def test_probe_remains_read_only_and_non_fatal() -> None:
     assert "set +e" in text
     assert "rm -" not in text
     assert "git clean" not in text
+
+
+def test_probe_sets_placeholder_inside_python_harness() -> None:
+    text = PROBE.read_text(encoding="utf-8")
+    assert (
+        "os.environ.setdefault('DEEPSEEK_API_KEY', 'probe-placeholder-not-used')"
+        in text
+    )
+    shell_assignment = (
+        'DEEPSEEK_API_KEY="'
+        "${DEEPSEEK_API_KEY:-probe-placeholder-not-used}"
+        '"'
+    )
+    assert shell_assignment not in text

@@ -98,8 +98,8 @@ fi
 
 printf 'agent harness:\n'
 if [ -n "$VENV_PY" ]; then
-  if DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-probe-placeholder-not-used}" \
-    "$VENV_PY" -c "from eee_agent.app import build_agent; build_agent()" \
+  if "$VENV_PY" -c \
+    "import os; os.environ.setdefault('DEEPSEEK_API_KEY', 'probe-placeholder-not-used'); from eee_agent.app import build_agent; build_agent()" \
     >/dev/null 2>&1; then
     ok "build_agent() compiles"
   else
