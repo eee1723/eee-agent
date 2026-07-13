@@ -1,13 +1,8 @@
-"""Assemble the deepagents Houdini procedural-modeling agent.
+"""Assemble the Deep Agents Houdini agent.
 
-create_deep_agent signature verified 2026-07-11 against the installed package:
-  create_deep_agent(model=str|BaseChatModel, tools=..., *, system_prompt=...,
-                    skills=list[str]|None, memory=list[str]|None, ...)
-We pass model (object), tools, and system_prompt. skills=/memory= are available
-but their loading depends on the deepagents backend path resolution; for v1 the
-skill + AGENTS.md content is embedded into the system prompt (see
-system_prompt.build_system_prompt) for maximum robustness. Migrate to native
-skills=/memory= after empirically verifying backend path behavior.
+Foundation keeps the existing tool surface for compatibility but explicitly
+disables Deep Agents' auto-added general-purpose subagent. Capability-specific
+subagents will be registered later with bounded tools and structured outputs.
 """
 from __future__ import annotations
 
@@ -16,6 +11,7 @@ import os
 from deepagents import create_deep_agent
 from langgraph.graph.state import CompiledStateGraph
 
+from eee_agent.harness import configure_deepagents_harness
 from eee_agent.model import build_model
 from eee_agent.system_prompt import build_system_prompt
 from eee_agent.tools.registry import all_tools
@@ -83,4 +79,5 @@ def build_agent() -> CompiledStateGraph:
                   system_prompt=build_system_prompt(), middleware=middleware)
     if backend is not None:
         kwargs["backend"] = backend
+    configure_deepagents_harness()
     return create_deep_agent(**kwargs)
