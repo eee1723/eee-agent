@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -18,6 +20,21 @@ class ErrorCategory(StrEnum):
     CRITICAL_RECOVERY = "critical_recovery"
 
 
+# Codes are dot-separated lowercase segments containing letters, digits, or underscores.
+_ERROR_CODE_RE = re.compile(r"[a-z0-9_]+(?:\.[a-z0-9_]+)+")
+
+
+def _normalize_string_sequence(value: object, field_name: str) -> tuple[str, ...]:
+    if isinstance(value, str) or not isinstance(value, Sequence):
+        raise ValueError(f"AgentError.{field_name} must be a sequence of strings")
+    items = tuple(value)
+    if any(not isinstance(item, str) or not item.strip() for item in items):
+        raise ValueError(
+            f"AgentError.{field_name} must contain only non-empty strings"
+        )
+    return items
+
+
 @dataclass(frozen=True, slots=True)
 class AgentError:
     code: str
@@ -31,10 +48,36 @@ class AgentError:
     cause_chain: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if "." not in self.code or self.code.startswith(".") or self.code.endswith("."):
+        if not isinstance(self.code, str) or not _ERROR_CODE_RE.fullmatch(self.code):
             raise ValueError("AgentError.code must be a namespaced value")
-        if not self.message_for_user.strip():
+        if type(self.category) is not ErrorCategory:
+            raise ValueError("AgentError.category must be an ErrorCategory")
+        if not isinstance(self.message_for_user, str) or not self.message_for_user.strip():
             raise ValueError("AgentError.message_for_user must not be empty")
+        if self.technical_detail_ref is not None and (
+            not isinstance(self.technical_detail_ref, str)
+            or not self.technical_detail_ref.strip()
+        ):
+            raise ValueError(
+                "AgentError.technical_detail_ref must be a non-empty string or None"
+            )
+        for field_name in (
+            "retryable",
+            "requires_user_action",
+            "scene_may_have_changed",
+        ):
+            if type(getattr(self, field_name)) is not bool:
+                raise ValueError(f"AgentError.{field_name} must be a bool")
+        object.__setattr__(
+            self,
+            "suggested_actions",
+            _normalize_string_sequence(self.suggested_actions, "suggested_actions"),
+        )
+        object.__setattr__(
+            self,
+            "cause_chain",
+            _normalize_string_sequence(self.cause_chain, "cause_chain"),
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {

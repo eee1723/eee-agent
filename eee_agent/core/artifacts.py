@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from pathlib import PurePosixPath
+from pathlib import PurePosixPath, PureWindowsPath
 
 from eee_agent.core.ids import IdKind, require_id
 
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+# Foundation v1 accepts concrete RFC token type/subtype values without parameters.
+_MEDIA_TYPE_RE = re.compile(
+    r"^[A-Za-z0-9!#$%&'+.^_`|~-]+/[A-Za-z0-9!#$%&'+.^_`|~-]+$"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,21 +24,35 @@ class ArtifactRef:
     schema_version: int = 1
 
     def __post_init__(self) -> None:
+        if not isinstance(self.artifact_id, str):
+            raise ValueError("artifact_id must be a string")
         require_id(self.artifact_id, IdKind.ARTIFACT)
+        if not isinstance(self.relative_path, str):
+            raise ValueError(f"unsafe artifact path: {self.relative_path!r}")
         path = PurePosixPath(self.relative_path)
+        windows_path = PureWindowsPath(self.relative_path)
         if (
             not self.relative_path
             or path.is_absolute()
+            or windows_path.drive
+            or windows_path.root
             or ".." in path.parts
             or "\\" in self.relative_path
+            or "\0" in self.relative_path
+            or path == PurePosixPath(".")
+            or str(path) != self.relative_path
         ):
             raise ValueError(f"unsafe artifact path: {self.relative_path!r}")
-        if not _SHA256_RE.fullmatch(self.sha256):
+        if not isinstance(self.sha256, str) or not _SHA256_RE.fullmatch(self.sha256):
             raise ValueError("sha256 must contain exactly 64 lowercase hex characters")
-        if not self.media_type.strip() or "/" not in self.media_type:
-            raise ValueError("media_type must be a MIME type")
-        if self.size_bytes < 0:
-            raise ValueError("size_bytes must be non-negative")
+        if not isinstance(self.media_type, str) or not _MEDIA_TYPE_RE.fullmatch(
+            self.media_type
+        ):
+            raise ValueError("media_type must be a concrete MIME type without parameters")
+        if type(self.size_bytes) is not int or self.size_bytes < 0:
+            raise ValueError("size_bytes must be a non-negative integer")
+        if type(self.schema_version) is not int or self.schema_version != 1:
+            raise ValueError("schema_version must be the supported integer value 1")
 
     def to_dict(self) -> dict[str, object]:
         return {
