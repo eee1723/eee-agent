@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -33,6 +34,34 @@ def _run_probe_with_env_file(contents: bytes) -> subprocess.CompletedProcess[str
             errors="replace",
             check=False,
         )
+
+
+def _wsl_bash_prefix() -> list[str]:
+    if os.name != "nt":
+        pytest.skip("WSL-to-Windows probe requires Windows")
+    system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+    legacy_bash = system_root / "System32" / "bash.exe"
+    if legacy_bash.is_file():
+        prefix = [str(legacy_bash)]
+    else:
+        wsl = shutil.which("wsl.exe")
+        if wsl is None:
+            pytest.skip("WSL Bash is unavailable")
+        prefix = [wsl, "bash"]
+    availability = subprocess.run(
+        [
+            *prefix,
+            "-c",
+            "test -d /mnt && test -f .env.example && "
+            "test -x .venv/Scripts/python.exe",
+        ],
+        cwd=Path.cwd(),
+        capture_output=True,
+        check=False,
+    )
+    if availability.returncode != 0:
+        pytest.skip("WSL or the Windows probe venv is unavailable")
+    return prefix
 
 
 def test_probe_is_tracked_in_the_foundation_branch() -> None:
@@ -132,3 +161,21 @@ def test_probe_reports_effective_dotenv_key_status(
     assert result.returncode == 0
     assert expected_status in output
     assert "unit-test-secret" not in output
+
+
+def test_wsl_probe_normalizes_windows_python_output() -> None:
+    result = subprocess.run(
+        [
+            *_wsl_bash_prefix(),
+            "-c",
+            "EEE_PROBE_ENV_FILE=.env.example bash scripts/env_probe.sh",
+        ],
+        cwd=Path.cwd(),
+        capture_output=True,
+        check=False,
+    )
+    output = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+    assert result.returncode == 0
+    assert "[WARN] DEEPSEEK_API_KEY is empty or a placeholder" in output
+    assert "could not inspect DEEPSEEK_API_KEY" not in output
+    assert "\r" not in output

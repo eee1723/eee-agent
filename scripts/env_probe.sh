@@ -35,7 +35,7 @@ fi
 HOU_RPYC=""
 if [ -n "$HOU" ] && [ -x "$HOU/python311/python.exe" ]; then
   HOU_RPYC=$("$HOU/python311/python.exe" -B -c \
-    "import rpyc; print('.'.join(map(str, rpyc.version.version)))" 2>/dev/null)
+    "import sys; import rpyc; sys.stdout.write('.'.join(map(str, rpyc.version.version)))" 2>/dev/null)
   [ -n "$HOU_RPYC" ] && ok "Houdini bundled rpyc = $HOU_RPYC" || \
     na "could not read Houdini rpyc version"
 fi
@@ -45,9 +45,10 @@ VENV_PY=""
 VENV_RPYC=""
 if [ -x ".venv/Scripts/python.exe" ]; then
   VENV_PY=".venv/Scripts/python.exe"
-  ok ".venv present ($("$VENV_PY" -B --version 2>&1))"
+  ok ".venv present ($("$VENV_PY" -B -c \
+    "import sys; sys.stdout.write('Python ' + sys.version.split()[0])" 2>&1))"
   VENV_RPYC=$("$VENV_PY" -B -c \
-    "import rpyc; print('.'.join(map(str, rpyc.version.version)))" 2>/dev/null)
+    "import sys; import rpyc; sys.stdout.write('.'.join(map(str, rpyc.version.version)))" 2>/dev/null)
   if [ -n "$VENV_RPYC" ]; then
     ok "venv rpyc = $VENV_RPYC"
     if [ -n "$HOU_RPYC" ] && [ "$HOU_RPYC" != "$VENV_RPYC" ]; then
@@ -70,7 +71,7 @@ if [ -f "$ENV_FILE" ]; then
   fi
   if [ -n "$DOTENV_PY" ]; then
     KEY_STATUS=$("$DOTENV_PY" -B -c \
-      "import sys; from dotenv import dotenv_values; value = dotenv_values(sys.argv[1]).get('DEEPSEEK_API_KEY'); print('missing' if value is None else 'placeholder' if value in ('', 'sk-your-deepseek-key') else 'set')" \
+      "import sys; from dotenv import dotenv_values; value = dotenv_values(sys.argv[1]).get('DEEPSEEK_API_KEY'); status = 'missing' if value is None else 'placeholder' if value in ('', 'sk-your-deepseek-key') else 'set'; sys.stdout.write(status)" \
       "$ENV_FILE" 2>/dev/null)
   else
     KEY_STATUS=""
