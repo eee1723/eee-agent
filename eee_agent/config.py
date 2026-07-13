@@ -19,8 +19,11 @@ class RpcConfig:
 
 @dataclass(frozen=True)
 class LlmConfig:
-    provider: str   # deepseek | anthropic | openai
+    provider: str
     model: str
+    thinking_enabled: bool
+    effort: str | None
+    max_output_tokens: int
 
 
 def rpc_config() -> RpcConfig:
@@ -30,15 +33,46 @@ def rpc_config() -> RpcConfig:
     )
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if normalized in {"0", "false", "no", "off", "disabled"}:
+        return False
+    raise ValueError(f"{name} must be enabled or disabled")
+
+
 def llm_config() -> LlmConfig:
-    provider = os.getenv("EEE_LLM_PROVIDER", "deepseek").lower()
+    provider = os.getenv("EEE_LLM_PROVIDER", "deepseek").strip().lower()
     defaults = {
         "deepseek": "deepseek-v4-pro",
         "anthropic": "claude-sonnet-5",
         "openai": "gpt-4.1",
     }
-    model = os.getenv("EEE_LLM_MODEL") or defaults.get(provider, "deepseek-v4-pro")
-    return LlmConfig(provider=provider, model=model)
+    if provider not in defaults:
+        raise ValueError(f"unknown EEE_LLM_PROVIDER: {provider!r}")
+    model = os.getenv("EEE_LLM_MODEL") or defaults[provider]
+    thinking_enabled = _env_bool("EEE_LLM_THINKING", provider == "deepseek")
+    _effort_env = (os.getenv("EEE_LLM_EFFORT") or "").strip().lower()
+    effort = _effort_env or ("max" if provider == "deepseek" else None)
+    if effort not in {None, "high", "max"}:
+        raise ValueError("EEE_LLM_EFFORT must be high or max")
+    try:
+        max_output_tokens = int(os.getenv("EEE_LLM_MAX_TOKENS", "8192"))
+    except ValueError:
+        raise ValueError("EEE_LLM_MAX_TOKENS must be an integer") from None
+    if max_output_tokens <= 0:
+        raise ValueError("EEE_LLM_MAX_TOKENS must be positive")
+    return LlmConfig(
+        provider=provider,
+        model=model,
+        thinking_enabled=thinking_enabled,
+        effort=effort,
+        max_output_tokens=max_output_tokens,
+    )
 
 
 def repo_root() -> str:
