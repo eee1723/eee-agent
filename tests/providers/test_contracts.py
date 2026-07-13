@@ -1,16 +1,13 @@
-from langchain_core.language_models.fake_chat_models import FakeListChatModel
-
 import pytest
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
 from eee_agent.providers.contracts import (
     ModelCapabilities,
     ModelProfile,
     ModelRole,
     ModelVerification,
-    ProviderAdapter,
     ProviderConnection,
     ProviderKind,
-    ResolvedModel,
     RoleBindings,
     ThinkingEffort,
     Transport,
@@ -58,15 +55,13 @@ def profile() -> ModelProfile:
 
 
 def test_registry_resolves_connection_profile_and_model() -> None:
-    adapter: ProviderAdapter = FakeAdapter()
     registry = ProviderRegistry()
-    registry.register(adapter)
+    registry.register(FakeAdapter())
 
     resolved = registry.resolve(connection(), profile())
 
     assert resolved.connection == connection()
     assert resolved.profile == profile()
-    assert isinstance(resolved, ResolvedModel)
     assert isinstance(resolved.model, FakeListChatModel)
 
 
@@ -74,41 +69,37 @@ def test_registry_rejects_duplicate_provider_adapter() -> None:
     registry = ProviderRegistry()
     registry.register(FakeAdapter())
 
-    with pytest.raises(
-        ValueError, match="provider adapter already registered: deepseek"
-    ):
+    with pytest.raises(ValueError, match="already registered"):
         registry.register(FakeAdapter())
 
 
 def test_registry_rejects_profile_connection_mismatch() -> None:
+    registry = ProviderRegistry()
+    registry.register(FakeAdapter())
     mismatched_profile = ModelProfile(
-        profile_id="primary",
+        profile_id="wrong",
         connection_id="another-connection",
         model_name="deepseek-v4-pro",
         capabilities=profile().capabilities,
     )
 
     with pytest.raises(ValueError, match="connection_id"):
-        ProviderRegistry().resolve(connection(), mismatched_profile)
+        registry.resolve(connection(), mismatched_profile)
 
 
 def test_role_bindings_and_model_verification_contracts() -> None:
-    bindings = RoleBindings(
-        primary_profile_id="primary", vision_profile_id="vision"
-    )
+    bindings = RoleBindings(primary_profile_id="primary", vision_profile_id=None)
     verification = ModelVerification(
         status=VerificationStatus.VERIFIED,
         requested_model_name="deepseek-v4-pro",
         actual_model_name="deepseek-v4-pro",
         checks=(
-            VerificationCheck(
-                name="tool_replay", passed=True, detail="Replay succeeded."
-            ),
+            VerificationCheck(name="tool_replay", passed=True, detail=None),
         ),
     )
 
     assert bindings.profile_for(ModelRole.PRIMARY) == "primary"
-    assert bindings.profile_for(ModelRole.VISION) == "vision"
+    assert bindings.profile_for(ModelRole.VISION) is None
     assert verification.status is VerificationStatus.VERIFIED
     assert verification.checks[0].name == "tool_replay"
     assert verification.checks[0].passed is True

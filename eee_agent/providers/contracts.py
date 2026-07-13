@@ -55,11 +55,11 @@ class ProviderConnection:
 
     def __post_init__(self) -> None:
         if not self.connection_id.strip():
-            raise ValueError("ProviderConnection.connection_id must not be blank")
+            raise ValueError("connection_id must not be empty")
         if self.timeout_seconds <= 0:
-            raise ValueError("ProviderConnection.timeout_seconds must be positive")
+            raise ValueError("timeout_seconds must be positive")
         if self.max_retries < 0:
-            raise ValueError("ProviderConnection.max_retries must not be negative")
+            raise ValueError("max_retries must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,16 +73,12 @@ class ModelProfile:
     max_output_tokens: int = 8192
 
     def __post_init__(self) -> None:
-        if not self.profile_id.strip():
-            raise ValueError("ModelProfile.profile_id must not be blank")
-        if not self.model_name.strip():
-            raise ValueError("ModelProfile.model_name must not be blank")
+        if not self.profile_id.strip() or not self.model_name.strip():
+            raise ValueError("profile_id and model_name must not be empty")
         if self.max_output_tokens <= 0:
-            raise ValueError("ModelProfile.max_output_tokens must be positive")
+            raise ValueError("max_output_tokens must be positive")
         if self.thinking_enabled and not self.capabilities.thinking:
-            raise ValueError(
-                "ModelProfile.thinking_enabled requires the thinking capability"
-            )
+            raise ValueError("thinking cannot be enabled for a non-thinking profile")
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +88,7 @@ class RoleBindings:
 
     def __post_init__(self) -> None:
         if not self.primary_profile_id.strip():
-            raise ValueError("RoleBindings.primary_profile_id must not be blank")
+            raise ValueError("primary_profile_id must not be empty")
 
     def profile_for(self, role: ModelRole) -> str | None:
         if role is ModelRole.PRIMARY:
@@ -104,14 +100,14 @@ class RoleBindings:
 class VerificationCheck:
     name: str
     passed: bool
-    detail: str
+    detail: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class ModelVerification:
     status: VerificationStatus
     requested_model_name: str
-    actual_model_name: str
+    actual_model_name: str | None
     checks: tuple[VerificationCheck, ...]
 
 

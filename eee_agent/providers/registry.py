@@ -25,7 +25,7 @@ class ProviderRegistry:
     ) -> ResolvedModel:
         if profile.connection_id != connection.connection_id:
             raise ValueError(
-                "profile connection_id does not match provider connection_id"
+                "profile connection_id does not match the selected connection"
             )
         try:
             adapter = self._adapters[connection.provider]
