@@ -276,6 +276,16 @@ async def stdio() -> int:
     return 0
 
 
+# --------------------------------------------------------------------------- #
+# versions: print runtime and dependency versions as JSON
+# --------------------------------------------------------------------------- #
+def print_versions() -> int:
+    from eee_agent.core.versioning import runtime_version_report
+
+    print(json.dumps(runtime_version_report(), indent=2, sort_keys=True), flush=True)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="eee_agent")
     sub = ap.add_subparsers(dest="mode", required=True)
@@ -283,6 +293,7 @@ def main() -> int:
     p_prompt = sub.add_parser("prompt", help="one-shot agent run")
     p_prompt.add_argument("text")
     sub.add_parser("stdio", help="JSON-lines for the Houdini panel")
+    sub.add_parser("versions", help="print runtime and dependency versions")
     args = ap.parse_args()
 
     if args.mode == "selftest":
@@ -291,6 +302,8 @@ def main() -> int:
         return run_prompt(args.text)
     if args.mode == "stdio":
         return asyncio.run(stdio())
+    if args.mode == "versions":
+        return print_versions()
     return 1
 
 
