@@ -42,3 +42,6 @@ desktop.ini
 # --- editor ---
 .vscode/
 .idea/
+
+# --- isolated development worktrees ---
+.worktrees/
