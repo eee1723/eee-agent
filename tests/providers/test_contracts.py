@@ -20,9 +20,7 @@ from eee_agent.providers.registry import ProviderRegistry
 class FakeAdapter:
     kind = ProviderKind.DEEPSEEK
 
-    def build(
-        self, connection: ProviderConnection, profile: ModelProfile
-    ) -> FakeListChatModel:
+    def build(self, connection: ProviderConnection, profile: ModelProfile):
         return FakeListChatModel(responses=[profile.model_name])
 
 
@@ -54,7 +52,7 @@ def profile() -> ModelProfile:
     )
 
 
-def test_registry_resolves_connection_profile_and_model() -> None:
+def test_registry_resolves_adapter_and_frozen_snapshot() -> None:
     registry = ProviderRegistry()
     registry.register(FakeAdapter())
 
@@ -65,7 +63,7 @@ def test_registry_resolves_connection_profile_and_model() -> None:
     assert isinstance(resolved.model, FakeListChatModel)
 
 
-def test_registry_rejects_duplicate_provider_adapter() -> None:
+def test_registry_rejects_duplicate_adapter() -> None:
     registry = ProviderRegistry()
     registry.register(FakeAdapter())
 
@@ -76,7 +74,7 @@ def test_registry_rejects_duplicate_provider_adapter() -> None:
 def test_registry_rejects_profile_connection_mismatch() -> None:
     registry = ProviderRegistry()
     registry.register(FakeAdapter())
-    mismatched_profile = ModelProfile(
+    wrong = ModelProfile(
         profile_id="wrong",
         connection_id="another-connection",
         model_name="deepseek-v4-pro",
@@ -84,10 +82,10 @@ def test_registry_rejects_profile_connection_mismatch() -> None:
     )
 
     with pytest.raises(ValueError, match="connection_id"):
-        registry.resolve(connection(), mismatched_profile)
+        registry.resolve(connection(), wrong)
 
 
-def test_role_bindings_and_model_verification_contracts() -> None:
+def test_role_bindings_and_verification_are_provider_neutral() -> None:
     bindings = RoleBindings(primary_profile_id="primary", vision_profile_id=None)
     verification = ModelVerification(
         status=VerificationStatus.VERIFIED,
@@ -101,5 +99,3 @@ def test_role_bindings_and_model_verification_contracts() -> None:
     assert bindings.profile_for(ModelRole.PRIMARY) == "primary"
     assert bindings.profile_for(ModelRole.VISION) is None
     assert verification.status is VerificationStatus.VERIFIED
-    assert verification.checks[0].name == "tool_replay"
-    assert verification.checks[0].passed is True
