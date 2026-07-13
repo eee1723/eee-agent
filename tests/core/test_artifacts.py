@@ -159,3 +159,44 @@ def test_artifact_ref_rejects_components_ending_in_space_or_period(
 )
 def test_artifact_ref_accepts_windows_safe_components(path: str) -> None:
     assert _make_artifact_ref(relative_path=path).relative_path == path
+
+@pytest.mark.parametrize(
+    "component",
+    [
+        "CONIN$",
+        "conin$.txt",
+        "CoNiN$.log",
+        "CONOUT$",
+        "conout$.txt",
+        "CoNoUt$.log",
+        "NUL .txt",
+        "COM1 .log",
+        "LPT9 .any",
+        "COM\N{SUPERSCRIPT ONE}",
+        "com\N{SUPERSCRIPT TWO}.txt",
+        "CoM\N{SUPERSCRIPT THREE}.log",
+        "LPT\N{SUPERSCRIPT ONE}",
+        "lpt\N{SUPERSCRIPT TWO}.txt",
+        "LpT\N{SUPERSCRIPT THREE}.log",
+    ],
+)
+def test_artifact_ref_rejects_additional_windows_reserved_aliases(
+    component: str,
+) -> None:
+    with pytest.raises(ValueError, match="artifact path"):
+        _make_artifact_ref(relative_path=f"runs/{component}")
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "runs/CONIN-data/report.json",
+        "runs/CONOUT_file.txt",
+        "runs/NUL-file.txt",
+        "runs/COM1-data.txt",
+        "runs/LPT9_report.any",
+        "runs/COM10.txt",
+        "runs/LPT0.log",
+    ],
+)
+def test_artifact_ref_accepts_windows_reserved_alias_near_misses(path: str) -> None:
+    assert _make_artifact_ref(relative_path=path).relative_path == path

@@ -22,10 +22,14 @@ _WINDOWS_INVALID_COMPONENT_CHAR_RE = re.compile(r'[\x00-\x1f<>:"|?*]')
 
 
 def _is_unsafe_windows_component(component: str) -> bool:
+    # Python 3.11 is pinned; its component-level check covers console, padded,
+    # and superscript device aliases beyond the defensive explicit regex.
+    windows_component = PureWindowsPath(component)
     return (
         _WINDOWS_INVALID_COMPONENT_CHAR_RE.search(component) is not None
         or component.endswith((" ", "."))
         or _WINDOWS_RESERVED_COMPONENT_RE.fullmatch(component) is not None
+        or windows_component.is_reserved()
     )
 
 
