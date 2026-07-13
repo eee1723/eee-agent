@@ -21,8 +21,14 @@ Generated: 2026-07-13 (Asia/Shanghai)
 - Main branch HEAD: `357bb0b chore: ignore local worktrees`
 - Main is two commits ahead of `origin/main`.
 
-Do not assume that the branch or the two main commits exist on GitHub until they
-have been pushed from the old computer.
+Migration push completed and was verified from the old computer:
+
+- `origin/main` -> `357bb0be005ffeb1118a5601811ce6b693a3aa52`
+- `origin/feature/foundation` initially included this handoff at `fb32319`; read
+  the current remote branch tip for the later migration-status update commit.
+- `origin/wip/pre-migration-main` ->
+  `bc351c00ada6a0e15ff4ffdc41e2f19ebcfc4fe5`
+- Both the main/WIP workspace and Foundation worktree were clean after pushing.
 
 ## Sources Of Truth
 
@@ -192,7 +198,7 @@ using its process exit as proof that Houdini and the RPC bridge are available.
 
 ## Main Worktree Changes That Are Not In Foundation
 
-At handoff preparation, `E:\eee-agent` has these uncommitted user changes:
+At initial handoff preparation, `E:\eee-agent` had these uncommitted user changes:
 
 ```text
  M CLAUDE.md
@@ -212,6 +218,12 @@ Do not discard or overwrite these files. They are not present in the clean
 Foundation worktree branch. The tracked Foundation `scripts/env_probe.sh` is a
 reviewed successor to the untracked main-worktree script, but the main copy has
 not been deleted or modified by Foundation work.
+
+Migration completion update: these five paths were reviewed for common credential
+patterns, syntax-checked where applicable, committed without `.env` on branch
+`wip/pre-migration-main`, and pushed as commit `bc351c0`. The only key-shaped
+string found was the documented placeholder `sk-your-deepseek-key` in the old
+probe script. The main worktree is now checked out on the WIP branch and clean.
 
 Before migration, either review and commit these files on a separate WIP branch,
 or export a binary Git patch and separately archive the two untracked files. A
