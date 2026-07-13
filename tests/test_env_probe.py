@@ -53,7 +53,8 @@ def _wsl_bash_prefix() -> list[str]:
             *prefix,
             "-c",
             "test -d /mnt && test -f .env.example && "
-            "test -x .venv/Scripts/python.exe",
+            "test -x .venv/Scripts/python.exe && "
+            "'.venv/Scripts/python.exe' -B -c 'pass'",
         ],
         cwd=Path.cwd(),
         capture_output=True,
@@ -62,6 +63,20 @@ def _wsl_bash_prefix() -> list[str]:
     if availability.returncode != 0:
         pytest.skip("WSL or the Windows probe venv is unavailable")
     return prefix
+
+
+def test_wsl_availability_probe_executes_windows_python(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def record_run(args: list[str], **_: object) -> subprocess.CompletedProcess[bytes]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(subprocess, "run", record_run)
+    _wsl_bash_prefix()
+    assert "'.venv/Scripts/python.exe' -B -c 'pass'" in calls[0][-1]
 
 
 def test_probe_is_tracked_in_the_foundation_branch() -> None:
