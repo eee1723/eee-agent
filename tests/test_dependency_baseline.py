@@ -14,6 +14,9 @@ EXPECTED_DIRECT_VERSIONS = {
     "rpyc": "4.1.0",
     "pyyaml": "6.0.3",
     "python-dotenv": "1.2.2",
+    "aiosqlite": "0.22.1",
+    "langgraph-checkpoint-sqlite": "3.1.0",
+    "websockets": "15.0.1",
 }
 
 

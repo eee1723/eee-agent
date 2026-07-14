@@ -27,3 +27,10 @@ def test_runtime_version_report_handles_missing_distribution(monkeypatch) -> Non
     # The other fields are still populated.
     assert report["eee_agent"] == "0.1.0"
     assert report["python"].startswith("3.11.")
+
+
+def test_runtime_dependencies_are_reported() -> None:
+    dependencies = runtime_version_report()["dependencies"]
+    assert dependencies["aiosqlite"] == "0.22.1"
+    assert dependencies["langgraph-checkpoint-sqlite"] == "3.1.0"
+    assert dependencies["websockets"] == "15.0.1"

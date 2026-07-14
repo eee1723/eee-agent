@@ -10,6 +10,13 @@
 .contextseek/
 .contextseek_seeded
 
+# --- persistent Runtime local state (machine-local; EEE_RUNTIME_HOME override) ---
+.runtime/
+state/*.sqlite*
+state/runtime.json
+state/runtime.token
+state/runtime.lock
+
 # --- generated geometry / exports / hip files ---
 output/
 *.hip

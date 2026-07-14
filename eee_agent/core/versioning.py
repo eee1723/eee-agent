@@ -18,6 +18,9 @@ TRACKED_DISTRIBUTIONS = (
     "openai",
     "anthropic",
     "rpyc",
+    "aiosqlite",
+    "langgraph-checkpoint-sqlite",
+    "websockets",
 )
 
 
