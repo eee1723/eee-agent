@@ -9,6 +9,7 @@ or WebSocket is involved. Each test runs its async scenario through
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -202,15 +203,20 @@ def test_runnercompleted_is_unique_and_durable(paths: RuntimePaths) -> None:
 # --------------------------------------------------------------------------
 
 
-def test_version_report_frozen_once_per_service(
+def test_version_report_frozen_once_per_start_run(
     paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    calls: list[bool] = []
+    # Each start_run call captures its own runtime_version_report snapshot and
+    # freezes it into that RunRecord. Two consecutive runs make two distinct
+    # calls with two distinct frozen snapshots.
+    calls: list[int] = []
     real = runtime_version_report
 
     def spy() -> dict[str, object]:
-        calls.append(True)
-        return real()
+        # Stamp each call with a counter so the two snapshots are distinguishable.
+        calls.append(len(calls))
+        report = real()
+        return {**report, "report_call": len(calls) - 1}
 
     monkeypatch.setattr("eee_agent.runtime.service.runtime_version_report", spy)
     runner = FakeRunner(_success_items("done"))
@@ -224,11 +230,12 @@ def test_version_report_frozen_once_per_service(
             await service.wait_for_run(r1.run_id)
             r2 = await service.start_run(session.session_id, "two")
             await service.wait_for_run(r2.run_id)
-            # The frozen snapshot is identical across runs.
-            assert r1.model_snapshot_json == r2.model_snapshot_json
-            assert r1.model_snapshot_json["eee_agent"] == real()["eee_agent"]
-        # runtime_version_report is called exactly once, during open.
-        assert len(calls) == 1
+            # Each run froze its own call's snapshot.
+            assert r1.model_snapshot_json["report_call"] == 0
+            assert r2.model_snapshot_json["report_call"] == 1
+            assert r1.model_snapshot_json != r2.model_snapshot_json
+        # Exactly one runtime_version_report call per start_run.
+        assert len(calls) == 2
 
     _run(scenario())
 
@@ -413,7 +420,10 @@ def test_force_stop_persists_full_cancel_path(paths: RuntimePaths) -> None:
             session = await service.create_session("A")
             started = await service.start_run(session.session_id, "x")
             await _wait_until_streaming(runner)
-            await service.stop_run(started.run_id, force=True)
+            stopped = await service.stop_run(started.run_id, force=True)
+            # force=True must also persist StopRequested first and must not
+            # return the pre-stop (Planning) state.
+            assert stopped.status is RunStatus.STOP_REQUESTED
             cancelled = await service.wait_for_run(started.run_id)
             assert cancelled.status is RunStatus.CANCELLED
             assert await service._runs.active_run_id() is None  # type: ignore[attr-defined]
@@ -425,6 +435,7 @@ def test_force_stop_persists_full_cancel_path(paths: RuntimePaths) -> None:
                 for e in replay.events
                 if e.event_type == "run.state_changed"
             ]
+            assert ("Planning", "StopRequested") in targets
             assert ("StopRequested", "Stopping") in targets
             assert ("Stopping", "Cancelled") in targets
 
@@ -1018,6 +1029,202 @@ def test_init_failure_cleans_up_database_and_checkpoints(
     _run(scenario())
     assert close_calls == ["db"]
     assert checkpoint_exit_calls == ["exit"]
+
+
+# --------------------------------------------------------------------------
+# hardening regressions (Codex review)
+# --------------------------------------------------------------------------
+
+
+def test_async_callback_cancellederror_isolated(paths: RuntimePaths) -> None:
+    # An async subscriber that raises asyncio.CancelledError must not cancel
+    # the Runtime operation, must not roll back the committed event, must not
+    # block other subscribers, and must not leave start_run without a task.
+    runner = FakeRunner(_success_items("done"))
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths, runner_factory=_factory_for(runner)
+        ) as service:
+            survivor: list[str] = []
+
+            async def canceller(event):
+                raise asyncio.CancelledError()
+
+            async def recorder(event):
+                survivor.append(event.event_type)
+
+            service.subscribe(canceller)
+            service.subscribe(recorder)
+            session = await service.create_session("A")
+            assert "session.created" in survivor
+            started = await service.start_run(session.session_id, "x")
+            # start_run completed despite the canceller callback: exactly one
+            # task exists, no orphan Created active run.
+            assert len(service._tasks) == 1  # type: ignore[attr-defined]
+            assert started.run_id in service._tasks  # type: ignore[attr-defined]
+            await service.wait_for_run(started.run_id)
+            assert await service._runs.active_run_id() is None  # type: ignore[attr-defined]
+            assert "run.created" in survivor
+
+    _run(scenario())
+
+
+def test_state_lock_serializes_transition_and_append_not_notify(
+    paths: RuntimePaths,
+) -> None:
+    # The service-level state lock must be held across the transition write and
+    # the durable state-event append (so the recorded from-state cannot go
+    # stale) and must be released before user callbacks run.
+    runner = FakeRunner(_success_items("done"))
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths, runner_factory=_factory_for(runner)
+        ) as service:
+            lock = service._state_lock  # type: ignore[attr-defined]
+            held: dict[str, object] = {}
+            original_transition = service._runs.transition
+            original_append = service._events.append
+
+            async def spy_transition(*args, **kwargs):
+                if "transition" not in held:
+                    held["transition"] = lock.locked()
+                return await original_transition(*args, **kwargs)
+
+            async def spy_append(**kwargs):
+                record = await original_append(**kwargs)
+                if (
+                    kwargs.get("event_type") == "run.state_changed"
+                    and "append" not in held
+                ):
+                    held["append"] = lock.locked()
+                return record
+
+            def sync_cb(event):
+                if "notify" not in held:
+                    held["notify"] = lock.locked()
+
+            service._runs.transition = spy_transition  # type: ignore[assignment]
+            service._events.append = spy_append  # type: ignore[assignment]
+            service.subscribe(sync_cb)
+            session = await service.create_session("A")
+            started = await service.start_run(session.session_id, "x")
+            await service.wait_for_run(started.run_id)
+            assert held["transition"] is True
+            assert held["append"] is True
+            assert held["notify"] is False
+
+    _run(scenario())
+
+
+def test_state_changed_events_form_consistent_chain_on_cooperative_stop(
+    paths: RuntimePaths,
+) -> None:
+    # Deterministic from-state invariant: consecutive run.state_changed events
+    # on one run form a consistent chain (from[i] == to[i-1]) and every edge is
+    # legal. (A barrier-forced concurrent race is structurally impossible once
+    # the state lock serializes transitions, so the serialization mechanism test
+    # above is the deterministic proof; this guards the resulting invariant.)
+    gate = asyncio.Event()
+    runner = FakeRunner(_success_items("done"), gate=gate)
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths, runner_factory=_factory_for(runner)
+        ) as service:
+            session = await service.create_session("A")
+            started = await service.start_run(session.session_id, "x")
+            await _wait_until_streaming(runner)
+            await service.stop_run(started.run_id, force=False)
+            await service.wait_for_run(started.run_id)
+            replay = await service.replay(
+                session.session_id, after_seq=0, limit=100
+            )
+            edges = [
+                (e.payload["from"], e.payload["to"])
+                for e in replay.events
+                if e.event_type == "run.state_changed"
+            ]
+            assert ("Planning", "StopRequested") in edges
+            for prev, cur in zip(edges, edges[1:]):
+                assert prev[1] == cur[0], f"inconsistent chain: {prev} -> {cur}"
+
+    _run(scenario())
+
+
+def test_normal_close_propagates_checkpoint_cleanup_error(
+    paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = FakeRunner(_success_items("done"))
+
+    async def raising_exit(manager_self, exc_type, exc, tb):
+        raise RuntimeError("checkpoint cleanup boom")
+
+    monkeypatch.setattr(CheckpointManager, "__aexit__", raising_exit)
+
+    async def scenario() -> None:
+        with pytest.raises(RuntimeError, match="checkpoint cleanup boom"):
+            async with RuntimeService.open(
+                paths, runner_factory=_factory_for(runner)
+            ) as service:
+                await service.create_session("A")
+
+    _run(scenario())
+
+
+def test_business_exception_takes_priority_over_checkpoint_cleanup(
+    paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runner = FakeRunner(_success_items("done"))
+
+    async def raising_exit(manager_self, exc_type, exc, tb):
+        raise RuntimeError("checkpoint cleanup boom")
+
+    monkeypatch.setattr(CheckpointManager, "__aexit__", raising_exit)
+
+    async def scenario() -> None:
+        with pytest.raises(ValueError, match="business boom"):
+            async with RuntimeService.open(
+                paths, runner_factory=_factory_for(runner)
+            ):
+                raise ValueError("business boom")
+
+    _run(scenario())
+
+
+def test_replay_reports_snapshot_required_after_retention_gap(
+    paths: RuntimePaths,
+) -> None:
+    runner = FakeRunner(_success_items("done"))
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths, runner_factory=_factory_for(runner)
+        ) as service:
+            session = await service.create_session("A")
+            started = await service.start_run(session.session_id, "x")
+            await service.wait_for_run(started.run_id)
+            # Prune the run's operational events (e.g. model.text_delta) for the
+            # now-terminal run, advancing the replay floor past seq 0.
+            future = datetime(2099, 1, 1, tzinfo=timezone.utc)
+            await service._events.prune_operational(  # type: ignore[attr-defined]
+                session.session_id,
+                through_seq=10_000,
+                older_than=future,
+            )
+            # after_seq=0 now falls below the replay floor -> snapshot required.
+            replay = await service.replay(
+                session.session_id, after_seq=0, limit=100
+            )
+            assert replay.snapshot_required is True
+            assert replay.replay_floor_seq > 0
+            # snapshot_seq is consistent with the replay boundary (both equal
+            # the session's current last_seq).
+            snap = await service.snapshot(session.session_id)
+            assert snap.snapshot_seq == replay.last_seq
+
+    _run(scenario())
 
 
 def test_service_does_not_import_websocket_or_lock() -> None:
