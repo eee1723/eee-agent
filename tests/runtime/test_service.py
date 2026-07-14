@@ -1227,97 +1227,6 @@ def test_replay_reports_snapshot_required_after_retention_gap(
     _run(scenario())
 
 
-def test_start_run_cancelled_during_notify_leaves_no_orphan(
-    paths: RuntimePaths,
-) -> None:
-    # Defect 1 (notify window): a callback blocks during the run.created
-    # subscriber notify; cancelling start_run must propagate, but the persisted
-    # run must end up either with a registered task or in a terminal state with
-    # the active slot cleared. Never non-terminal + no task.
-    runner = FakeRunner(_success_items("done"))
-
-    async def scenario() -> None:
-        async with RuntimeService.open(
-            paths, runner_factory=_factory_for(runner)
-        ) as service:
-            cb_entered = asyncio.Event()
-            notify_gate = asyncio.Event()
-            seen_run_id: list[str] = []
-
-            async def blocking_cb(event):
-                if event.event_type == "run.created":
-                    seen_run_id.append(event.run_id)
-                    cb_entered.set()
-                    await notify_gate.wait()
-
-            service.subscribe(blocking_cb)
-            session = await service.create_session("A")
-            start_task = asyncio.create_task(
-                service.start_run(session.session_id, "x")
-            )
-            await cb_entered.wait()  # run.created committed; notify blocked
-            start_task.cancel()
-            notify_gate.set()
-            with pytest.raises(asyncio.CancelledError):
-                await start_task
-            # Invariant: no non-terminal run without a task.
-            assert len(service._tasks) == 0  # type: ignore[attr-defined]
-            assert await service._runs.active_run_id() is None  # type: ignore[attr-defined]
-            run = await service._runs.get(seen_run_id[0])  # type: ignore[attr-defined]
-            assert run.status in (
-                RunStatus.COMPLETED,
-                RunStatus.CANCELLED,
-                RunStatus.FAILED,
-            )
-
-    _run(scenario())
-
-
-def test_start_run_cancelled_during_append_leaves_no_orphan(
-    paths: RuntimePaths,
-) -> None:
-    # Defect 1 (append window): cancellation during the run.created EventStore
-    # append, before notify. Same no-orphan invariant must hold.
-    runner = FakeRunner(_success_items("done"))
-
-    async def scenario() -> None:
-        async with RuntimeService.open(
-            paths, runner_factory=_factory_for(runner)
-        ) as service:
-            append_entered = asyncio.Event()
-            append_gate = asyncio.Event()
-            seen_run_id: list[str] = []
-            original_append = service._events.append  # type: ignore[attr-defined]
-
-            async def gated_append(**kwargs):
-                if kwargs.get("event_type") == "run.created":
-                    seen_run_id.append(kwargs["run_id"])
-                    append_entered.set()
-                    await append_gate.wait()
-                return await original_append(**kwargs)
-
-            service._events.append = gated_append  # type: ignore[assignment]
-            session = await service.create_session("A")
-            start_task = asyncio.create_task(
-                service.start_run(session.session_id, "x")
-            )
-            await append_entered.wait()  # run.created append blocked pre-commit
-            start_task.cancel()
-            append_gate.set()
-            with pytest.raises(asyncio.CancelledError):
-                await start_task
-            assert len(service._tasks) == 0  # type: ignore[attr-defined]
-            assert await service._runs.active_run_id() is None  # type: ignore[attr-defined]
-            run = await service._runs.get(seen_run_id[0])  # type: ignore[attr-defined]
-            assert run.status in (
-                RunStatus.COMPLETED,
-                RunStatus.CANCELLED,
-                RunStatus.FAILED,
-            )
-
-    _run(scenario())
-
-
 def test_failure_and_stop_concurrency_reaches_terminal(
     paths: RuntimePaths,
 ) -> None:
@@ -1398,6 +1307,239 @@ def test_handle_failure_yields_to_stop_owns_terminal_no_model_failed(
             # Cleanup: converge the blocked run.
             await service.stop_run(started.run_id, force=False)
             await service.wait_for_run(started.run_id)
+
+    _run(scenario())
+
+
+def test_start_run_cancelled_during_append_preserves_run_created(
+    paths: RuntimePaths,
+) -> None:
+    # Defect A: cancelling start_run during the run.created EventStore append
+    # (single and double cancel) must still leave exactly one run.created and it
+    # must be the run's first event. The Run was accepted, so it must complete;
+    # it must never be persisted without run.created.
+    async def one_case(cancel_count: int) -> None:
+        runner = FakeRunner(_success_items("done"))
+        async with RuntimeService.open(
+            paths, runner_factory=_factory_for(runner)
+        ) as service:
+            append_entered = asyncio.Event()
+            append_gate = asyncio.Event()
+            seen_run_id: list[str] = []
+            original_append = service._events.append  # type: ignore[attr-defined]
+
+            async def gated_append(**kwargs):
+                if kwargs.get("event_type") == "run.created":
+                    seen_run_id.append(kwargs["run_id"])
+                    append_entered.set()
+                    await append_gate.wait()
+                return await original_append(**kwargs)
+
+            service._events.append = gated_append  # type: ignore[assignment]
+            session = await service.create_session("A")
+            start_task = asyncio.create_task(
+                service.start_run(session.session_id, "x")
+            )
+            await append_entered.wait()  # run.created append blocked pre-commit
+            for _ in range(cancel_count):
+                start_task.cancel()
+            append_gate.set()
+            with pytest.raises(asyncio.CancelledError):
+                await start_task
+            # The Run was accepted and must reach a terminal state.
+            final = await service.wait_for_run(seen_run_id[0])
+            assert final.status in (
+                RunStatus.COMPLETED,
+                RunStatus.CANCELLED,
+                RunStatus.FAILED,
+            )
+            replay = await service.replay(
+                session.session_id, after_seq=0, limit=100
+            )
+            run_types = [
+                e.event_type
+                for e in replay.events
+                if e.run_id == seen_run_id[0]
+            ]
+            assert run_types.count("run.created") == 1
+            assert run_types[0] == "run.created"
+
+    async def scenario() -> None:
+        await one_case(1)
+        await one_case(2)
+
+    _run(scenario())
+
+
+def test_start_run_cancelled_during_notify_does_not_cancel_run(
+    paths: RuntimePaths,
+) -> None:
+    # Defect B: a subscriber callback blocks during the run.created notify;
+    # cancelling start_run must propagate to the caller but must NOT cancel the
+    # accepted Run (disconnect never cancels a Run). The Run must have exactly
+    # one execution task and continue to Completed once the runner is released.
+    gate = asyncio.Event()
+    runner = FakeRunner(_success_items("done"), gate=gate)
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths, runner_factory=_factory_for(runner)
+        ) as service:
+            cb_entered = asyncio.Event()
+            notify_gate = asyncio.Event()
+
+            async def blocking_cb(event):
+                if event.event_type == "run.created":
+                    cb_entered.set()
+                    await notify_gate.wait()
+
+            service.subscribe(blocking_cb)
+            session = await service.create_session("A")
+            start_task = asyncio.create_task(
+                service.start_run(session.session_id, "x")
+            )
+            await cb_entered.wait()  # run.created committed; notify blocked
+            start_task.cancel()
+            notify_gate.set()
+            with pytest.raises(asyncio.CancelledError):
+                await start_task
+            # Exactly one execution task exists; the Run was not cancelled.
+            assert len(service._tasks) == 1  # type: ignore[attr-defined]
+            run_id = next(iter(service._tasks))  # type: ignore[attr-defined]
+            gate.set()
+            completed = await service.wait_for_run(run_id)
+            assert completed.status is RunStatus.COMPLETED
+            replay = await service.replay(
+                session.session_id, after_seq=0, limit=100
+            )
+            assert [e.event_type for e in replay.events].count("run.created") == 1
+
+    _run(scenario())
+
+
+def test_double_cancel_during_convergence_keeps_no_orphan(
+    paths: RuntimePaths,
+) -> None:
+    # Defect C: two consecutive cancels during terminal convergence must not
+    # interrupt it. The run must end terminal with the active slot cleared and
+    # no orphan task, within this process (not relying on restart reconcile).
+    gate = asyncio.Event()
+    runner = FakeRunner(_success_items("done"), gate=gate)
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths, runner_factory=_factory_for(runner)
+        ) as service:
+            session = await service.create_session("A")
+            started = await service.start_run(session.session_id, "x")
+            await _wait_until_streaming(runner)  # run at Planning, blocked
+            run_task = service._tasks[started.run_id]  # type: ignore[attr-defined]
+
+            converge_entered = asyncio.Event()
+            allow_converge = asyncio.Event()
+            original_cancel = service._handle_cancellation  # type: ignore[attr-defined]
+
+            async def pausing_cancel(sid, rid):
+                converge_entered.set()
+                await allow_converge.wait()
+                await original_cancel(sid, rid)
+
+            service._handle_cancellation = pausing_cancel  # type: ignore[assignment]
+            await service.stop_run(started.run_id, force=False)
+            await converge_entered.wait()
+            run_task.cancel()
+            run_task.cancel()  # double cancel mid-convergence
+            allow_converge.set()
+            final = await service.wait_for_run(started.run_id)
+            assert final.status in (
+                RunStatus.CANCELLED,
+                RunStatus.FAILED,
+            )
+            assert await service._runs.active_run_id() is None  # type: ignore[attr-defined]
+            assert len(service._tasks) == 0  # type: ignore[attr-defined]
+
+    _run(scenario())
+
+
+def test_shutdown_converges_active_run_without_inmemory_task(
+    paths: RuntimePaths,
+) -> None:
+    # Defect D: an active run persisted in active_run_id but absent from _tasks
+    # (a pre-registration orphan) must be converged to terminal on shutdown by
+    # reading active_run_id, not by scanning only _tasks.
+    runner = FakeRunner(_success_items("done"))
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths, runner_factory=_factory_for(runner)
+        ) as service:
+            session = await service.create_session("A")
+            # Persist an active run directly, with no execution task registered.
+            run = await service._runs.create_and_acquire(  # type: ignore[attr-defined]
+                session.session_id, "x", {"m": 1}
+            )
+            assert run.run_id not in service._tasks  # type: ignore[attr-defined]
+            assert await service._runs.active_run_id() == run.run_id  # type: ignore[attr-defined]
+            stored = run.run_id
+        # After close, the orphan must be terminal with the slot cleared.
+        from eee_agent.runtime.database import RuntimeDatabase
+        from eee_agent.runtime.runs import RunRepository
+
+        db = await RuntimeDatabase.open(paths.app_db)
+        try:
+            runs = RunRepository(db)
+            reloaded = await runs.get(stored)
+            assert reloaded.status in (
+                RunStatus.CANCELLED,
+                RunStatus.FAILED,
+            )
+            assert await runs.active_run_id() is None
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_failure_bundle_atomic_under_cancel(paths: RuntimePaths) -> None:
+    # Defect E: cancelling the run task after fail() committed but before all
+    # failure events are appended must leave either a complete Failed bundle
+    # (model.failed + run.state_changed to Failed + run.failed) or a complete
+    # Cancelled convergence with no failure events. No partial bundle.
+    runner = FakeRunner((), error=RuntimeError("boom"))
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths, runner_factory=_factory_for(runner)
+        ) as service:
+            fail_committed = asyncio.Event()
+            allow_events = asyncio.Event()
+            original_fail = service._runs.fail  # type: ignore[attr-defined]
+
+            async def pausing_fail(run_id, error):
+                result = await original_fail(run_id, error)
+                fail_committed.set()
+                await allow_events.wait()
+                return result
+
+            service._runs.fail = pausing_fail  # type: ignore[assignment]
+            session = await service.create_session("A")
+            started = await service.start_run(session.session_id, "x")
+            await fail_committed.wait()  # fail() committed; events paused
+            service._tasks[started.run_id].cancel()  # type: ignore[attr-defined]
+            allow_events.set()
+            final = await service.wait_for_run(started.run_id)
+            replay = await service.replay(
+                session.session_id, after_seq=0, limit=100
+            )
+            types = [e.event_type for e in replay.events]
+            if final.status is RunStatus.FAILED:
+                assert "model.failed" in types
+                assert "run.state_changed" in types
+                assert "run.failed" in types
+            else:
+                assert final.status is RunStatus.CANCELLED
+                assert "model.failed" not in types
+                assert "run.failed" not in types
 
     _run(scenario())
 

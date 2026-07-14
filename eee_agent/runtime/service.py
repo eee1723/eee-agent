@@ -93,6 +93,37 @@ def _checkpoint_cleanup_failed() -> AgentException:
     )
 
 
+async def _run_uncancelled(coro: Awaitable[object]) -> object:
+    """Run ``coro`` to completion, deferring cancellation of this task.
+
+    Used to protect short critical persistence regions (run.created commit +
+    task registration, the failure state/event bundle, terminal convergence)
+    so a caller/external cancellation cannot leave a half-persisted run. The
+    coroutine runs as its own short-lived helper task (NOT an Agent execution
+    task) and is shielded; if this task is cancelled (once or repeatedly) the
+    inner still completes, then CancelledError is re-raised so the caller
+    observes the cancellation after the invariant is restored.
+    """
+    inner = asyncio.ensure_future(coro)
+    me = asyncio.current_task()
+    cancelled = False
+    while True:
+        try:
+            await asyncio.shield(inner)
+            break
+        except asyncio.CancelledError:
+            cancelled = True
+            if me is not None:
+                me.uncancel()
+            if inner.done():
+                break
+            continue
+    if cancelled:
+        inner.result()  # surface an inner exception (if any) first
+        raise asyncio.CancelledError()
+    return inner.result()
+
+
 @dataclass(frozen=True, slots=True)
 class SessionSnapshot:
     """A consistent point-in-time view of one session.
@@ -197,40 +228,50 @@ class RuntimeService:
                 raise checkpoint_cleanup_error
 
     async def _shutdown(self) -> None:
-        # Cancel every active run task and wait for them to settle within the
-        # graceful timeout. A task that already started runs its own
-        # cancellation handler (Stopping -> Cancelled); a task cancelled before
-        # it ever started never entered its body, so its handler did not run.
-        items = list(self._tasks.items())
-        for _run_id, task in items:
+        # Cancel in-memory run tasks and let them converge within the graceful
+        # timeout. A task cancelled before it ever started never enters its
+        # body, so its terminal-guarantee finally does not run either.
+        items = list(self._tasks.values())
+        for task in items:
             if not task.done():
                 task.cancel()
         if items:
             try:
                 await asyncio.wait_for(
-                    asyncio.gather(
-                        *(task for _, task in items), return_exceptions=True
-                    ),
+                    asyncio.gather(*items, return_exceptions=True),
                     timeout=_GRACEFUL_TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
                 # Tasks that did not converge are left to the next process's
                 # reconciliation; do not block shutdown indefinitely.
                 pass
-        # Drive any still-nonterminal active run to a terminal state directly,
-        # covering the pre-start cancellation case. This is idempotent: runs the
-        # tasks already terminalized are skipped.
-        for run_id, _task in items:
-            try:
-                current = await self._runs.get(run_id)
-            except Exception:
-                continue
-            if current.status in _TERMINAL_STATUSES:
-                continue
-            try:
-                await self._handle_cancellation(current.session_id, run_id)
-            except Exception:
-                pass
+        # Persistent sweep: converge any active run that is still non-terminal.
+        # This reads the durable active_run_id (the persistent authority), so it
+        # also covers orphans that have no in-memory task (pre-registration or
+        # tasks cancelled before they started).
+        await self._sweep_active_run()
+
+    async def _sweep_active_run(self) -> None:
+        try:
+            active_id = await self._runs.active_run_id()
+        except Exception:
+            return
+        if active_id is None:
+            return
+        try:
+            current = await self._runs.get(active_id)
+        except Exception:
+            return
+        if current.status in _TERMINAL_STATUSES:
+            return
+        try:
+            await _run_uncancelled(
+                self._handle_cancellation(current.session_id, active_id)
+            )
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # session operations
@@ -312,41 +353,36 @@ class RuntimeService:
         run = await self._runs.create_and_acquire(
             session_id, user_input, model_snapshot
         )
-        # Invariant: once create_and_acquire succeeds, every exit path (return,
-        # exception, or external cancellation) must leave either a registered run
-        # task or a run persisted to a terminal state with the active slot
-        # cleared. run.created is committed before the task is created, so a
-        # cancellation/exception in the append or notify window (before the task
-        # is registered) must converge the orphan run rather than leave it
-        # non-terminal with no task.
-        task: asyncio.Task[None] | None = None
-        try:
-            await self._emit(
-                run.session_id,
-                run.run_id,
-                "run.created",
-                {
-                    "run_id": run.run_id,
-                    "session_id": run.session_id,
-                    "user_input": user_input,
-                },
-                RetentionClass.DURABLE,
-            )
-            task = asyncio.create_task(
-                self._run_guarded(run.session_id, run.run_id, user_input)
-            )
-            self._tasks[run.run_id] = task
-        except BaseException:
-            if task is None:
-                # The run task was never registered: converge the orphan to a
-                # terminal state and clear the active slot. Best-effort so a
-                # convergence error never masks the original exception.
-                try:
-                    await self._handle_cancellation(run.session_id, run.run_id)
-                except Exception:
-                    pass
-            raise
+        # Once the run is acquired it is ACCEPTED. Commit run.created and
+        # register the single execution task in one cancellation-deferred
+        # critical region: a caller cancellation (e.g. a panel disconnect) must
+        # never cancel an accepted Run or leave it without its task. Only after
+        # the task is registered do we notify subscribers.
+        record = await _run_uncancelled(self._accept_run(run, user_input))
+        await self._notify(record)
         return run
+
+    async def _accept_run(
+        self, run: RunRecord, user_input: str
+    ) -> EventRecord:
+        # Critical region: commit run.created, then synchronously create and
+        # register the execution task (no await between create and register).
+        record = await self._append(
+            run.session_id,
+            run.run_id,
+            "run.created",
+            {
+                "run_id": run.run_id,
+                "session_id": run.session_id,
+                "user_input": user_input,
+            },
+            RetentionClass.DURABLE,
+        )
+        task = asyncio.create_task(
+            self._run_guarded(run.session_id, run.run_id, user_input)
+        )
+        self._tasks[run.run_id] = task
+        return record
 
     async def get_run(self, run_id: str) -> RunRecord:
         return await self._runs.get(run_id)
@@ -543,25 +579,36 @@ class RuntimeService:
         try:
             await self._run(session_id, run_id, user_input)
         finally:
-            # Guarantee: when the run task ends, the run is in a terminal state.
-            # _run normally reaches Completed or Failed, but a cancellation, or a
-            # failure handler that yielded to a concurrent stop, can leave it
-            # non-terminal. Converge here so no active run is ever left without a
-            # task. Awaits proceed under a single in-flight cancellation, and
-            # this is best-effort so it never blocks task cleanup.
+            # Guarantee a terminal state when the task ends, even if _run was
+            # cancelled (including double-cancel) or a failure handler yielded.
+            # Convergence is cancellation-deferred so it cannot be interrupted.
             await self._ensure_terminal(session_id, run_id)
-            self._tasks.pop(run_id, None)
+            # Drop the in-memory reference only after confirming the run is
+            # terminal; a non-terminal residual is left for _shutdown's
+            # active-slot sweep / startup reconciliation.
+            try:
+                current = await self._runs.get(run_id)
+            except Exception:
+                return
+            if current.status in _TERMINAL_STATUSES:
+                self._tasks.pop(run_id, None)
 
     async def _ensure_terminal(
         self, session_id: str, run_id: str
     ) -> None:
-        try:
+        # Never raises: convergence runs cancellation-deferred. A residual
+        # non-terminal run (only on an unexpected DB error) is left for the
+        # shutdown sweep / reconciliation.
+        async def converge() -> None:
             current = await self._runs.get(run_id)
             if current.status not in _TERMINAL_STATUSES:
                 await self._handle_cancellation(session_id, run_id)
-        except BaseException:
-            # Best-effort convergence: a failure (including a re-cancellation)
-            # leaves the run for startup reconciliation; never block cleanup.
+
+        try:
+            await _run_uncancelled(converge())
+        except asyncio.CancelledError:
+            pass
+        except Exception:
             pass
 
     async def _run(
@@ -649,23 +696,36 @@ class RuntimeService:
         self, session_id: str, run_id: str
     ) -> None:
         error = _RUNTIME_FAILURE_ERROR
+        # Decide failure-vs-stop and persist the full failure bundle (Failed
+        # status + model.failed + run.state_changed + run.failed) in one
+        # cancellation-deferred critical region, so a task cancel can never leave
+        # a terminal Run with a partial event bundle. Subscriber notification
+        # happens afterward (best-effort delivery; events are durable).
+        records = await _run_uncancelled(
+            self._failure_persist(session_id, run_id, error)
+        )
+        for record in records:
+            await self._notify(record)
+
+    async def _failure_persist(
+        self, session_id: str, run_id: str, error: AgentError
+    ) -> list[EventRecord]:
         records: list[EventRecord] = []
         async with self._state_lock:
             current = await self._runs.get(run_id)
             if current.status in _TERMINAL_STATUSES:
                 # Already terminal: nothing to do.
-                return
+                return records
             if current.status in (
                 RunStatus.STOP_REQUESTED,
                 RunStatus.STOPPING,
             ):
                 # A stop owns the terminal state. Do not emit a contradictory
                 # model.failed; the cancellation convergence reaches Cancelled.
-                return
+                return records
             # Failure owns the terminal state: fail and append every failure
             # event under the lock, so a concurrent stop cannot interleave or
-            # observe a half-failed run. Subscribers are notified only after the
-            # lock is released and the run is already Failed.
+            # observe a half-failed run.
             from_status = current.status
             await self._runs.fail(run_id, error)
             records.append(
@@ -699,8 +759,7 @@ class RuntimeService:
                     RetentionClass.DURABLE,
                 )
             )
-        for record in records:
-            await self._notify(record)
+        return records
 
     async def _reconcile(self) -> None:
         # Capture the genuine pre-recovery status of every non-terminal run so
