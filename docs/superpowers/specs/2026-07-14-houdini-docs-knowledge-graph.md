@@ -1,6 +1,6 @@
 # Houdini 文档知识图谱（按需查询）设计
 
-- 状态：设计稿（待用户审阅）
+- 状态：已批准，实施计划已制定
 - 日期：2026-07-14
 - 开发分支：`feature/houdini-knowledge-graph`
 - 开发基线：`feature/foundation`（不依赖 `feature/runtime`）
@@ -204,10 +204,10 @@ NodeDocument
 HOM 页面实体分为 class、function、module、package。class 内的每个 `::` 方法块解析为独立 method entity：
 
 ```text
-hom:class:hou.Node
-hom:method:hou.Node#createNode
-hom:function:hou.node
-hom:module:hou.qt
+hom_class:hou.Node
+hom_method:hou.Node#createNode
+hom_function:hou.node
+hom_module:hou.qt
 ```
 
 method 保存 owner、method name、qualified name、signature、returns、summary、cppname、source anchor 和正文。重载使用同一逻辑 method entity 的 `signatures[]`；如果真实语料需要区分同名独立块，则增加稳定 overload ordinal，而不是覆盖。
@@ -298,6 +298,7 @@ entities(entity_id PRIMARY KEY, kind, subtype, canonical_name, title,
          summary, authority, source_path, source_anchor, is_current,
          attributes_json)
 aliases(alias, entity_id, alias_type, priority)
+facets(entity_id, facet_key, facet_value)
 edges(edge_id PRIMARY KEY, source_id, predicate, target_id, target_raw,
       target_anchor, resolved, source_location)
 documents(entity_id PRIMARY KEY, body)
@@ -308,6 +309,7 @@ entities_fts(entity_id UNINDEXED, canonical_name, title, summary, tags, body)
 需要的普通索引至少包括：
 
 - alias 精确值和 type
+- facet key/value（用于 tag、context、group、superclass、operator status）
 - entity kind/subtype/current
 - edge source/predicate
 - edge target/predicate
@@ -426,6 +428,8 @@ search_houdini_knowledge(
     context: str | None = None,
     tag: str | None = None,
     superclass: str | None = None,
+    predicate: str | None = None,
+    direction: str = "outgoing",
     include_historical: bool = False,
     limit: int = 5,
 ) -> dict
@@ -435,6 +439,7 @@ search_houdini_knowledge(
 
 - `symbol` 做精确/alias resolution。
 - `query` 使用 FTS5，必要时与结构过滤组合。
+- `predicate`/`direction` 只在 `symbol` 唯一解析后过滤其一跳关系；`direction` 只接受 `outgoing` 或 `incoming`。
 - 至少提供一个查询条件；空请求返回 `INVALID_ARGUMENT`。
 - `limit` 默认 5，硬上限 25。
 - 默认排除历史 node 文档。
