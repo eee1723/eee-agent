@@ -39,10 +39,11 @@ def _run(coro):
 
 
 class _FakeStream:
-    def __init__(self, items, state):
+    def __init__(self, items, state, close_error=None):
         self._items = items
         self._i = 0
         self._state = state
+        self._close_error = close_error
 
     def __aiter__(self):
         return self
@@ -57,13 +58,17 @@ class _FakeStream:
         return item
 
     async def aclose(self):
+        if self._close_error is not None:
+            self._state["close_attempted"] = True
+            raise self._close_error
         self._state["closed"] = True
 
 
 class _FakeGraph:
-    def __init__(self, items):
+    def __init__(self, items, close_error=None):
         self._items = items
-        self.state = {"closed": False}
+        self._close_error = close_error
+        self.state = {"closed": False, "close_attempted": False}
         self.astream_calls = []
 
     def astream(self, input, *, config=None, stream_mode=None):
@@ -74,7 +79,7 @@ class _FakeGraph:
                 "stream_mode": list(stream_mode) if stream_mode is not None else None,
             }
         )
-        return _FakeStream(self._items, self.state)
+        return _FakeStream(self._items, self.state, self._close_error)
 
 
 async def _drain(runner, *, session_id, user_input):
@@ -502,6 +507,74 @@ def test_consumer_aclose_closes_underlying_stream() -> None:
         assert isinstance(first, RunnerEvent)
         await gen.aclose()
         assert graph.state["closed"] is True
+
+    _run(scenario())
+
+
+# --------------------------------------------------------------------------
+# cleanup-failure exception priority
+# --------------------------------------------------------------------------
+
+def test_normal_completion_propagates_cleanup_failure_without_terminal_yields() -> None:
+    async def scenario() -> None:
+        graph = _FakeGraph(
+            [("messages", (AIMessageChunk(content="hi"), {}))],
+            close_error=RuntimeError("close boom"),
+        )
+        runner = AgentRunner(graph)
+        events: list = []
+        with pytest.raises(RuntimeError, match="close boom"):
+            async for ev in runner.stream(session_id="ses_x", user_input="hi"):
+                events.append(ev)
+        assert graph.state["close_attempted"] is True
+        assert not any(isinstance(e, RunnerCompleted) for e in events)
+        assert "model.completed" not in _ev_types(events)
+
+    _run(scenario())
+
+
+def test_graph_exception_wins_over_cleanup_failure() -> None:
+    async def scenario() -> None:
+        graph = _FakeGraph(
+            [
+                ("messages", (AIMessageChunk(content="x"), {})),
+                ValueError("graph boom"),
+            ],
+            close_error=RuntimeError("close boom"),
+        )
+        runner = AgentRunner(graph)
+        events: list = []
+        with pytest.raises(ValueError, match="graph boom"):
+            async for ev in runner.stream(session_id="ses_x", user_input="hi"):
+                events.append(ev)
+        assert graph.state["close_attempted"] is True
+        assert not any(isinstance(e, RunnerCompleted) for e in events)
+        assert "model.completed" not in _ev_types(events)
+
+    _run(scenario())
+
+
+def test_cancellation_wins_over_cleanup_failure() -> None:
+    async def scenario() -> None:
+        graph = _FakeGraph(
+            [("messages", (AIMessageChunk(content="x"), {}))],
+            close_error=RuntimeError("close boom"),
+        )
+        runner = AgentRunner(graph)
+        started = asyncio.Event()
+
+        async def consume() -> None:
+            async with aclosing(runner.stream(session_id="ses_x", user_input="hi")) as gen:
+                async for _ev in gen:
+                    started.set()
+                    await asyncio.sleep(3600)
+
+        task = asyncio.create_task(consume())
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert graph.state["close_attempted"] is True
 
     _run(scenario())
 

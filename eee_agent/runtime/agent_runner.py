@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import AsyncIterator, Callable
 from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass
@@ -180,15 +181,20 @@ class AgentRunner:
                                 if isinstance(msg, AIMessage):
                                     final_message = msg
         finally:
-            # Close the underlying stream on every exit path (normal exhaustion,
-            # graph exception, cancellation, early consumer close). Cleanup is
-            # best-effort and must never mask the in-flight exception.
+            # Detect an in-flight exception BEFORE attempting cleanup: a cleanup
+            # failure must propagate only on the normal path (so it is not hidden
+            # behind spurious success terminals). If the graph already raised,
+            # the consumer was cancelled, or the generator is being closed, the
+            # original exception/GeneratorExit must win and a cleanup error must
+            # not replace it.
+            had_in_flight_error = sys.exc_info()[0] is not None
             aclose = getattr(stream, "aclose", None)
             if aclose is not None:
                 try:
                     await aclose()
                 except BaseException:
-                    pass
+                    if not had_in_flight_error:
+                        raise
 
         if final_message is not None:
             final_response = _extract_ai_text(final_message)
