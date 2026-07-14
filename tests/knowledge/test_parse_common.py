@@ -184,3 +184,35 @@ def test_clean_body_preserves_signatures_and_arguments() -> None:
     cleaned = clean_body(body)
     assert "@usage int clamp(int value; int min; int max)" in cleaned
     assert "Argument ``value`` is required." in cleaned
+
+
+@pytest.mark.parametrize(
+    "indent",
+    ["    ", "\t", "        "],
+    ids=["spaces", "tab", "eight-spaces"],
+)
+def test_indented_include_directive_is_parsed(indent: str) -> None:
+    # Real Houdini docs indent include directives; they must still be parsed.
+    text = decode_source(
+        f"= Title =\n{indent}:include _common#geometry:\n".encode("utf-8")
+    )
+    refs = parse_references(text)
+    assert len(refs) == 1
+    r = refs[0]
+    assert r.target_kind == "Include"
+    assert r.raw_target == "_common#geometry"
+    assert r.normalized_target == "_common"
+    assert r.anchor == "geometry"
+    assert r.source_line == 2
+
+
+@pytest.mark.parametrize("indent", ["", "    "], ids=["unindented", "indented"])
+def test_clean_body_removes_vimeo_directive(indent: str) -> None:
+    # Real Houdini docs use :vimeo: as a video-only directive; the whole
+    # directive line (including its argument) must be dropped from the body.
+    body = f"Some prose.\n{indent}:vimeo: 123456789\nMore prose.\n"
+    cleaned = clean_body(body)
+    assert ":vimeo:" not in cleaned
+    assert "123456789" not in cleaned
+    assert "Some prose." in cleaned
+    assert "More prose." in cleaned

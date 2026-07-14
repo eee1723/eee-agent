@@ -148,7 +148,7 @@ def parse_sections(text: str) -> tuple[SectionDraft, ...]:
 
 # --- references -----------------------------------------------------------
 
-_INCLUDE_RE = re.compile(r"^:include\s+(?P<spec>.+):\s*$")
+_INCLUDE_RE = re.compile(r"^\s*:include\s+(?P<spec>.+):\s*$")
 _BRACKET_RE = re.compile(r"\[(?P<content>[^\[\]]+)\]")
 _LABELED_RE = re.compile(
     r"^(?P<display>[^|]+)\|(?P<kind>[A-Za-z][\w]*):(?P<rest>.+)$"
@@ -208,7 +208,8 @@ def parse_references(text: str) -> tuple[ReferenceDraft, ...]:
 
     Labeled references (``[Label|Kind:target]``) are classified before direct
     references so the inner ``Kind:target`` is never emitted a second time.
-    Include directives (``:include target#anchor:``) are parsed per line.
+    Include directives (``:include target#anchor:``) are parsed per line,
+    including those indented with leading spaces or tabs.
     One-based source line numbers are recorded.
     """
     refs: list[ReferenceDraft] = []
@@ -237,14 +238,14 @@ def parse_references(text: str) -> tuple[ReferenceDraft, ...]:
 # --- body cleaning --------------------------------------------------------
 
 _DIRECTIVE_LINE_RE = re.compile(
-    r"^\s*:(?:fig|image|video|media|movie):", re.IGNORECASE
+    r"^\s*:(?:fig|image|video|vimeo|media|movie):", re.IGNORECASE
 )
 
 
 def clean_body(text: str) -> str:
     """Return body text with figure/image/video directives and blank runs removed.
 
-    Whole-line ``:fig:``/``:image:``/``:video:``/``:media:``/``:movie:``
+    Whole-line ``:fig:``/``:image:``/``:video:``/``:vimeo:``/``:media:``/``:movie:``
     directives are dropped, repeated blank lines collapse to one, and
     leading/trailing blank lines are stripped. Headings, signatures,
     arguments and prose are preserved.
