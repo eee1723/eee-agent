@@ -50,16 +50,36 @@ _PRIORITY_QUALIFIED = 100
 _PRIORITY_SHORT = 80
 _PRIORITY_CASEFOLD = 10
 
-_METHOD_HEADER_RE = re.compile(r"^::\s*(?P<name>[A-Za-z_]\w*)\s*$")
+# A real HOM method header looks like:
+#   ::`methodName(self, arg)` -> [Hom:hou.Type]:
+# The leading ``::``` introduces the block; the call is backtick-quoted; the
+# return expression follows ``->``; an optional trailing ``:`` may be present.
+_METHOD_HEADER_RE = re.compile(
+    r"^::`(?P<call>[^`]+)`"
+    r"(?:\s*->\s*(?P<returns>.+?))?"
+    r"\s*:?\s*$"
+)
 _HEADING_RE = re.compile(r"^={2,}\s")
-_SIGNATURE_RE = re.compile(r"^:signature:\s*(?P<value>.*)$")
-_RETURNS_RE = re.compile(r"^:returns:\s*(?P<value>.*)$")
-_CPPNAME_RE = re.compile(r"^:cppname:\s*(?P<value>.*)$")
+_CPPNAME_RE = re.compile(r"^\s*#cppname:\s*(?P<value>.+?)\s*$")
 
 _EMPTY = ParsedDocument(entities=(), aliases=(), edges=())
 
 
-def _qualified_name(metadata: dict[str, str], title: str) -> str:
+def _qualified_from_path(logical_path: str) -> str:
+    """Derive a stable qualified name from a normalized HOM source path.
+
+    ``hou/Node.txt`` -> ``hou.Node``; ``hou/qt/ColorField.txt`` ->
+    ``hou.qt.ColorField``. Used only when neither the title nor explicit
+    metadata provide a name, so the entity id is never built from an empty key.
+    """
+    path = logical_path
+    basename = path.rsplit("/", 1)[-1]
+    if "." in basename:
+        path = path.rsplit(".", 1)[0]
+    return path.replace("/", ".")
+
+
+def _qualified_name(metadata: dict[str, str], title: str, logical_path: str) -> str:
     if title:
         return title
     namespace = metadata.get("namespace", "")
@@ -67,7 +87,7 @@ def _qualified_name(metadata: dict[str, str], title: str) -> str:
         name = metadata.get(key, "")
         if name:
             return f"{namespace}.{name}" if namespace else name
-    return ""
+    return _qualified_from_path(logical_path)
 
 
 def _split_qualified(qualified: str) -> tuple[str, str]:
@@ -114,10 +134,19 @@ def _build_aliases(entity_id: str, qualified: str, short: str) -> list[AliasDraf
 
 
 def _reference_edges(
-    entity_id: str, logical_path: str, references
+    entity_id: str,
+    logical_path: str,
+    references,
+    exclude_lines: set[int] | None = None,
 ) -> list[EdgeDraft]:
     edges: list[EdgeDraft] = []
+    excluded = exclude_lines or set()
     for ref in references:
+        # Skip references that originate inside a method block (e.g. a
+        # header return-type annotation like ``[Hom:hou.Node]``); those are
+        # method-scoped, not class-level cross-references.
+        if ref.source_line in excluded:
+            continue
         if ref.target_kind == "Include":
             predicate = "includes"
             target_raw = ref.raw_target
@@ -141,12 +170,29 @@ def _reference_edges(
     return edges
 
 
+def _method_name(call: str) -> str:
+    """Extract the method name from a call like ``createNode(self, type)``."""
+    paren = call.find("(")
+    if paren >= 0:
+        return call[:paren].strip()
+    return call.strip()
+
+
+def _signature(call: str, returns: str | None) -> str:
+    """Build a stable signature preserving the call and return expression."""
+    signature = f"`{call}`"
+    if returns:
+        signature = f"{signature} -> {returns}"
+    return signature
+
+
 def _parse_methods(
     text: str, logical_path: str, owner: str, class_id: str
-) -> tuple[list[EntityDraft], list[EdgeDraft]]:
+) -> tuple[list[EntityDraft], list[EdgeDraft], set[int]]:
     lines = text.split("\n")
     methods: dict[str, dict] = {}
     order: list[str] = []
+    method_lines: set[int] = set()
 
     index = 0
     while index < len(lines):
@@ -154,10 +200,14 @@ def _parse_methods(
         if not header:
             index += 1
             continue
-        method_name = header.group("name")
+        call = header.group("call")
+        method_name = _method_name(call)
+        returns = header.group("returns")
+        if returns is not None:
+            returns = returns.strip()
+        signature = _signature(call, returns)
         start_line = index + 1
-        signatures: list[str] = []
-        returns: str | None = None
+        method_lines.add(start_line)
         cppname: str | None = None
         body_lines: list[str] = []
         index += 1
@@ -165,22 +215,15 @@ def _parse_methods(
             line = lines[index]
             if _METHOD_HEADER_RE.match(line) or _HEADING_RE.match(line):
                 break
-            sig = _SIGNATURE_RE.match(line)
-            if sig:
-                signatures.append(sig.group("value").strip())
-                index += 1
-                continue
-            ret = _RETURNS_RE.match(line)
-            if ret:
-                returns = ret.group("value").strip()
-                index += 1
-                continue
+            method_lines.add(index + 1)
             cpp = _CPPNAME_RE.match(line)
             if cpp:
                 cppname = cpp.group("value").strip()
                 index += 1
                 continue
-            body_lines.append(line)
+            stripped = line.strip()
+            if stripped:
+                body_lines.append(stripped)
             index += 1
 
         if method_name not in methods:
@@ -193,9 +236,8 @@ def _parse_methods(
             }
             order.append(method_name)
         entry = methods[method_name]
-        for signature in signatures:
-            if signature not in entry["signatures"]:
-                entry["signatures"].append(signature)
+        if signature not in entry["signatures"]:
+            entry["signatures"].append(signature)
         if returns is not None and entry["returns"] is None:
             entry["returns"] = returns
         if cppname is not None and entry["cppname"] is None:
@@ -209,11 +251,7 @@ def _parse_methods(
         qualified = f"{owner}#{method_name}"
         method_id = make_entity_id(EntityKind.HOM_METHOD, qualified)
         body = clean_body("\n".join(entry["body_lines"]))
-        summary = ""
-        for line in entry["body_lines"]:
-            if line.strip():
-                summary = line.strip()
-                break
+        summary = entry["body_lines"][0] if entry["body_lines"] else ""
         attributes: dict[str, object] = {
             "owner": owner,
             "name": method_name,
@@ -251,7 +289,7 @@ def _parse_methods(
                 source_location=f"{logical_path}:{entry['start_line']}",
             )
         )
-    return entities, edges
+    return entities, edges, method_lines
 
 
 def parse_hom_document(source_path: str, text: str) -> ParsedDocument:
@@ -265,7 +303,7 @@ def parse_hom_document(source_path: str, text: str) -> ParsedDocument:
 
     kind = _KIND_BY_TYPE[page_type]
     title = parse_title(text)
-    qualified = _qualified_name(metadata, title)
+    qualified = _qualified_name(metadata, title, logical_path)
     summary = parse_summary(text)
     namespace, short = _split_qualified(qualified)
     entity_id = make_entity_id(kind, qualified)
@@ -317,8 +355,9 @@ def parse_hom_document(source_path: str, text: str) -> ParsedDocument:
             )
         )
 
+    method_lines: set[int] = set()
     if page_type == "homclass":
-        method_entities, method_edges = _parse_methods(
+        method_entities, method_edges, method_lines = _parse_methods(
             text, logical_path, qualified, entity_id
         )
         entities.extend(method_entities)
@@ -332,7 +371,11 @@ def parse_hom_document(source_path: str, text: str) -> ParsedDocument:
                 )
             )
 
-    edges.extend(_reference_edges(entity_id, logical_path, parse_references(text)))
+    edges.extend(
+        _reference_edges(
+            entity_id, logical_path, parse_references(text), method_lines
+        )
+    )
 
     return ParsedDocument(
         entities=tuple(entities),

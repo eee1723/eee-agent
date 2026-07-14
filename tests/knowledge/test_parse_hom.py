@@ -17,24 +17,25 @@ from eee_agent.knowledge.parse_hom import parse_hom_document
 
 
 HOM_NODE_FIXTURE = (
-    "#type: homclass\n#namespace: hou\n#class: Node\n"
-    "#superclass: hou.NodeReferenceCounted\n#cppname: HOM_Node\n"
     "= hou.Node =\n"
-    "\"\"\"Node class summary.\"\"\"\n"
-    "::createNode\n"
-    ":signature: createNode(type, name=None) -> Node\n"
-    ":returns: hou.Node\n"
-    ":cppname: createNode\n"
-    "Creates a new node.\n"
-    "::createNode\n"
-    ":signature: createNode(type, name) -> Node\n"
-    "Second overload body.\n"
-    "::path\n"
-    ":signature: path() -> str\n"
-    ":returns: str\n"
-    ":cppname: path\n"
-    "Returns the node path.\n"
+    "#type: homclass\n#cppname: HOM_Node\n#superclass: hou.NetworkMovableItem\n"
+    "\n"
+    "\"\"\"Synthetic node summary.\"\"\"\n"
+    "\n"
+    "::`createNode(self, type_name)` -> [Hom:hou.Node]:\n"
+    "    #cppname: HOM_Node::createNode\n"
+    "    Creates a child node.\n"
+    "\n"
+    "::`createNode(self, type_name, node_name)` -> [Hom:hou.Node]\n"
+    "    #cppname: HOM_Node::createNode\n"
+    "    Creates a named child node.\n"
+    "\n"
+    "::`path(self)` -> `str`:\n"
+    "    #cppname: HOM_Node::path\n"
+    "    Returns the node path.\n"
+    "\n"
     "== See Also ==\n"
+    "\n"
     "See [Hom:hou.Node#createNode] and [Vex:intersect].\n"
 )
 
@@ -102,7 +103,7 @@ def test_hom_class_entity() -> None:
     assert entity.entity_id == "hom_class:hou.Node"
     assert entity.kind == EntityKind.HOM_CLASS
     assert entity.title == "hou.Node"
-    assert entity.summary == "Node class summary."
+    assert entity.summary == "Synthetic node summary."
     assert entity.attributes["cppname"] == "HOM_Node"
     assert entity.attributes["namespace"] == "hou"
 
@@ -150,8 +151,8 @@ def test_repeated_method_signatures_aggregate_in_source_order() -> None:
     parsed = parse_hom_document("hou/Node.txt", HOM_NODE_FIXTURE)
     method = {e.entity_id: e for e in parsed.entities}["hom_method:hou.Node#createNode"]
     assert method.attributes["signatures"] == (
-        "createNode(type, name=None) -> Node",
-        "createNode(type, name) -> Node",
+        "`createNode(self, type_name)` -> [Hom:hou.Node]",
+        "`createNode(self, type_name, node_name)` -> [Hom:hou.Node]",
     )
 
 
@@ -164,9 +165,9 @@ def test_overloads_do_not_overwrite() -> None:
 def test_method_block_stops_at_next_method() -> None:
     parsed = parse_hom_document("hou/Node.txt", HOM_NODE_FIXTURE)
     path = {e.entity_id: e for e in parsed.entities}["hom_method:hou.Node#path"]
-    assert path.attributes["signatures"] == ("path() -> str",)
-    assert "Creates a new node." not in path.body
-    assert "Second overload" not in path.body
+    assert path.attributes["signatures"] == ("`path(self)` -> `str`",)
+    assert "Creates a child node." not in path.body
+    assert "Creates a named child node." not in path.body
 
 
 def test_method_block_stops_at_next_section() -> None:
@@ -188,9 +189,46 @@ def test_method_owner_name_qualified_name_attributes() -> None:
 def test_method_returns_summary_cppname() -> None:
     parsed = parse_hom_document("hou/Node.txt", HOM_NODE_FIXTURE)
     method = {e.entity_id: e for e in parsed.entities}["hom_method:hou.Node#createNode"]
-    assert method.attributes["returns"] == "hou.Node"
-    assert method.attributes["cppname"] == "createNode"
-    assert method.summary == "Creates a new node."
+    assert method.attributes["returns"] == "[Hom:hou.Node]"
+    assert method.attributes["cppname"] == "HOM_Node::createNode"
+    assert method.summary == "Creates a child node."
+
+
+def test_method_header_without_trailing_colon() -> None:
+    parsed = parse_hom_document("hou/Node.txt", HOM_NODE_FIXTURE)
+    method = {e.entity_id: e for e in parsed.entities}["hom_method:hou.Node#createNode"]
+    # The second createNode block omits the trailing colon; its signature is
+    # still captured and aggregated.
+    assert len(method.attributes["signatures"]) == 2
+    assert "`createNode(self, type_name, node_name)`" in method.attributes["signatures"][1]
+
+
+def test_method_body_excludes_method_metadata() -> None:
+    parsed = parse_hom_document("hou/Node.txt", HOM_NODE_FIXTURE)
+    method = {e.entity_id: e for e in parsed.entities}["hom_method:hou.Node#createNode"]
+    assert "#cppname" not in method.body
+    assert "HOM_Node::createNode" not in method.body
+    assert "Creates a child node." in method.body
+
+
+def test_method_return_from_header_for_path() -> None:
+    parsed = parse_hom_document("hou/Node.txt", HOM_NODE_FIXTURE)
+    path = {e.entity_id: e for e in parsed.entities}["hom_method:hou.Node#path"]
+    assert path.attributes["returns"] == "`str`"
+    assert path.attributes["cppname"] == "HOM_Node::path"
+
+
+def test_safe_source_path_fallback_when_title_is_absent() -> None:
+    text = "#type: homclass\n#namespace: hou\n\"\"\"No title page.\"\"\"\n"
+    entity = parse_hom_document("hou/Node.txt", text).entities[0]
+    assert entity.entity_id == "hom_class:hou.Node"
+    assert entity.attributes["qualified_name"] == "hou.Node"
+
+
+def test_safe_source_path_fallback_for_nested_path() -> None:
+    text = "#type: homclass\n#namespace: hou\n\"\"\"Nested.\"\"\"\n"
+    entity = parse_hom_document("hou/qt/ColorField.txt", text).entities[0]
+    assert entity.entity_id == "hom_class:hou.qt.ColorField"
 
 
 def test_declares_method_edge_targets_method_entity() -> None:
@@ -211,7 +249,7 @@ def test_inherits_from_edge_is_unresolved() -> None:
     assert len(inherit_edges) == 1
     edge = inherit_edges[0]
     assert edge.source_id == "hom_class:hou.Node"
-    assert edge.target_raw == "hou.NodeReferenceCounted"
+    assert edge.target_raw == "hou.NetworkMovableItem"
     assert edge.target_id is None
     assert edge.resolved is False
     assert edge.source_location.startswith("hou/Node.txt:")

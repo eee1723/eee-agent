@@ -70,13 +70,16 @@ def parse_metadata(text: str) -> dict[str, str]:
 
 # --- title ----------------------------------------------------------------
 
-_TITLE_RE = re.compile(r"^=\s+(?P<title>.+?)\s+=\s*$", re.MULTILINE)
+_TITLE_RE = re.compile(r"^=(?!=)\s*(?P<title>.+?)\s*=(?!=)\s*$", re.MULTILINE)
 
 
 def parse_title(text: str) -> str:
     """Return the single-``=`` page title, or ``""`` if absent.
 
-    Section headings (``==`` or more) are not matched.
+    Accepts both the spaced form ``= Title =`` and the compact form
+    ``= Title=``. Section headings (``==`` or more) are never matched: each
+    delimiter must be a single ``=`` (negative lookahead guards against the
+    second ``=`` of a ``==`` heading).
     """
     match = _TITLE_RE.search(text)
     return match.group("title") if match else ""

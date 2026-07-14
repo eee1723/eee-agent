@@ -216,3 +216,18 @@ def test_clean_body_removes_vimeo_directive(indent: str) -> None:
     assert "123456789" not in cleaned
     assert "Some prose." in cleaned
     assert "More prose." in cleaned
+
+
+def test_parse_title_accepts_spaced_form() -> None:
+    assert parse_title("= hou.Node =") == "hou.Node"
+
+
+def test_parse_title_accepts_compact_form() -> None:
+    # Real HOM class pages use compact titles with no space before the
+    # closing delimiter, e.g. "= hou.Drawable2D=".
+    assert parse_title("= hou.Drawable2D=") == "hou.Drawable2D"
+
+
+def test_parse_title_still_rejects_section_headings() -> None:
+    assert parse_title("== Overview ==") == ""
+    assert parse_title("=== Sub ===") == ""
