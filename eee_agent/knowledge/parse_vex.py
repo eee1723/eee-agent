@@ -33,7 +33,10 @@ __all__ = ["parse_vex_document"]
 
 _USAGE_RE = re.compile(r"^:usage:\s*(?P<value>.*)$")
 _RETURNS_RE = re.compile(r"^:returns:\s*(?P<value>.*)$")
-_RELATED_RE = re.compile(r"^@related\s+(?P<target>.+?)\s*$")
+# @related may be inline ("@related intersect" / "@related [Vex:foo]") or a
+# block ("@related" / "@related:") followed by "- [Kind:target]" list items.
+_RELATED_RE = re.compile(r"^@related(?![A-Za-z0-9_]):?[ \t]*(?P<target>.*)$")
+_LIST_ITEM_RE = re.compile(r"^-\s+\[")
 
 _PRIORITY_QUALIFIED = 100
 _PRIORITY_TITLE = 60
@@ -53,31 +56,101 @@ def _split_tags(value: str) -> tuple[str, ...]:
     return tuple(token for token in (s.strip() for s in re.split(r"[,\n]", value)) if token)
 
 
-def _build_edges(
-    entity_id: str, logical_path: str, text: str
-) -> list[EdgeDraft]:
+def _related_target(inline: str) -> tuple[str, str | None]:
+    """Return ``(target_raw, anchor)`` for an inline @related target.
+
+    Explicit typed bracket syntax preserves the full typed target; a plain
+    target keeps its plain spelling.
+    """
+    inline = inline.strip()
+    if inline.startswith("["):
+        for ref in parse_references(inline):
+            if ref.target_kind == "Anchor":
+                continue
+            target_raw = (
+                ref.raw_target
+                if ref.target_kind == "Include"
+                else f"{ref.target_kind}:{ref.raw_target}"
+            )
+            return target_raw, ref.anchor
+    return inline, None
+
+
+def _parse_related(
+    text: str, logical_path: str, entity_id: str
+) -> tuple[list[EdgeDraft], set[int]]:
+    """Parse @related directives into unresolved related_to edges.
+
+    Returns the edges and the set of source lines they occupy, so the same
+    bracket references are not also emitted as ordinary references.
+    """
+    lines = text.split("\n")
     edges: list[EdgeDraft] = []
     related_lines: set[int] = set()
-    for line_number, line in enumerate(text.split("\n"), start=1):
-        if not line.startswith("@related"):
+    index = 0
+    while index < len(lines):
+        match = _RELATED_RE.match(lines[index])
+        if not match:
+            index += 1
             continue
+        line_number = index + 1
         related_lines.add(line_number)
-        match = _RELATED_RE.match(line)
-        if match:
+        inline = match.group("target").strip()
+        if inline:
+            target_raw, anchor = _related_target(inline)
             edges.append(
                 EdgeDraft(
                     source_id=entity_id,
                     predicate="related_to",
                     target_id=None,
-                    target_raw=match.group("target").strip(),
-                    target_anchor=None,
+                    target_raw=target_raw,
+                    target_anchor=anchor,
                     resolved=False,
                     source_location=f"{logical_path}:{line_number}",
                 )
             )
+            index += 1
+            continue
+        # Block form: consume blank lines and "- [Kind:target]" list items.
+        index += 1
+        while index < len(lines):
+            stripped = lines[index].strip()
+            if _LIST_ITEM_RE.match(stripped):
+                related_lines.add(index + 1)
+                for ref in parse_references(lines[index]):
+                    if ref.target_kind == "Anchor":
+                        continue
+                    target_raw = (
+                        ref.raw_target
+                        if ref.target_kind == "Include"
+                        else f"{ref.target_kind}:{ref.raw_target}"
+                    )
+                    edges.append(
+                        EdgeDraft(
+                            source_id=entity_id,
+                            predicate="related_to",
+                            target_id=None,
+                            target_raw=target_raw,
+                            target_anchor=ref.anchor,
+                            resolved=False,
+                            source_location=f"{logical_path}:{index + 1}",
+                        )
+                    )
+                index += 1
+            elif stripped == "":
+                related_lines.add(index + 1)
+                index += 1
+            else:
+                break
+    return edges, related_lines
 
+
+def _build_edges(
+    entity_id: str, logical_path: str, text: str
+) -> list[EdgeDraft]:
+    edges, related_lines = _parse_related(text, logical_path, entity_id)
     for ref in parse_references(text):
-        # A bracket inside an @related line is represented by the related_to
+        # A bracket inside an @related block is represented by the related_to
         # edge above, not duplicated as an ordinary reference.
         if ref.source_line in related_lines:
             continue
@@ -119,16 +192,33 @@ def parse_vex_document(source_path: str, text: str) -> ParsedDocument:
 
     signatures: list[str] = []
     returns = ""
-    for line in text.split("\n"):
+    lines = text.split("\n")
+    index = 0
+    while index < len(lines):
+        line = lines[index]
         usage = _USAGE_RE.match(line)
         if usage:
             value = usage.group("value").strip()
             if value:
                 signatures.append(value)
+            index += 1
             continue
         ret = _RETURNS_RE.match(line)
         if ret:
-            returns = ret.group("value").strip()
+            inline = ret.group("value").strip()
+            parts = [inline] if inline else []
+            index += 1
+            # Block form: indented continuation lines until a non-indented line.
+            while index < len(lines) and (
+                lines[index].startswith(" ") or lines[index].startswith("\t")
+            ):
+                continuation = lines[index].strip()
+                if continuation:
+                    parts.append(continuation)
+                index += 1
+            returns = "\n".join(parts)
+            continue
+        index += 1
 
     attributes: dict[str, object] = {
         "context": metadata.get("context", ""),

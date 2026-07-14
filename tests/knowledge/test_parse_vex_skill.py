@@ -136,6 +136,121 @@ def test_vex_parser_does_not_read_filesystem() -> None:
     assert parsed.entities[0].source_path == "functions/does-not-exist.txt"
 
 
+VEX_RETURNS_BLOCK_FIXTURE = (
+    "#type: vex\n#context: sop\n= returns_block =\n"
+    "\"\"\"Returns a count.\"\"\"\n"
+    ":usage: returns_block(geo) -> int\n"
+    ":returns:\n"
+    "    The number of intersections.\n"
+    "    Zero means no intersection was found.\n"
+)
+
+VEX_RETURNS_BOUNDARY_FIXTURE = (
+    "#type: vex\n#context: sop\n= rb =\n\"\"\"S.\"\"\"\n"
+    ":usage: rb(geo) -> int\n"
+    ":returns:\n"
+    "    First return line.\n"
+    "== See Also ==\n"
+    "Not part of returns.\n"
+)
+
+VEX_RELATED_BLOCK_FIXTURE = (
+    "#type: vex\n#context: sop\n= related_block =\n\"\"\"S.\"\"\"\n"
+    ":usage: related_block(geo) -> int\n"
+    "@related\n\n"
+    "- [Vex:intersect]\n"
+    "- [Vex:rayhit]\n"
+    "== See Also ==\n"
+    "See [Node:sop/boolean].\n"
+)
+
+VEX_RELATED_COLON_FIXTURE = (
+    "#type: vex\n#context: sop\n= rc =\n\"\"\"S.\"\"\"\n"
+    ":usage: rc(geo) -> int\n"
+    "@related:\n\n"
+    "- [Vex:intersect]\n"
+)
+
+VEX_RELATED_ANCHOR_FIXTURE = (
+    "#type: vex\n#context: sop\n= ra =\n\"\"\"S.\"\"\"\n"
+    ":usage: ra(geo) -> int\n"
+    "@related\n\n"
+    "- [Hom:hou.Node#createNode]\n"
+)
+
+
+def test_vex_returns_block_form() -> None:
+    entity = parse_vex_document(
+        "functions/returns_block.txt", VEX_RETURNS_BLOCK_FIXTURE
+    ).entities[0]
+    returns = entity.attributes["returns"]
+    assert "The number of intersections." in returns
+    assert "Zero means no intersection was found." in returns
+    assert returns.index("The number") < returns.index("Zero")
+
+
+def test_vex_returns_inline_form_still_supported() -> None:
+    entity = parse_vex_document("functions/intersect_all.txt", VEX_FIXTURE).entities[0]
+    assert entity.attributes["returns"] == "int"
+
+
+def test_vex_returns_block_does_not_absorb_section() -> None:
+    entity = parse_vex_document(
+        "functions/rb.txt", VEX_RETURNS_BOUNDARY_FIXTURE
+    ).entities[0]
+    assert entity.attributes["returns"] == "First return line."
+    assert "Not part of returns." not in entity.attributes["returns"]
+
+
+def test_vex_related_block_creates_typed_related_to_edges() -> None:
+    parsed = parse_vex_document("functions/related_block.txt", VEX_RELATED_BLOCK_FIXTURE)
+    related = [e for e in parsed.edges if e.predicate == "related_to"]
+    assert {e.target_raw for e in related} == {"Vex:intersect", "Vex:rayhit"}
+    for edge in related:
+        assert edge.target_id is None
+        assert edge.resolved is False
+
+
+def test_vex_related_colon_block() -> None:
+    parsed = parse_vex_document("functions/rc.txt", VEX_RELATED_COLON_FIXTURE)
+    related = [e for e in parsed.edges if e.predicate == "related_to"]
+    assert len(related) == 1
+    assert related[0].target_raw == "Vex:intersect"
+
+
+def test_vex_related_block_preserves_anchor() -> None:
+    parsed = parse_vex_document("functions/ra.txt", VEX_RELATED_ANCHOR_FIXTURE)
+    related = [e for e in parsed.edges if e.predicate == "related_to"]
+    assert len(related) == 1
+    assert related[0].target_raw == "Hom:hou.Node#createNode"
+    assert related[0].target_anchor == "createNode"
+
+
+def test_vex_related_block_source_location() -> None:
+    parsed = parse_vex_document("functions/related_block.txt", VEX_RELATED_BLOCK_FIXTURE)
+    related = {e.target_raw: e for e in parsed.edges if e.predicate == "related_to"}
+    # List items are on lines 8 and 9 of the fixture.
+    assert related["Vex:intersect"].source_location == "functions/related_block.txt:8"
+    assert related["Vex:rayhit"].source_location == "functions/related_block.txt:9"
+
+
+def test_vex_related_block_not_duplicated_as_references() -> None:
+    parsed = parse_vex_document("functions/related_block.txt", VEX_RELATED_BLOCK_FIXTURE)
+    ref_edges = [e for e in parsed.edges if e.predicate == "references"]
+    # Only the See Also [Node:sop/boolean] is an ordinary reference.
+    assert {e.target_raw for e in ref_edges} == {"Node:sop/boolean"}
+
+
+def test_vex_related_does_not_infer_from_plain_prose() -> None:
+    text = (
+        "#type: vex\n#context: sop\n= plain =\n\"\"\"S.\"\"\"\n"
+        ":usage: plain(geo) -> int\n"
+        "You can use the intersect function here.\n"
+    )
+    parsed = parse_vex_document("functions/plain.txt", text)
+    assert [e for e in parsed.edges if e.predicate == "related_to"] == []
+
+
 # --- Skill ----------------------------------------------------------------
 
 def test_skill_entity_id_and_slug() -> None:
