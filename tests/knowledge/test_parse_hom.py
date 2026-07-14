@@ -288,3 +288,151 @@ def test_normalized_logical_source_path() -> None:
     entity = parse_hom_document(r"hou\Node.txt", HOM_NODE_FIXTURE).entities[0]
     assert entity.source_path == "hou/Node.txt"
     assert "\\" not in entity.source_path
+
+
+HOM_METHOD_REFS_FIXTURE = (
+    "= hou.Node =\n#type: homclass\n\n"
+    "\"\"\"Synthetic class.\"\"\"\n\n"
+    "::`createNode(self, type_name)` -> [Hom:hou.Node]:\n"
+    "    #cppname: HOM_Node::createNode\n"
+    "    Uses [Vex:intersect].\n"
+    "    See [Node:sop/boolean].\n"
+    "    :include _common#method_notes:\n"
+    "\n"
+    "== Class Notes ==\n\n"
+    "See [Hom:hou.Network].\n"
+)
+
+
+def test_method_scoped_references_sourced_from_method() -> None:
+    parsed = parse_hom_document("hou/Node.txt", HOM_METHOD_REFS_FIXTURE)
+    method_id = "hom_method:hou.Node#createNode"
+    ref_edges = [
+        e for e in parsed.edges
+        if e.source_id == method_id and e.predicate == "references"
+    ]
+    targets = {(e.target_raw, e.target_anchor, e.source_location) for e in ref_edges}
+    # Header return + two body references.
+    assert ("Hom:hou.Node", None, "hou/Node.txt:6") in targets
+    assert ("Vex:intersect", None, "hou/Node.txt:8") in targets
+    assert ("Node:sop/boolean", None, "hou/Node.txt:9") in targets
+    for edge in ref_edges:
+        assert edge.target_id is None
+        assert edge.resolved is False
+
+
+def test_method_scoped_include_sourced_from_method() -> None:
+    parsed = parse_hom_document("hou/Node.txt", HOM_METHOD_REFS_FIXTURE)
+    method_id = "hom_method:hou.Node#createNode"
+    include_edges = [
+        e for e in parsed.edges
+        if e.source_id == method_id and e.predicate == "includes"
+    ]
+    assert len(include_edges) == 1
+    edge = include_edges[0]
+    assert edge.target_raw == "_common#method_notes"
+    assert edge.target_anchor == "method_notes"
+    assert edge.source_location == "hou/Node.txt:10"
+    assert edge.resolved is False
+
+
+def test_method_scoped_edges_not_emitted_from_class() -> None:
+    parsed = parse_hom_document("hou/Node.txt", HOM_METHOD_REFS_FIXTURE)
+    class_id = "hom_class:hou.Node"
+    class_edges = [
+        e for e in parsed.edges
+        if e.source_id == class_id and e.predicate in ("references", "includes")
+    ]
+    # Only the class-level [Hom:hou.Network] reference.
+    assert {e.target_raw for e in class_edges} == {"Hom:hou.Network"}
+
+
+def test_class_level_reference_remains_class_sourced() -> None:
+    parsed = parse_hom_document("hou/Node.txt", HOM_METHOD_REFS_FIXTURE)
+    class_id = "hom_class:hou.Node"
+    ref_edges = [
+        e for e in parsed.edges
+        if e.source_id == class_id and e.predicate == "references"
+    ]
+    assert len(ref_edges) == 1
+    assert ref_edges[0].target_raw == "Hom:hou.Network"
+    assert ref_edges[0].source_location == "hou/Node.txt:14"
+
+
+def test_no_duplicate_method_or_class_edge() -> None:
+    parsed = parse_hom_document("hou/Node.txt", HOM_METHOD_REFS_FIXTURE)
+    # Each (source_id, predicate, target_raw, source_location) appears once.
+    keys = [
+        (e.source_id, e.predicate, e.target_raw, e.source_location)
+        for e in parsed.edges
+    ]
+    assert len(keys) == len(set(keys))
+
+
+HOM_METHOD_VARIANTS_FIXTURE = (
+    "= hou.Variants =\n#type: homclass\n\n\"\"\"Variants.\"\"\"\n\n"
+    "::`sessionId(self)` - `int`:\n    Body one.\n\n"
+    "::`animBar(self)`: -> [Hom:hou.AnimBar]:\n    Body two.\n\n"
+    "::`isScheduler(self)` - > `bool`:\n    Body three.\n\n"
+    "::`geometryTypes(self) ->` `tuple` of [Hom:hou.geometryType] values:\n"
+    "    Body four.\n\n"
+    "::`selectPosition(self, input_node=None,\n    output_node=None)` -> [Hom:hou.Vector2]:\n"
+    "    Body five.\n"
+)
+
+
+def test_method_header_variants_recognized() -> None:
+    parsed = parse_hom_document("hou/Variants.txt", HOM_METHOD_VARIANTS_FIXTURE)
+    by_id = {e.entity_id: e for e in parsed.entities}
+    assert "hom_method:hou.Variants#sessionId" in by_id
+    assert "hom_method:hou.Variants#animBar" in by_id
+    assert "hom_method:hou.Variants#isScheduler" in by_id
+    assert "hom_method:hou.Variants#geometryTypes" in by_id
+    assert "hom_method:hou.Variants#selectPosition" in by_id
+
+
+def test_method_variant_returns() -> None:
+    parsed = parse_hom_document("hou/Variants.txt", HOM_METHOD_VARIANTS_FIXTURE)
+    by_id = {e.entity_id: e for e in parsed.entities}
+    assert by_id["hom_method:hou.Variants#sessionId"].attributes["returns"] == "`int`"
+    assert by_id["hom_method:hou.Variants#animBar"].attributes["returns"] == "[Hom:hou.AnimBar]"
+    assert by_id["hom_method:hou.Variants#isScheduler"].attributes["returns"] == "`bool`"
+    assert by_id["hom_method:hou.Variants#selectPosition"].attributes["returns"] == "[Hom:hou.Vector2]"
+
+
+def test_multiline_method_header_signature() -> None:
+    parsed = parse_hom_document("hou/Variants.txt", HOM_METHOD_VARIANTS_FIXTURE)
+    by_id = {e.entity_id: e for e in parsed.entities}
+    sig = by_id["hom_method:hou.Variants#selectPosition"].attributes["signatures"]
+    assert len(sig) == 1
+    assert "selectPosition(self, input_node=None, output_node=None)" in sig[0]
+    assert "[Hom:hou.Vector2]" in sig[0]
+
+
+def test_enum_constant_declarations_are_not_methods() -> None:
+    fixture = (
+        "= hou.Enums =\n#type: homclass\n\n\"\"\"Enums.\"\"\"\n\n"
+        ":: PositionOff\n:: PositionTop\n:: IntegerType\n"
+    )
+    parsed = parse_hom_document("hou/Enums.txt", fixture)
+    methods = [e for e in parsed.entities if e.kind == EntityKind.HOM_METHOD]
+    assert methods == []
+
+
+def test_repeated_same_name_methods_map_refs_to_same_entity() -> None:
+    fixture = (
+        "= hou.Repeated =\n#type: homclass\n\n\"\"\"Repeated.\"\"\"\n\n"
+        "::`createNode(self, type_name)` -> [Hom:hou.Node]:\n    First [Vex:intersect].\n\n"
+        "::`createNode(self, type_name, name)` -> [Hom:hou.Node]:\n    Second [Vex:rayhit].\n"
+    )
+    parsed = parse_hom_document("hou/Repeated.txt", fixture)
+    by_id = {e.entity_id: e for e in parsed.entities}
+    method = by_id["hom_method:hou.Repeated#createNode"]
+    assert len(method.attributes["signatures"]) == 2
+    method_refs = [
+        e for e in parsed.edges
+        if e.source_id == method.entity_id and e.predicate == "references"
+    ]
+    targets = {e.target_raw for e in method_refs}
+    assert "Vex:intersect" in targets
+    assert "Vex:rayhit" in targets

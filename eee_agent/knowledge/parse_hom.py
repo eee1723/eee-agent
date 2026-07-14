@@ -50,17 +50,15 @@ _PRIORITY_QUALIFIED = 100
 _PRIORITY_SHORT = 80
 _PRIORITY_CASEFOLD = 10
 
-# A real HOM method header looks like:
-#   ::`methodName(self, arg)` -> [Hom:hou.Type]:
-# The leading ``::``` introduces the block; the call is backtick-quoted; the
-# return expression follows ``->``; an optional trailing ``:`` may be present.
-_METHOD_HEADER_RE = re.compile(
-    r"^::`(?P<call>[^`]+)`"
-    r"(?:\s*->\s*(?P<returns>.+?))?"
-    r"\s*:?\s*$"
-)
+# Method headers look like ``::`call(self, arg)` -> [Hom:Type]:`` with many
+# markup variants around the backticks, colons and return separators, and may
+# span multiple indented lines. A method is recognized only when the
+# backtick-quoted call contains ``(``; ``:: Name`` enum/constant declarations
+# (no backtick call) are excluded. Recognition lives in ``_try_method_header``.
 _HEADING_RE = re.compile(r"^={2,}\s")
 _CPPNAME_RE = re.compile(r"^\s*#cppname:\s*(?P<value>.+?)\s*$")
+_METHOD_NAME_RE = re.compile(r"^[A-Za-z_]\w*$")
+_RETURN_SEP_RE = re.compile(r"^[:\s>-]+")
 
 _EMPTY = ParsedDocument(entities=(), aliases=(), edges=())
 
@@ -137,16 +135,15 @@ def _reference_edges(
     entity_id: str,
     logical_path: str,
     references,
-    exclude_lines: set[int] | None = None,
+    line_owner: dict[int, str] | None = None,
 ) -> list[EdgeDraft]:
     edges: list[EdgeDraft] = []
-    excluded = exclude_lines or set()
+    seen: set[tuple[str, str, str, str | None, int]] = set()
+    owner_map = line_owner or {}
     for ref in references:
-        # Skip references that originate inside a method block (e.g. a
-        # header return-type annotation like ``[Hom:hou.Node]``); those are
-        # method-scoped, not class-level cross-references.
-        if ref.source_line in excluded:
-            continue
+        # A reference inside a method block (header return type or body) is
+        # sourced from the owning method entity, not the class.
+        source_id = owner_map.get(ref.source_line, entity_id)
         if ref.target_kind == "Include":
             predicate = "includes"
             target_raw = ref.raw_target
@@ -156,9 +153,15 @@ def _reference_edges(
         else:
             predicate = "references"
             target_raw = f"{ref.target_kind}:{ref.raw_target}"
+        # Two identical bracket occurrences on the same source line (e.g.
+        # "a [Hom:hou.Parm] or tuple of [Hom:hou.Parm]") yield one edge.
+        key = (source_id, predicate, target_raw, ref.anchor, ref.source_line)
+        if key in seen:
+            continue
+        seen.add(key)
         edges.append(
             EdgeDraft(
-                source_id=entity_id,
+                source_id=source_id,
                 predicate=predicate,
                 target_id=None,
                 target_raw=target_raw,
@@ -170,12 +173,13 @@ def _reference_edges(
     return edges
 
 
-def _method_name(call: str) -> str:
-    """Extract the method name from a call like ``createNode(self, type)``."""
-    paren = call.find("(")
-    if paren >= 0:
-        return call[:paren].strip()
-    return call.strip()
+def _extract_return(after: str) -> str:
+    """Extract the return expression from the text after the call's backticks."""
+    text = after.strip().rstrip(":").strip()
+    match = _RETURN_SEP_RE.match(text)
+    if match:
+        return text[match.end():].strip()
+    return text
 
 
 def _signature(call: str, returns: str | None) -> str:
@@ -186,36 +190,69 @@ def _signature(call: str, returns: str | None) -> str:
     return signature
 
 
+def _try_method_header(
+    lines: list[str], index: int
+) -> tuple[str, str, str, str, int] | None:
+    """If ``lines[index]`` starts a method header, return
+    ``(method_name, call, returns, signature, next_index)``; else ``None``.
+
+    ``next_index`` is the 0-based index of the first line after the header.
+    Tolerates markup variants (``-``, ``- >``, ``: ->`` separators, trailing
+    ``:``) and headers whose backtick call spans multiple indented lines.
+    """
+    if not lines[index].startswith("::`"):
+        return None
+    parts = [lines[index]]
+    end = index
+    while "\n".join(parts).count("`") < 2:
+        end += 1
+        if end >= len(lines):
+            return None
+        parts.append(lines[end])
+    joined = "\n".join(parts)
+    open_pos = joined.index("`")
+    close_pos = joined.index("`", open_pos + 1)
+    call = joined[open_pos + 1:close_pos]
+    if "(" not in call:
+        return None  # property / non-call -> not a method
+    paren = call.find("(")
+    method_name = call[:paren].strip()
+    if not method_name or not _METHOD_NAME_RE.match(method_name):
+        return None
+    returns = _extract_return(joined[close_pos + 1:])
+    normalized_call = re.sub(r"\s+", " ", call).strip()
+    signature = _signature(normalized_call, returns)
+    return method_name, call, returns, signature, end + 1
+
+
 def _parse_methods(
     text: str, logical_path: str, owner: str, class_id: str
-) -> tuple[list[EntityDraft], list[EdgeDraft], set[int]]:
+) -> tuple[list[EntityDraft], list[EdgeDraft], dict[int, str]]:
     lines = text.split("\n")
     methods: dict[str, dict] = {}
     order: list[str] = []
-    method_lines: set[int] = set()
+    # 1-based source line -> owning method entity id (for method-scoped refs).
+    line_owner: dict[int, str] = {}
 
     index = 0
     while index < len(lines):
-        header = _METHOD_HEADER_RE.match(lines[index])
-        if not header:
+        header = _try_method_header(lines, index)
+        if header is None:
             index += 1
             continue
-        call = header.group("call")
-        method_name = _method_name(call)
-        returns = header.group("returns")
-        if returns is not None:
-            returns = returns.strip()
-        signature = _signature(call, returns)
+        method_name, _call, returns, signature, next_index = header
+        method_id = make_entity_id(EntityKind.HOM_METHOD, f"{owner}#{method_name}")
         start_line = index + 1
-        method_lines.add(start_line)
+        for line_number in range(index + 1, next_index + 1):
+            line_owner[line_number] = method_id
         cppname: str | None = None
         body_lines: list[str] = []
-        index += 1
+        index = next_index
         while index < len(lines):
             line = lines[index]
-            if _METHOD_HEADER_RE.match(line) or _HEADING_RE.match(line):
+            if line.startswith("::`") or _HEADING_RE.match(line):
                 break
-            method_lines.add(index + 1)
+            line_owner[index + 1] = method_id
             cpp = _CPPNAME_RE.match(line)
             if cpp:
                 cppname = cpp.group("value").strip()
@@ -238,9 +275,9 @@ def _parse_methods(
         entry = methods[method_name]
         if signature not in entry["signatures"]:
             entry["signatures"].append(signature)
-        if returns is not None and entry["returns"] is None:
+        if returns and entry["returns"] is None:
             entry["returns"] = returns
-        if cppname is not None and entry["cppname"] is None:
+        if cppname and entry["cppname"] is None:
             entry["cppname"] = cppname
         entry["body_lines"].extend(body_lines)
 
@@ -289,7 +326,7 @@ def _parse_methods(
                 source_location=f"{logical_path}:{entry['start_line']}",
             )
         )
-    return entities, edges, method_lines
+    return entities, edges, line_owner
 
 
 def parse_hom_document(source_path: str, text: str) -> ParsedDocument:
@@ -355,9 +392,9 @@ def parse_hom_document(source_path: str, text: str) -> ParsedDocument:
             )
         )
 
-    method_lines: set[int] = set()
+    line_owner: dict[int, str] = {}
     if page_type == "homclass":
-        method_entities, method_edges, method_lines = _parse_methods(
+        method_entities, method_edges, line_owner = _parse_methods(
             text, logical_path, qualified, entity_id
         )
         entities.extend(method_entities)
@@ -373,7 +410,7 @@ def parse_hom_document(source_path: str, text: str) -> ParsedDocument:
 
     edges.extend(
         _reference_edges(
-            entity_id, logical_path, parse_references(text), method_lines
+            entity_id, logical_path, parse_references(text), line_owner
         )
     )
 
