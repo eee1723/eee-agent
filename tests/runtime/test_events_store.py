@@ -1173,3 +1173,49 @@ def test_failures_keep_session_bounds_and_event_count(db_path: Path) -> None:
             await db.close()
 
     _run(scenario())
+
+
+# --------------------------------------------------------------------------
+# cross-session active-run scoping + exact public type hints
+# --------------------------------------------------------------------------
+
+def test_snapshot_does_not_include_other_sessions_active_run(db_path: Path) -> None:
+    async def scenario() -> None:
+        db, sessions, runs, store = await _open(db_path)
+        try:
+            a = await sessions.create("A")
+            b = await sessions.create("B")
+            active_a = await runs.create_and_acquire(a.session_id, "inspect", {"m": 1})
+
+            snapshot_b = await store.snapshot_data(b.session_id)
+            assert snapshot_b.session.session_id == b.session_id
+            assert snapshot_b.active_run is None
+            assert snapshot_b.runs == ()
+
+            snapshot_a = await store.snapshot_data(a.session_id)
+            assert snapshot_a.session.session_id == a.session_id
+            assert snapshot_a.active_run is not None
+            assert snapshot_a.active_run.run_id == active_a.run_id
+            assert snapshot_a.active_run.session_id == a.session_id
+
+            # B's snapshot must carry none of A's run data.
+            assert active_a.run_id not in {r.run_id for r in snapshot_b.runs}
+            assert "inspect" not in {r.user_input for r in snapshot_b.runs}
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_session_snapshot_data_has_exact_public_type_hints() -> None:
+    from typing import get_type_hints
+
+    from eee_agent.runtime.models import RunRecord, SessionRecord
+
+    hints = get_type_hints(SessionSnapshotData)
+    assert hints["session"] is SessionRecord
+    assert hints["runs"] == tuple[RunRecord, ...]
+    assert hints["active_run"] == RunRecord | None
+    assert hints["snapshot_seq"] is int
+    assert hints["has_earlier_runs"] is bool
+    assert hints["earliest_included_run_id"] == str | None

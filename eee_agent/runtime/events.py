@@ -9,7 +9,9 @@ from eee_agent.runtime.database import RuntimeDatabase
 from eee_agent.runtime.models import (
     EventRecord,
     RetentionClass,
+    RunRecord,
     RunStatus,
+    SessionRecord,
     canonical_json_dumps,
     canonical_json_loads,
 )
@@ -133,9 +135,9 @@ class ReplayResult:
 
 @dataclass(frozen=True, slots=True)
 class SessionSnapshotData:
-    session: object  # SessionRecord
-    runs: tuple[object, ...]  # tuple[RunRecord, ...]
-    active_run: object | None  # RunRecord | None
+    session: SessionRecord
+    runs: tuple[RunRecord, ...]
+    active_run: RunRecord | None
     snapshot_seq: int
     has_earlier_runs: bool
     earliest_included_run_id: str | None
@@ -337,9 +339,14 @@ class EventStore:
             active_id = state_row["active_run_id"] if state_row is not None else None
             active_run = None
             if active_id is not None:
+                # Scope by the target session: a globally active run that
+                # belongs to a different session must not appear in this
+                # snapshot. A same-session active run is still returned even
+                # when it falls outside the newest 100.
                 active_cursor = await conn.execute(
-                    f"SELECT {_RUN_COLUMNS} FROM runs WHERE run_id = ?",
-                    (active_id,),
+                    f"SELECT {_RUN_COLUMNS} FROM runs "
+                    "WHERE run_id = ? AND session_id = ?",
+                    (active_id, sid),
                 )
                 active_row = await active_cursor.fetchone()
                 if active_row is not None:
