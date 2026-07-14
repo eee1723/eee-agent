@@ -9,6 +9,7 @@ import pytest
 
 
 PROBE = Path("scripts/env_probe.sh")
+ATTRIBUTES = Path(".gitattributes")
 
 
 def _bash_command() -> str:
@@ -81,6 +82,11 @@ def test_wsl_availability_probe_executes_windows_python(
 
 def test_probe_is_tracked_in_the_foundation_branch() -> None:
     assert PROBE.is_file()
+
+
+def test_shell_scripts_are_checked_out_with_lf_endings() -> None:
+    attributes = ATTRIBUTES.read_text(encoding="utf-8").splitlines()
+    assert "*.sh text eol=lf" in attributes
 
 
 def test_probe_checks_wsl_mount_before_git_bash_mount() -> None:
