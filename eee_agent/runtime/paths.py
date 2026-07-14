@@ -24,6 +24,10 @@ class RuntimePaths:
             home = Path(override)
             if not home.is_absolute():
                 raise ValueError("EEE_RUNTIME_HOME must be absolute")
+            # Inspect the raw path before resolve(); resolve() would normalize a
+            # `..` segment away (approved spec rejects parent traversal).
+            if ".." in home.parts:
+                raise ValueError("EEE_RUNTIME_HOME must not contain parent traversal")
         else:
             local = os.getenv("LOCALAPPDATA")
             if not local:
