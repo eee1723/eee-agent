@@ -163,7 +163,7 @@ def _build_edges(
             target_raw = f"#{ref.anchor}" if ref.anchor else ""
         else:
             predicate = "references"
-            target_raw = ref.raw_target
+            target_raw = f"{ref.target_kind}:{ref.raw_target}"
         edges.append(
             EdgeDraft(
                 source_id=entity_id,

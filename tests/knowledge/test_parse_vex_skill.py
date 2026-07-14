@@ -93,7 +93,7 @@ def test_vex_typed_reference_edge_is_unresolved() -> None:
     parsed = parse_vex_document("functions/intersect_all.txt", VEX_FIXTURE)
     ref_edges = [e for e in parsed.edges if e.predicate == "references"]
     assert len(ref_edges) == 1
-    assert ref_edges[0].target_raw == "sop/boolean"
+    assert ref_edges[0].target_raw == "Node:sop/boolean"
     assert ref_edges[0].target_id is None
     assert ref_edges[0].resolved is False
 
@@ -199,11 +199,31 @@ def test_skill_explicit_typed_links_create_unresolved_edges() -> None:
     parsed = parse_skill_document("skills/vex-patterns/SKILL.md", SKILL_FIXTURE)
     ref_edges = [e for e in parsed.edges if e.predicate == "references"]
     targets = {e.target_raw for e in ref_edges}
-    assert "intersect" in targets
-    assert "sop/boolean" in targets
+    assert "Vex:intersect" in targets
+    assert "Node:sop/boolean" in targets
     for edge in ref_edges:
         assert edge.target_id is None
         assert edge.resolved is False
+
+
+def test_skill_edge_source_location_uses_original_lines() -> None:
+    text = (
+        "---\nname: demo\ndescription: demo\n---\n\n"
+        "# Demo\n\n## Links\nSee [Vex:intersect].\n"
+    )
+    parsed = parse_skill_document("skills/demo/SKILL.md", text)
+    ref_edges = [e for e in parsed.edges if e.predicate == "references"]
+    assert len(ref_edges) == 1
+    assert ref_edges[0].source_location == "skills/demo/SKILL.md:9"
+    assert ref_edges[0].target_raw == "Vex:intersect"
+
+
+def test_skill_without_frontmatter_keeps_original_lines() -> None:
+    text = "# Demo\n\n## Links\nSee [Vex:intersect].\n"
+    parsed = parse_skill_document("skills/demo/SKILL.md", text)
+    ref_edges = [e for e in parsed.edges if e.predicate == "references"]
+    assert len(ref_edges) == 1
+    assert ref_edges[0].source_location == "skills/demo/SKILL.md:4"
 
 
 def test_skill_plain_prose_does_not_infer_edge() -> None:

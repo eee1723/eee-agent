@@ -214,12 +214,40 @@ def test_unresolved_ordinary_reference_edge() -> None:
     parsed = parse_node_document("sop/boolean.txt", BOOLEAN_FIXTURE)
     ref_edges = [e for e in parsed.edges if e.predicate == "references"]
     targets = {(e.target_raw, e.target_anchor) for e in ref_edges}
-    assert ("hou.Node#createNode", "createNode") in targets
-    assert ("intersect", None) in targets
+    assert ("Hom:hou.Node#createNode", "createNode") in targets
+    assert ("Vex:intersect", None) in targets
     for edge in ref_edges:
         assert edge.target_id is None
         assert edge.resolved is False
         assert edge.source_location.startswith("sop/boolean.txt:")
+
+
+def test_typed_references_preserve_kind_in_target_raw() -> None:
+    fixture = (
+        "#type: node\n#context: sop\n= Typed =\n\"\"\"Typed refs.\"\"\"\n"
+        "See [Node:sop/boolean], [Boolean SOP|Node:sop/boolean], "
+        "[Hom:hou.Node#createNode] and [Vex:intersect].\n"
+    )
+    parsed = parse_node_document("sop/typed.txt", fixture)
+    ref_edges = [e for e in parsed.edges if e.predicate == "references"]
+    target_raws = {e.target_raw for e in ref_edges}
+    assert target_raws == {
+        "Node:sop/boolean",
+        "Hom:hou.Node#createNode",
+        "Vex:intersect",
+    }
+    hom = next(e for e in ref_edges if e.target_raw == "Hom:hou.Node#createNode")
+    assert hom.target_anchor == "createNode"
+
+
+def test_typed_reference_collision_remains_distinguishable() -> None:
+    fixture = (
+        "#type: node\n#context: sop\n= Collision =\n\"\"\"Collisions.\"\"\"\n"
+        "See [Node:foo] [Vex:foo] [Hom:foo].\n"
+    )
+    parsed = parse_node_document("sop/collision.txt", fixture)
+    ref_edges = [e for e in parsed.edges if e.predicate == "references"]
+    assert {e.target_raw for e in ref_edges} == {"Node:foo", "Vex:foo", "Hom:foo"}
 
 
 def test_unresolved_include_edge() -> None:

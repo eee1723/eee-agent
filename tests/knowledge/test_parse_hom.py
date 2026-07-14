@@ -233,8 +233,8 @@ def test_unresolved_ordinary_references_remain_unresolved() -> None:
     parsed = parse_hom_document("hou/Node.txt", HOM_NODE_FIXTURE)
     ref_edges = [e for e in parsed.edges if e.predicate == "references"]
     targets = {(e.target_raw, e.target_anchor) for e in ref_edges}
-    assert ("hou.Node#createNode", "createNode") in targets
-    assert ("intersect", None) in targets
+    assert ("Hom:hou.Node#createNode", "createNode") in targets
+    assert ("Vex:intersect", None) in targets
     for edge in ref_edges:
         assert edge.target_id is None
         assert edge.resolved is False

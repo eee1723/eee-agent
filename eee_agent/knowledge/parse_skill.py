@@ -48,24 +48,31 @@ def _skill_slug(logical_path: str) -> str:
     return stem
 
 
-def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
+def _parse_frontmatter(text: str) -> tuple[dict[str, str], str, int]:
+    """Return ``(frontmatter, body, line_offset)``.
+
+    ``line_offset`` is the count of original lines consumed by the frontmatter
+    block (including the closing ``---``), so an original source line number
+    equals the body-relative line number plus this offset. It is 0 when no
+    frontmatter is present, leaving source locations unchanged.
+    """
     lines = text.split("\n")
     if not lines or lines[0].strip() != "---":
-        return {}, text
+        return {}, text, 0
     end = None
     for index in range(1, len(lines)):
         if lines[index].strip() == "---":
             end = index
             break
     if end is None:
-        return {}, text
+        return {}, text, 0
     frontmatter: dict[str, str] = {}
     for line in lines[1:end]:
         if ":" in line:
             key, value = line.split(":", 1)
             frontmatter[key.strip()] = value.strip()
     body = "\n".join(lines[end + 1:])
-    return frontmatter, body
+    return frontmatter, body, end + 1
 
 
 def _markdown_title(body: str) -> str:
@@ -108,7 +115,9 @@ def _parse_markdown_sections(body: str) -> tuple[SectionDraft, ...]:
     return tuple(sections)
 
 
-def _build_edges(entity_id: str, logical_path: str, body: str) -> list[EdgeDraft]:
+def _build_edges(
+    entity_id: str, logical_path: str, body: str, offset: int
+) -> list[EdgeDraft]:
     edges: list[EdgeDraft] = []
     for ref in parse_references(body):
         if ref.target_kind == "Include":
@@ -119,7 +128,7 @@ def _build_edges(entity_id: str, logical_path: str, body: str) -> list[EdgeDraft
             target_raw = f"#{ref.anchor}" if ref.anchor else ""
         else:
             predicate = "references"
-            target_raw = ref.raw_target
+            target_raw = f"{ref.target_kind}:{ref.raw_target}"
         edges.append(
             EdgeDraft(
                 source_id=entity_id,
@@ -128,7 +137,7 @@ def _build_edges(entity_id: str, logical_path: str, body: str) -> list[EdgeDraft
                 target_raw=target_raw,
                 target_anchor=ref.anchor,
                 resolved=False,
-                source_location=f"{logical_path}:{ref.source_line}",
+                source_location=f"{logical_path}:{ref.source_line + offset}",
             )
         )
     return edges
@@ -137,7 +146,7 @@ def _build_edges(entity_id: str, logical_path: str, body: str) -> list[EdgeDraft
 def parse_skill_document(source_path: str, text: str) -> ParsedDocument:
     """Parse a repository SKILL.md into a single skill_reference entity."""
     logical_path = normalize_source_path(source_path)
-    frontmatter, body = _parse_frontmatter(text)
+    frontmatter, body, line_offset = _parse_frontmatter(text)
     slug = _skill_slug(logical_path)
     title = _markdown_title(body)
     summary = frontmatter.get("description", "")
@@ -182,7 +191,7 @@ def parse_skill_document(source_path: str, text: str) -> ParsedDocument:
             )
         )
 
-    edges = _build_edges(entity_id, logical_path, body)
+    edges = _build_edges(entity_id, logical_path, body, line_offset)
 
     return ParsedDocument(
         entities=(entity,),
