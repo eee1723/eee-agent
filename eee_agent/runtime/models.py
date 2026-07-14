@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections.abc import Mapping
@@ -138,6 +139,38 @@ def thaw_json(value: object) -> object:
     if type(value) is tuple:
         return [thaw_json(item) for item in value]
     return value
+
+
+def canonical_json_dumps(value: object) -> str:
+    """Serialize a JSON value to canonical, sorted, compact, finite text.
+
+    Reuses the strict ``freeze_json`` contract (rejects non-JSON values,
+    non-string keys, cycles, and non-finite floats), then emits UTF-8-safe
+    JSON with sorted keys, compact separators, and ``allow_nan=False``.
+    Shared by RunRepository and EventStore so persisted JSON text is stable
+    regardless of input key order.
+    """
+    return json.dumps(
+        thaw_json(freeze_json(value)),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def canonical_json_loads(text: object) -> object:
+    """Parse canonical JSON text back into plain Python JSON values.
+
+    The result is plain (not frozen); callers feed it back into a record
+    constructor, which re-validates and deep-freezes it.
+    """
+    if type(text) is not str:
+        raise TypeError("canonical JSON text must be an exact string")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid canonical JSON text: {exc}") from exc
 
 
 @dataclass(frozen=True, slots=True)
