@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -599,6 +600,99 @@ def test_repository_never_writes_events_or_advances_seq(db_path: Path) -> None:
             )
             assert row["last_seq"] == 0
             assert row["replay_floor_seq"] == 0
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+# --------------------------------------------------------------------------
+# 16. concurrent TOCTOU: return a transaction-local snapshot, not a post-commit re-read
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("op", ["create", "rename", "archive"])
+def test_mutation_returns_committed_snapshot_under_concurrent_delete(
+    db_path: Path, op: str
+) -> None:
+    async def scenario() -> None:
+        db, repo = await _open(db_path)
+        try:
+            seed: SessionRecord | None = None
+            if op in ("rename", "archive"):
+                seed = await repo.create("seed")
+
+            original_write_transaction = db.write_transaction
+            mutation_committed = asyncio.Event()
+            allow_return = asyncio.Event()
+            paused = False
+
+            @asynccontextmanager
+            async def pause_after_commit():
+                nonlocal paused
+                # The real transaction runs unchanged; only AFTER it has exited
+                # (COMMIT done, write lock released) do we pause, which is the
+                # exact window between commit and the repository's return.
+                async with original_write_transaction() as conn:
+                    yield conn
+                if not paused:
+                    paused = True
+                    mutation_committed.set()
+                    await allow_return.wait()
+
+            db.write_transaction = pause_after_commit
+
+            if op == "create":
+                task = asyncio.create_task(repo.create("race"))
+            elif op == "rename":
+                assert seed is not None
+                task = asyncio.create_task(repo.rename(seed.session_id, "renamed"))
+            else:
+                assert seed is not None
+                task = asyncio.create_task(repo.archive(seed.session_id))
+
+            await mutation_committed.wait()
+
+            if op == "create":
+                committed_row = await db.fetchone(
+                    "SELECT session_id FROM sessions WHERE title = 'race'"
+                )
+                assert committed_row is not None
+                session_id = committed_row["session_id"]
+            else:
+                assert seed is not None
+                session_id = seed.session_id
+
+            # Prove the mutation itself committed before the pause.
+            state = await db.fetchone(
+                "SELECT title, status FROM sessions WHERE session_id = ?",
+                (session_id,),
+            )
+            assert state is not None
+            if op == "rename":
+                assert state["title"] == "renamed"
+            elif op == "archive":
+                assert state["status"] == "archived"
+
+            # Concurrently delete the just-committed session.
+            await SessionRepository(db).delete_application_records(session_id)
+            assert await _count(db, "sessions", "session_id = ?", (session_id,)) == 0
+
+            allow_return.set()
+            result = await task
+
+            # The mutator must return its own committed snapshot, not re-read a
+            # now-deleted row (which would surface runtime.session_not_found).
+            assert result.session_id == session_id
+            assert result.last_seq == 0
+            assert result.replay_floor_seq == 0
+            if op == "create":
+                assert result.title == "race"
+                assert result.status is SessionStatus.ACTIVE
+            elif op == "rename":
+                assert result.title == "renamed"
+                assert result.status is SessionStatus.ACTIVE
+            else:
+                assert result.status is SessionStatus.ARCHIVED
         finally:
             await db.close()
 

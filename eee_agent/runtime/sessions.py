@@ -107,7 +107,19 @@ class SessionRepository:
     async def create(self, title: str) -> SessionRecord:
         normalized = _normalize_title(title)
         session_id = new_id(IdKind.SESSION)
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
+        # The return record is built from the same values we are about to write,
+        # so it is determined by this transaction and not by a post-commit re-read
+        # that could observe a concurrent delete.
+        record = SessionRecord(
+            session_id=session_id,
+            title=normalized,
+            status=SessionStatus.ACTIVE,
+            created_at=now,
+            updated_at=now,
+            last_seq=0,
+            replay_floor_seq=0,
+        )
         async with self._database.write_transaction() as conn:
             await conn.execute(
                 "INSERT INTO sessions(session_id, title, status, created_at, "
@@ -117,11 +129,11 @@ class SessionRepository:
                     session_id,
                     normalized,
                     SessionStatus.ACTIVE.value,
-                    now_iso,
-                    now_iso,
+                    now.isoformat(),
+                    now.isoformat(),
                 ),
             )
-        return await self.get(session_id)
+        return record
 
     async def get(self, session_id: str) -> SessionRecord:
         sid = _require_session_id(session_id)
@@ -141,22 +153,32 @@ class SessionRepository:
     async def rename(self, session_id: str, title: str) -> SessionRecord:
         sid = _require_session_id(session_id)
         normalized = _normalize_title(title)
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
         async with self._database.write_transaction() as conn:
-            cursor = await conn.execute(
-                "SELECT 1 FROM sessions WHERE session_id = ?", (sid,)
-            )
-            if await cursor.fetchone() is None:
+            cursor = await conn.execute(_SELECT_SESSION, (sid,))
+            row = await cursor.fetchone()
+            if row is None:
                 raise _session_not_found()
             await conn.execute(
                 "UPDATE sessions SET title = ?, updated_at = ? WHERE session_id = ?",
-                (normalized, now_iso, sid),
+                (normalized, now.isoformat(), sid),
             )
-        return await self.get(sid)
+            # Build the return record from the row read inside this transaction
+            # plus the values just written; no post-commit re-read.
+            record = SessionRecord(
+                session_id=row["session_id"],
+                title=normalized,
+                status=SessionStatus(row["status"]),
+                created_at=datetime.fromisoformat(row["created_at"]),
+                updated_at=now,
+                last_seq=row["last_seq"],
+                replay_floor_seq=row["replay_floor_seq"],
+            )
+        return record
 
     async def archive(self, session_id: str) -> SessionRecord:
         sid = _require_session_id(session_id)
-        now_iso = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(timezone.utc)
         async with self._database.write_transaction() as conn:
             cursor = await conn.execute(_SELECT_SESSION, (sid,))
             row = await cursor.fetchone()
@@ -170,9 +192,23 @@ class SessionRepository:
                 await conn.execute(
                     "UPDATE sessions SET status = ?, updated_at = ? "
                     "WHERE session_id = ?",
-                    (SessionStatus.ARCHIVED.value, now_iso, sid),
+                    (SessionStatus.ARCHIVED.value, now.isoformat(), sid),
                 )
-        return await self.get(sid)
+                # Transition record built from this transaction's row plus the
+                # new status/timestamp; no post-commit re-read.
+                record = SessionRecord(
+                    session_id=row["session_id"],
+                    title=row["title"],
+                    status=SessionStatus.ARCHIVED,
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                    updated_at=now,
+                    last_seq=row["last_seq"],
+                    replay_floor_seq=row["replay_floor_seq"],
+                )
+            else:
+                # Already archived: idempotent no-op, return the current row.
+                record = _row_to_session(row)
+        return record
 
     async def delete_application_records(self, session_id: str) -> None:
         sid = _require_session_id(session_id)
