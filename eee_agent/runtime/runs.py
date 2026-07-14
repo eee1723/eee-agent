@@ -202,13 +202,29 @@ class RunRepository:
         validated_input = _validate_user_input(user_input)
         if type(model_snapshot) is not dict:
             raise TypeError("model_snapshot must be an exact dict")
-        # Validate + canonicalize before entering the transaction so invalid
-        # input never acquires the write lock or the active slot.
+        # Capture a single independent snapshot before the first await. Both the
+        # persisted DB text and the returned record derive from it, so a caller
+        # mutating the original dict while this coroutine awaits the write lock
+        # cannot make them diverge. The original model_snapshot is never read
+        # again after this point.
         snapshot_text = canonical_json_dumps(model_snapshot)
+        snapshot_value = canonical_json_loads(snapshot_text)
 
         run_id = new_id(IdKind.RUN)
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
+        record = RunRecord(
+            run_id=run_id,
+            session_id=sid,
+            status=RunStatus.CREATED,
+            user_input=validated_input,
+            final_response=None,
+            created_at=now,
+            started_at=None,
+            finished_at=None,
+            failure_json=None,
+            model_snapshot_json=snapshot_value,
+        )
         async with self._database.write_transaction() as conn:
             sess_cursor = await conn.execute(
                 "SELECT status FROM sessions WHERE session_id = ?", (sid,)
@@ -244,18 +260,6 @@ class RunRepository:
                 "UPDATE runtime_state SET active_run_id = ?, updated_at = ? "
                 "WHERE singleton_id = 1",
                 (run_id, now_iso),
-            )
-            record = RunRecord(
-                run_id=run_id,
-                session_id=sid,
-                status=RunStatus.CREATED,
-                user_input=validated_input,
-                final_response=None,
-                created_at=now,
-                started_at=None,
-                finished_at=None,
-                failure_json=None,
-                model_snapshot_json=model_snapshot,
             )
         return record
 

@@ -1232,3 +1232,78 @@ def test_repository_writes_no_events_and_keeps_session_seq(db_path: Path) -> Non
             await db.close()
 
     _run(scenario())
+
+
+# --------------------------------------------------------------------------
+# capture model_snapshot before the first await (no mutable-input race)
+# --------------------------------------------------------------------------
+
+def test_create_captures_model_snapshot_before_first_await(db_path: Path) -> None:
+    async def scenario() -> None:
+        db, sessions, runs = await _open(db_path)
+        try:
+            session = await sessions.create("A")
+
+            original_write_transaction = db.write_transaction
+            holder_entered = asyncio.Event()
+            release_holder = asyncio.Event()
+            entered_write_transaction = asyncio.Event()
+
+            async def hold_write_lock() -> None:
+                async with original_write_transaction():
+                    holder_entered.set()
+                    await release_holder.wait()
+
+            @asynccontextmanager
+            async def observed_write_transaction():
+                # Set before acquiring the lock: by the time write_transaction is
+                # called, create_and_acquire has finished all validation and
+                # canonicalization, so snapshot_text is already captured.
+                entered_write_transaction.set()
+                async with original_write_transaction() as conn:
+                    yield conn
+
+            holder = asyncio.create_task(hold_write_lock())
+            await holder_entered.wait()
+            db.write_transaction = observed_write_transaction
+
+            source = {"model": {"name": "original", "options": [1, 2]}}
+
+            create_task = asyncio.create_task(
+                runs.create_and_acquire(session.session_id, "inspect", source)
+            )
+            await entered_write_transaction.wait()
+
+            # Mutate the caller-owned dict while create waits for the write lock.
+            source["model"]["name"] = "mutated-while-waiting"
+            source["model"]["options"].append(3)
+            source["new"] = True
+
+            release_holder.set()
+            await holder
+            record = await create_task
+
+            row = await db.fetchone(
+                "SELECT model_snapshot_json FROM runs WHERE run_id = ?",
+                (record.run_id,),
+            )
+            assert row["model_snapshot_json"] == (
+                '{"model":{"name":"original","options":[1,2]}}'
+            )
+            assert record.to_dict()["model_snapshot_json"] == {
+                "model": {"name": "original", "options": [1, 2]}
+            }
+            loaded = await runs.get(record.run_id)
+            assert loaded.to_dict()["model_snapshot_json"] == (
+                record.to_dict()["model_snapshot_json"]
+            )
+
+            # A later mutation of the caller dict has no effect.
+            source["model"]["name"] = "again"
+            assert record.to_dict()["model_snapshot_json"] == {
+                "model": {"name": "original", "options": [1, 2]}
+            }
+        finally:
+            await db.close()
+
+    _run(scenario())
