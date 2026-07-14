@@ -7,8 +7,11 @@ subagents will be registered later with bounded tools and structured outputs.
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 
 from deepagents import create_deep_agent
+from langchain_core.tools import BaseTool
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 
 from eee_agent.harness import configure_deepagents_harness
@@ -17,7 +20,11 @@ from eee_agent.system_prompt import build_system_prompt
 from eee_agent.tools.registry import all_tools
 
 
-def build_agent() -> CompiledStateGraph:
+def build_agent(
+    *,
+    tools: Sequence[BaseTool] | None = None,
+    checkpointer: BaseCheckpointSaver | None = None,
+) -> CompiledStateGraph:
     # Instrument LangChain/LangGraph for Phoenix tracing if EEE_TRACING=phoenix.
     from eee_agent.tracing import setup_tracing
     setup_tracing()
@@ -75,9 +82,15 @@ def build_agent() -> CompiledStateGraph:
         except Exception as e:  # noqa: BLE001
             print(f"[eee] compact_conversation tool disabled: {e}", flush=True)
             backend = None
-    kwargs = dict(model=model, tools=all_tools(),
+    # tools=None preserves the full Foundation tool surface (all_tools()); an
+    # explicit empty list is respected (no falsy fallback). Copy any caller
+    # sequence so later mutation of their container cannot affect this graph.
+    selected_tools = all_tools() if tools is None else list(tools)
+    kwargs = dict(model=model, tools=selected_tools,
                   system_prompt=build_system_prompt(), middleware=middleware)
     if backend is not None:
         kwargs["backend"] = backend
+    if checkpointer is not None:
+        kwargs["checkpointer"] = checkpointer
     configure_deepagents_harness()
     return create_deep_agent(**kwargs)

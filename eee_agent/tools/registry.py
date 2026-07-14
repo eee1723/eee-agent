@@ -1,6 +1,8 @@
 """Aggregate the Houdini tool set for create_deep_agent."""
 from __future__ import annotations
 
+from langchain_core.tools import BaseTool
+
 from eee_agent.tools import compose, inspect, nodes, procedural, scene, vex
 
 ALL_TOOLS = [
@@ -37,6 +39,24 @@ ALL_TOOLS = [
     procedural.anchor_graph,
 ]
 
+# Explicit Runtime read-only allowlist. The Runtime agent may inspect the scene
+# but never mutate it. This is an allowlist, not a name-filter over ALL_TOOLS,
+# so the security boundary is auditable and cannot drift if a write tool is
+# renamed or added.
+READ_ONLY_TOOLS: list[BaseTool] = [
+    scene.hou_status,
+    nodes.find_nodes,
+    nodes.describe_node_type,
+    inspect.geometry_stats,
+    inspect.validate_geometry,
+    procedural.work_status,
+    procedural.anchor_graph,
+]
 
-def all_tools():
+
+def all_tools() -> list[BaseTool]:
     return list(ALL_TOOLS)
+
+
+def read_only_tools() -> list[BaseTool]:
+    return list(READ_ONLY_TOOLS)
