@@ -11,8 +11,23 @@ memory. Houdini version/API mismatches break everything.
 
 ## Stack & locked decisions
 - **Agent**: `deepagents` (`create_deep_agent(model, tools, system_prompt, middleware=...)`),
-  in an independent venv (`.venv`, Python 3.11). Model: DeepSeek V4 Pro default,
-  multi-provider (`EEE_LLM_PROVIDER`).
+  in a **uv-managed** venv (`.venv`, Python 3.11, `uv.lock`). Model: DeepSeek V4 Pro
+  default, multi-provider (`EEE_LLM_PROVIDER`).
+- **Provider layer (Foundation)**: model construction flows through `ProviderRegistry`
+  (`eee_agent.providers`). DeepSeek V4 uses `ChatAnthropic` against the official
+  Anthropic-compatible endpoint `https://api.deepseek.com/anthropic` — NOT the old
+  `ChatOpenAI(base_url=...)` path (that path dropped `reasoning_content`). Exact model
+  names only (`deepseek-v4-pro`/`deepseek-v4-flash`); deprecated aliases
+  (`deepseek-chat`/`deepseek-reasoner`) are rejected. Standard Anthropic/OpenAI
+  adapters construct their native LangChain classes. `eee_agent.model` imports no
+  concrete provider class.
+- **Deep Agents harness (Foundation)**: `configure_deepagents_harness()` (in
+  `eee_agent/harness.py`, called before `create_deep_agent`) registers a
+  `HarnessProfile(general_purpose_subagent=enabled=False)` for both the "anthropic"
+  key (DeepSeek is built on `ChatAnthropic`, so Deep Agents resolves its provider as
+  anthropic) and "openai". The implicit `task` tool / `general-purpose` subagent is
+  disabled until a restricted general capability is designed. Contract test:
+  `tests/test_harness.py`.
 - **Bridge**: agent → rpyc → Houdini. `houdini_side/start_rpc.py` runs an rpyc
   `ThreadedServer` bound to **127.0.0.1:18811** inside Houdini (NOT `hrpyc.start_server`
   — that binds 0.0.0.0 with no auth). Client reimplements `import_remote_module` inline
@@ -31,7 +46,7 @@ memory. Houdini version/API mismatches break everything.
 
 1. **rpyc version pin**: the venv's `rpyc` MUST == Houdini's bundled rpyc, or RPC
    fails with `ValueError: invalid message type: 18`. Houdini 21.0.440 ships **rpyc
-   4.1.0** (check `<Houdini>\python311\lib\site-packages\rpyc\__init__.py`). pyproject
+   4.1.0** (check `<Houdini>\python311\lib\site-packages\rpyc\__init__.py`). `uv.lock`
    pins `rpyc==4.1.0`. On a different Houdini build, re-check + re-pin.
 2. **Never return rpyc proxies to the agent**: bridge layer serializes everything to
    plain dicts; compare nodes by `.path()` (proxies don't support operators).
@@ -61,24 +76,41 @@ memory. Houdini version/API mismatches break everything.
    (req #3): `FloatParmTemplate.setMinValue/setMaxValue` (slider range) +
    `setMinIsStrict/setMaxIsStrict` (hard clamp); getters are `minValue()/maxValue()`
    (NOT `min/max`). `add_root_parm(min=, max=, strict=)` applies these.
+7. **Foundation venv is lean — no Phoenix/ContextSeek deps**: `uv.lock` intentionally
+   omits `openinference` (Phoenix) and `seekdb`/`pyseekdb` (ContextSeek) — those are
+   later milestones. The `tracing.py` / `context_store.py` code is still present, but
+   `EEE_TRACING=phoenix` or `EEE_CONTEXTSEEK=true` will raise `ModuleNotFoundError` on
+   Foundation. Keep both OFF (`.env.example` keeps them commented). `build_agent()` is
+   otherwise fully functional; all Foundation tests self-contain this via monkeypatch.
 
-## Houdini install (this machine)
-- `C:\Program Files\Side Effects Software\Houdini 21.0.440`, hython at `bin\hython.exe`,
-  bundled Python `python311\` (3.11), UI PySide6, `HFS` env not set.
-- hrpyc.py at `<root>\houdini\python3.11libs\hrpyc.py` (NOT `python3.11\libs`).
+## Houdini install (machine-specific — both machines are actively used; confirm which via `scripts/env_probe.sh` before developing)
+- Machine A: `C:\Program Files\Side Effects Software\Houdini 21.0.440`
+  (hython `bin\hython.exe`, bundled Python `python311\` = 3.11.7, UI PySide6, `HFS`
+  env not set).
+- Machine B: `D:\houdini` (same Houdini 21.0.440 build). The user switches between
+  these two machines frequently — at the start of each session, check which Houdini
+  path is present (env_probe prints it) before any Houdini/RPC work. On either machine
+  the `.venv` is rebuilt from the local Houdini's `python311\python.exe` for a
+  guaranteed version/rpyc match — do not copy `.venv` between machines.
+- rpyc in Houdini's bundle = **4.1.0** (matches the `uv.lock` pin) — verified at
+  `<Houdini>\python311\lib\site-packages\rpyc\version.py`.
+- hrpyc.py at `<Houdini>\houdini\python3.11libs\hrpyc.py` (NOT `python311\libs`).
 
 ## How to run
 - Bridge: in Houdini run `houdini_side/start_rpc.py` (or use the **EEE Agent** menu —
   installed via `houdini_side/install_menu.py`).
-- CLI: `.\.venv\Scripts\python.exe -m eee_agent.cli {selftest|prompt|stdio}`.
-- Tracing (Phoenix, no Docker): `EEE_TRACING=phoenix` → OTel/OpenInference →
-  `http://localhost:6006`. Pull spans via GraphQL `/graphql` (project=eee-agent).
-- ContextSeek memory: `EEE_CONTEXTSEEK=true`. Agent middleware (all default ON; see
-  `eee_agent/app.py`): read-back trimming (`EEE_TRIM_READBACKS`), deterministic loop
-  guard (`EEE_LOOP_GUARD`, `EEE_LOOP_REPEAT=3`, `EEE_LOOP_HARD=5`), tool-error span
-  tracing, on-demand `compact_conversation` tool (`EEE_COMPACT_TOOL`). The workflow-
-  status system-prompt injection is now OFF by default (`EEE_WORKFLOW_STATUS=true` to
-  opt back in) — appending to the system prompt every turn broke prompt caching.
+- Deps: `uv sync --extra eval --python 3.11` (rebuilds `.venv` from `uv.lock`;
+  `uv lock --check` verifies the lock is in sync).
+- CLI: `uv run --extra eval python -m eee_agent.cli {selftest|prompt|stdio|versions}`.
+  `versions` prints the locked runtime + dependency versions as JSON.
+- Tracing (Phoenix) / semantic memory (ContextSeek): **off on Foundation** — deps not
+  in `uv.lock` (gotcha #7). They return in a later milestone.
+- Reliability middleware (all default ON; see `eee_agent/app.py`): read-back trimming
+  (`EEE_TRIM_READBACKS`), deterministic loop guard (`EEE_LOOP_GUARD`,
+  `EEE_LOOP_REPEAT=3`, `EEE_LOOP_HARD=5`), tool-error span tracing, on-demand
+  `compact_conversation` tool (`EEE_COMPACT_TOOL`). The workflow-status system-prompt
+  injection is OFF by default (`EEE_WORKFLOW_STATUS=true` to opt back in) — appending
+  to the system prompt every turn broke prompt caching.
 - Cross-machine setup: see `SETUP.md`.
 
 ## Known limitation
@@ -90,9 +122,14 @@ Claude is the recommended swap for reliability (one-line via
 `EEE_LLM_PROVIDER=anthropic`).
 
 ## Layout
-`eee_agent/` (config, model, app, cli, bridge/, tools/ — 25 tools, context_store,
-context_trim, loop_guard, tool_error_trace, workflow_middleware, tracing,
-system_prompt) · `skills/` (parametric-building,
-vex-patterns, sop-cookbook, procedural-components) · `memory/AGENTS.md` (agent
-conventions, in-repo) · `houdini_side/` (start_rpc, chat_panel, launch, install_menu)
-· `eval/` · `MainMenuCommon.xml`.
+`eee_agent/` — **core/** (Foundation: ids, errors, artifacts, events, versioning) ·
+**providers/** (Foundation: contracts, registry, secrets, deepseek_v4, anthropic,
+openai, factory, events, normalize) · **harness.py** (Foundation: disable implicit
+general-purpose subagent) · config, model, app, cli · `bridge/` (rpyc client +
+plain-Python serialization, no proxies leak) · `tools/` (25 @tool functions:
+scene/nodes/vex/compose/inspect/procedural) · context_store, context_trim, loop_guard,
+tool_error_trace, workflow_middleware, tracing, system_prompt · `skills/`
+(parametric-building, vex-patterns, sop-cookbook, procedural-components) ·
+`memory/AGENTS.md` (agent conventions, in-repo) · `houdini_side/` (start_rpc,
+chat_panel, launch, install_menu, start_phoenix) · `eval/` · `MainMenuCommon.xml`.
+Foundation status: see `docs/handoffs/2026-07-13-foundation-migration.md`.
