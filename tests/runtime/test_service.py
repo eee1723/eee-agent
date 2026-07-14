@@ -1544,6 +1544,171 @@ def test_failure_bundle_atomic_under_cancel(paths: RuntimePaths) -> None:
     _run(scenario())
 
 
+def test_first_state_changed_event_preserved_under_cancel(
+    paths: RuntimePaths,
+) -> None:
+    # Defect 4a: cancelling the Agent execution task after the
+    # Created -> PreparingContext repository transition committed but before the
+    # matching run.state_changed event appended must not lose that event. The run
+    # must still reach Cancelled with a complete, continuous state chain.
+    runner = FakeRunner(_success_items("done"))
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths, runner_factory=_factory_for(runner)
+        ) as service:
+            state_entered = asyncio.Event()
+            state_gate = asyncio.Event()
+            seen: list[str] = []
+            original_append = service._events.append  # type: ignore[attr-defined]
+
+            async def gated_append(**kwargs):
+                if (
+                    kwargs.get("event_type") == "run.state_changed"
+                    and not seen
+                ):
+                    seen.append(kwargs["run_id"])
+                    state_entered.set()
+                    await state_gate.wait()
+                return await original_append(**kwargs)
+
+            service._events.append = gated_append  # type: ignore[assignment]
+            session = await service.create_session("A")
+            started = await service.start_run(session.session_id, "x")
+            await state_entered.wait()  # first state_changed append blocked
+            service._tasks[started.run_id].cancel()  # type: ignore[attr-defined]
+            state_gate.set()
+            final = await service.wait_for_run(started.run_id)
+            assert final.status is RunStatus.CANCELLED
+            replay = await service.replay(
+                session.session_id, after_seq=0, limit=100
+            )
+            edges = [
+                (e.payload["from"], e.payload["to"])
+                for e in replay.events
+                if e.event_type == "run.state_changed"
+            ]
+            assert edges[0] == ("Created", "PreparingContext")
+            for prev, cur in zip(edges, edges[1:]):
+                assert prev[1] == cur[0], f"chain break: {prev} -> {cur}"
+            assert edges[-1][1] == "Cancelled"
+
+    _run(scenario())
+
+
+def test_stop_run_stoprequested_event_preserved_under_cancel(
+    paths: RuntimePaths,
+) -> None:
+    # Defect 4b: stop_run blocks after the StopRequested transition committed
+    # but before the state event appended; double-cancelling stop_run's caller
+    # must propagate, but the Agent task must be cancelled and converge to
+    # Cancelled, with exactly one entry into StopRequested.
+    gate = asyncio.Event()
+    runner = FakeRunner(_success_items("done"), gate=gate)
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths, runner_factory=_factory_for(runner)
+        ) as service:
+            stop_entered = asyncio.Event()
+            stop_gate = asyncio.Event()
+            original_append = service._events.append  # type: ignore[attr-defined]
+
+            async def gated_append(**kwargs):
+                if (
+                    kwargs.get("event_type") == "run.state_changed"
+                    and kwargs.get("payload", {}).get("to") == "StopRequested"
+                ):
+                    stop_entered.set()
+                    await stop_gate.wait()
+                return await original_append(**kwargs)
+
+            service._events.append = gated_append  # type: ignore[assignment]
+            session = await service.create_session("A")
+            started = await service.start_run(session.session_id, "x")
+            await _wait_until_streaming(runner)  # run at Planning, blocked
+            stop_task = asyncio.create_task(
+                service.stop_run(started.run_id, force=False)
+            )
+            await stop_entered.wait()  # StopRequested committed, event blocked
+            stop_task.cancel()
+            stop_task.cancel()  # double cancel stop_run caller
+            stop_gate.set()
+            with pytest.raises(asyncio.CancelledError):
+                await stop_task
+            gate.set()  # release the runner so the Agent task can converge
+            final = await service.wait_for_run(started.run_id)
+            assert final.status is RunStatus.CANCELLED
+            replay = await service.replay(
+                session.session_id, after_seq=0, limit=100
+            )
+            stop_entries = [
+                e
+                for e in replay.events
+                if e.event_type == "run.state_changed"
+                and e.payload["to"] == "StopRequested"
+            ]
+            assert len(stop_entries) == 1
+
+    _run(scenario())
+
+
+@pytest.mark.parametrize(
+    "event_type", ["session.created", "session.renamed", "session.archived"]
+)
+def test_session_durable_event_preserved_under_cancel(
+    paths: RuntimePaths, event_type: str
+) -> None:
+    # Defect 4c: cancelling the caller after the session mutation committed but
+    # before the durable event appended must not lose the event. When the
+    # mutation is persisted, the event must be present exactly once.
+    runner = FakeRunner(_success_items("done"))
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths, runner_factory=_factory_for(runner)
+        ) as service:
+            append_entered = asyncio.Event()
+            append_gate = asyncio.Event()
+            seen_session_id: list[str] = []
+            original_append = service._events.append  # type: ignore[attr-defined]
+
+            async def gated_append(**kwargs):
+                if kwargs.get("event_type") == event_type:
+                    seen_session_id.append(kwargs["session_id"])
+                    append_entered.set()
+                    await append_gate.wait()
+                return await original_append(**kwargs)
+
+            service._events.append = gated_append  # type: ignore[assignment]
+            if event_type == "session.created":
+                op_task = asyncio.create_task(service.create_session("A"))
+            else:
+                setup = await service.create_session("Setup")
+                if event_type == "session.renamed":
+                    op_task = asyncio.create_task(
+                        service.rename_session(setup.session_id, "Renamed")
+                    )
+                else:
+                    op_task = asyncio.create_task(
+                        service.archive_session(setup.session_id)
+                    )
+            await append_entered.wait()
+            op_task.cancel()
+            append_gate.set()
+            with pytest.raises(asyncio.CancelledError):
+                await op_task
+            replay = await service.replay(
+                seen_session_id[0], after_seq=0, limit=100
+            )
+            matches = [
+                e for e in replay.events if e.event_type == event_type
+            ]
+            assert len(matches) == 1
+
+    _run(scenario())
+
+
 def test_service_does_not_import_websocket_or_lock() -> None:
     import ast
 

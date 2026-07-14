@@ -278,21 +278,28 @@ class RuntimeService:
     # ------------------------------------------------------------------
 
     async def create_session(self, title: str) -> SessionRecord:
-        session = await self._sessions.create(title)
-        await self._emit(
-            session.session_id,
-            None,
-            "session.created",
-            {
-                "session_id": session.session_id,
-                "title": session.title,
-                "status": session.status.value,
-            },
-            RetentionClass.DURABLE,
-        )
-        # Return the post-event record so last_seq reflects the committed
-        # session.created event.
-        return await self._sessions.get(session.session_id)
+        # The session mutation and its durable event form one
+        # cancellation-deferred persistence region, so a caller cancel cannot
+        # leave a persisted session without its session.created event.
+        async def persist() -> tuple[str, EventRecord]:
+            session = await self._sessions.create(title)
+            record = await self._append(
+                session.session_id,
+                None,
+                "session.created",
+                {
+                    "session_id": session.session_id,
+                    "title": session.title,
+                    "status": session.status.value,
+                },
+                RetentionClass.DURABLE,
+            )
+            return session.session_id, record
+
+        session_id, record = await _run_uncancelled(persist())
+        await self._notify(record)
+        # Return the post-event record so last_seq reflects the committed event.
+        return await self._sessions.get(session_id)
 
     async def list_sessions(
         self, include_archived: bool = False
@@ -305,26 +312,36 @@ class RuntimeService:
     async def rename_session(
         self, session_id: str, title: str
     ) -> SessionRecord:
-        session = await self._sessions.rename(session_id, title)
-        await self._emit(
-            session.session_id,
-            None,
-            "session.renamed",
-            {"session_id": session.session_id, "title": session.title},
-            RetentionClass.DURABLE,
-        )
-        return await self._sessions.get(session.session_id)
+        async def persist() -> tuple[str, EventRecord]:
+            session = await self._sessions.rename(session_id, title)
+            record = await self._append(
+                session.session_id,
+                None,
+                "session.renamed",
+                {"session_id": session.session_id, "title": session.title},
+                RetentionClass.DURABLE,
+            )
+            return session.session_id, record
+
+        session_id, record = await _run_uncancelled(persist())
+        await self._notify(record)
+        return await self._sessions.get(session_id)
 
     async def archive_session(self, session_id: str) -> SessionRecord:
-        session = await self._sessions.archive(session_id)
-        await self._emit(
-            session.session_id,
-            None,
-            "session.archived",
-            {"session_id": session.session_id},
-            RetentionClass.DURABLE,
-        )
-        return await self._sessions.get(session.session_id)
+        async def persist() -> tuple[str, EventRecord]:
+            session = await self._sessions.archive(session_id)
+            record = await self._append(
+                session.session_id,
+                None,
+                "session.archived",
+                {"session_id": session.session_id},
+                RetentionClass.DURABLE,
+            )
+            return session.session_id, record
+
+        session_id, record = await _run_uncancelled(persist())
+        await self._notify(record)
+        return await self._sessions.get(session_id)
 
     async def delete_session(self, session_id: str) -> None:
         # The application delete commits first. Only then is the checkpoint
@@ -406,17 +423,27 @@ class RuntimeService:
     async def stop_run(
         self, run_id: str, *, force: bool = False
     ) -> RunRecord:
-        # Both cooperative and force stops first persist a legal StopRequested
-        # transition (under the state lock, with its durable event) and then
-        # cancel the task. v1 has no dispatched write work, so both converge
-        # deterministically to Cancelled; ``force`` is accepted for protocol
-        # parity and reserved for stricter immediate cancellation later.
+        # Both cooperative and force stops persist a legal StopRequested
+        # transition (with its durable event) and cancel the Agent task. The
+        # whole region is cancellation-deferred so a caller cancel cannot lose
+        # the StopRequested event or prevent the Run from actually stopping.
+        # v1 has no dispatched write work, so both converge deterministically to
+        # Cancelled; ``force`` is accepted for protocol parity and reserved for
+        # stricter immediate cancellation later.
+        current, record = await _run_uncancelled(self._stop_critical(run_id))
+        if record is not None:
+            await self._notify(record)
+        return current
+
+    async def _stop_critical(
+        self, run_id: str
+    ) -> tuple[RunRecord, EventRecord | None]:
         record: EventRecord | None = None
         async with self._state_lock:
             current = await self._runs.get(run_id)
             if current.status in _TERMINAL_STATUSES:
                 # Already terminal: no-op, avoid an illegal duplicate transition.
-                return current
+                return current, None
             session_id = current.session_id
             if current.status not in (
                 RunStatus.STOP_REQUESTED,
@@ -436,16 +463,15 @@ class RuntimeService:
                     },
                     RetentionClass.DURABLE,
                 )
-        if record is not None:
-            await self._notify(record)
+        # Cancel the Agent execution task outside the state lock. This must run
+        # even if the caller was cancelled (the region is cancellation-deferred)
+        # so the Run actually stops. Cancel at most once: a repeated request
+        # must not deliver a second CancelledError into a task already running
+        # its cancellation handler.
         task = self._tasks.get(run_id)
-        # Cancel at most once. A repeated stop request must not deliver a second
-        # CancelledError into a task that is already running its cancellation
-        # handler, which would interrupt that handler mid-transition and leave
-        # the run in a non-terminal state.
         if task is not None and not task.done() and task.cancelling() == 0:
             task.cancel()
-        return current
+        return current, record
 
     # ------------------------------------------------------------------
     # replay / snapshot / subscribe
@@ -545,12 +571,28 @@ class RuntimeService:
         final_response: str | None = None,
         reason: str | None = None,
     ) -> RunRecord:
-        # Hold the state lock across the from-state read, the transition write,
-        # and the matching durable state-changed event append. This makes the
-        # three atomic with respect to any concurrent transition (e.g. stop_run
-        # racing Finalizing), so the event's from-state always equals the status
-        # actually transitioned from. Subscribers are notified only after the
-        # lock is released.
+        # The from-state read, repository transition, and matching durable
+        # state-changed event append form one persistence region: it runs under
+        # the state lock AND cancellation-deferred, so a task cancel between the
+        # transition commit and the event append can never lose the event (which
+        # would break the state chain). Subscribers are notified only after the
+        # region completes and the lock is released.
+        updated, record = await _run_uncancelled(
+            self._transition_persist(
+                session_id, run_id, target, final_response, reason
+            )
+        )
+        await self._notify(record)
+        return updated
+
+    async def _transition_persist(
+        self,
+        session_id: str,
+        run_id: str,
+        target: RunStatus,
+        final_response: str | None,
+        reason: str | None,
+    ) -> tuple[RunRecord, EventRecord]:
         async with self._state_lock:
             current = await self._runs.get(run_id)
             from_status = current.status
@@ -570,8 +612,7 @@ class RuntimeService:
                 payload,
                 RetentionClass.DURABLE,
             )
-        await self._notify(record)
-        return updated
+        return updated, record
 
     async def _run_guarded(
         self, session_id: str, run_id: str, user_input: str
