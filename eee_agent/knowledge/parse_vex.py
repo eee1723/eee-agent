@@ -36,7 +36,11 @@ _RETURNS_RE = re.compile(r"^:returns:\s*(?P<value>.*)$")
 # @related may be inline ("@related intersect" / "@related [Vex:foo]") or a
 # block ("@related" / "@related:") followed by "- [Kind:target]" list items.
 _RELATED_RE = re.compile(r"^@related(?![A-Za-z0-9_]):?[ \t]*(?P<target>.*)$")
-_LIST_ITEM_RE = re.compile(r"^-\s+\[")
+# A @related block entry: an explicit bracket link, optionally prefixed with
+# "- " (list item) or "::" (e.g. "::[Vex:foo]"). Labeled untyped links like
+# "[Label|/vex/pbr]" and typed links like "[Vex:foo]" are both accepted.
+_RELATED_ENTRY_RE = re.compile(r"^(?:-\s*|::\s*)?\[(?P<content>[^\]]+)\]\s*$")
+_TYPED_TARGET_RE = re.compile(r"^(?P<kind>[A-Za-z][\w]*):(?P<rest>.+)$")
 
 _PRIORITY_QUALIFIED = 100
 _PRIORITY_TITLE = 60
@@ -76,6 +80,27 @@ def _related_target(inline: str) -> tuple[str, str | None]:
     return inline, None
 
 
+def _classify_related_entry(content: str) -> tuple[str, str | None] | None:
+    """Classify a bracket content from a @related block entry.
+
+    Returns ``(target_raw, anchor)`` or ``None``. Labeled links
+    ``[Label|target]`` use the explicit target after ``|``; typed targets
+    ``Kind:target[#anchor]`` preserve the kind prefix and anchor; untyped
+    paths (e.g. ``/vex/pbr``) keep their plain spelling.
+    """
+    content = content.strip()
+    target_spec = content.split("|", 1)[1].strip() if "|" in content else content
+    if not target_spec:
+        return None
+    typed = _TYPED_TARGET_RE.match(target_spec)
+    if typed:
+        rest = typed.group("rest")
+        target_raw = f"{typed.group('kind')}:{rest}"
+        anchor = rest.split("#", 1)[1] if "#" in rest else None
+        return target_raw, anchor
+    return target_spec, None
+
+
 def _parse_related(
     text: str, logical_path: str, entity_id: str
 ) -> tuple[list[EdgeDraft], set[int]]:
@@ -111,27 +136,25 @@ def _parse_related(
             )
             index += 1
             continue
-        # Block form: consume blank lines and "- [Kind:target]" list items.
+        # Block form: consume blank lines and explicit bracket-link entries.
+        # A non-bracket, non-blank line (e.g. an ``:include`` directive) ends
+        # the block and is left for ordinary reference parsing.
         index += 1
         while index < len(lines):
             stripped = lines[index].strip()
-            if _LIST_ITEM_RE.match(stripped):
+            entry = _RELATED_ENTRY_RE.match(stripped)
+            if entry:
                 related_lines.add(index + 1)
-                for ref in parse_references(lines[index]):
-                    if ref.target_kind == "Anchor":
-                        continue
-                    target_raw = (
-                        ref.raw_target
-                        if ref.target_kind == "Include"
-                        else f"{ref.target_kind}:{ref.raw_target}"
-                    )
+                result = _classify_related_entry(entry.group("content"))
+                if result is not None:
+                    target_raw, anchor = result
                     edges.append(
                         EdgeDraft(
                             source_id=entity_id,
                             predicate="related_to",
                             target_id=None,
                             target_raw=target_raw,
-                            target_anchor=ref.anchor,
+                            target_anchor=anchor,
                             resolved=False,
                             source_location=f"{logical_path}:{index + 1}",
                         )
@@ -174,7 +197,22 @@ def _build_edges(
                 source_location=f"{logical_path}:{ref.source_line}",
             )
         )
-    return edges
+    # Two identical bracket occurrences on the same source line yield one edge.
+    seen: set[tuple[str, str, str | None, str | None, str]] = set()
+    deduped: list[EdgeDraft] = []
+    for edge in edges:
+        key = (
+            edge.source_id,
+            edge.predicate,
+            edge.target_raw,
+            edge.target_anchor,
+            edge.source_location,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(edge)
+    return deduped
 
 
 def parse_vex_document(source_path: str, text: str) -> ParsedDocument:
@@ -208,14 +246,20 @@ def parse_vex_document(source_path: str, text: str) -> ParsedDocument:
             inline = ret.group("value").strip()
             parts = [inline] if inline else []
             index += 1
-            # Block form: indented continuation lines until a non-indented line.
-            while index < len(lines) and (
-                lines[index].startswith(" ") or lines[index].startswith("\t")
-            ):
-                continuation = lines[index].strip()
-                if continuation:
-                    parts.append(continuation)
-                index += 1
+            # Block form: indented continuation lines, allowing blank lines
+            # before the first line and between paragraphs, until a
+            # non-indented semantic block (directive, heading, @related, prose).
+            while index < len(lines):
+                current = lines[index]
+                if current.startswith(" ") or current.startswith("\t"):
+                    continuation = current.strip()
+                    if continuation:
+                        parts.append(continuation)
+                    index += 1
+                elif current.strip() == "":
+                    index += 1
+                else:
+                    break
             returns = "\n".join(parts)
             continue
         index += 1

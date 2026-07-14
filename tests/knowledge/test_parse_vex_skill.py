@@ -357,3 +357,105 @@ def test_skill_parser_does_not_read_filesystem() -> None:
     )
     assert parsed.entities[0].source_path == "skills/does-not-exist/SKILL.md"
     assert isinstance(parsed, ParsedDocument)
+
+
+VEX_RETURNS_LEADING_BLANK_FIXTURE = (
+    "#type: vex\n#context: sop\n= rlb =\n\"\"\"S.\"\"\"\n"
+    ":usage: rlb(geo) -> int\n"
+    ":returns:\n\n"
+    "    Return description.\n"
+)
+
+VEX_RETURNS_MULTIPARA_FIXTURE = (
+    "#type: vex\n#context: sop\n= rmp =\n\"\"\"S.\"\"\"\n"
+    ":usage: rmp(geo) -> int\n"
+    ":returns:\n\n"
+    "    First paragraph.\n\n"
+    "    Second paragraph.\n\n"
+    ":usage: next_signature(x) -> int\n"
+)
+
+VEX_RELATED_LINK_FIXTURE = (
+    "#type: vex\n#context: sop\n= rel =\n\"\"\"S.\"\"\"\n"
+    ":usage: rel(geo) -> int\n"
+    "@related\n\n"
+    "- [Writing a PBR shader|/vex/pbr]\n"
+    "- [VEX Geometry functions|../geometry]\n"
+    "- [pcopen|/vex/functions/pcopen]\n"
+)
+
+VEX_RELATED_DOUBLECOLON_FIXTURE = (
+    "#type: vex\n#context: sop\n= rdc =\n\"\"\"S.\"\"\"\n"
+    ":usage: rdc(geo) -> int\n"
+    "@related\n\n"
+    "::[Vex:uvsample]\n"
+    "::[Vex:uvintersect]\n"
+)
+
+
+def test_vex_returns_block_with_leading_blank() -> None:
+    entity = parse_vex_document(
+        "functions/rlb.txt", VEX_RETURNS_LEADING_BLANK_FIXTURE
+    ).entities[0]
+    assert entity.attributes["returns"] == "Return description."
+
+
+def test_vex_returns_block_multi_paragraph() -> None:
+    entity = parse_vex_document(
+        "functions/rmp.txt", VEX_RETURNS_MULTIPARA_FIXTURE
+    ).entities[0]
+    returns = entity.attributes["returns"]
+    assert "First paragraph." in returns
+    assert "Second paragraph." in returns
+    assert returns.index("First") < returns.index("Second")
+
+
+def test_vex_returns_block_does_not_absorb_following_usage() -> None:
+    entity = parse_vex_document(
+        "functions/rmp.txt", VEX_RETURNS_MULTIPARA_FIXTURE
+    ).entities[0]
+    assert len(entity.attributes["signatures"]) == 2
+    assert "next_signature(x) -> int" in entity.attributes["signatures"]
+
+
+def test_vex_related_labeled_untyped_links() -> None:
+    parsed = parse_vex_document("functions/rel.txt", VEX_RELATED_LINK_FIXTURE)
+    related = [e for e in parsed.edges if e.predicate == "related_to"]
+    assert {e.target_raw for e in related} == {
+        "/vex/pbr", "../geometry", "/vex/functions/pcopen",
+    }
+    for edge in related:
+        assert edge.target_id is None
+        assert edge.resolved is False
+    # Not duplicated as ordinary references.
+    assert [e for e in parsed.edges if e.predicate == "references"] == []
+
+
+def test_vex_related_double_colon_typed_entries() -> None:
+    parsed = parse_vex_document("functions/rdc.txt", VEX_RELATED_DOUBLECOLON_FIXTURE)
+    related = [e for e in parsed.edges if e.predicate == "related_to"]
+    assert {e.target_raw for e in related} == {"Vex:uvsample", "Vex:uvintersect"}
+    assert [e for e in parsed.edges if e.predicate == "references"] == []
+
+
+def test_vex_related_include_only_block_keeps_include_edge() -> None:
+    text = (
+        "#type: vex\n#context: sop\n= rio =\n\"\"\"S.\"\"\"\n"
+        ":usage: rio(geo) -> int\n"
+        "@related\n"
+        ":include _common#noiselinks/:\n"
+    )
+    parsed = parse_vex_document("functions/rio.txt", text)
+    assert [e for e in parsed.edges if e.predicate == "related_to"] == []
+    includes = [e for e in parsed.edges if e.predicate == "includes"]
+    assert len(includes) == 1
+    assert includes[0].target_raw == "_common#noiselinks/"
+
+
+def test_vex_related_block_source_location_is_entry_line() -> None:
+    parsed = parse_vex_document("functions/rel.txt", VEX_RELATED_LINK_FIXTURE)
+    related = {e.target_raw: e for e in parsed.edges if e.predicate == "related_to"}
+    # Entries are on lines 8, 9, 10 of the fixture.
+    assert related["/vex/pbr"].source_location == "functions/rel.txt:8"
+    assert related["../geometry"].source_location == "functions/rel.txt:9"
+    assert related["/vex/functions/pcopen"].source_location == "functions/rel.txt:10"
