@@ -144,10 +144,18 @@ class RuntimeDatabase:
             await self._connection.execute("BEGIN IMMEDIATE")
             try:
                 yield self._connection
-            except BaseException:
-                await self._connection.execute("ROLLBACK")
-                raise
-            else:
                 await self._connection.execute("COMMIT")
+            except BaseException:
+                # Roll back on any failure between BEGIN and the finalized
+                # COMMIT, including a deferred-FK IntegrityError raised by the
+                # COMMIT itself. Guard on ``in_transaction`` and swallow a
+                # rollback-time sqlite error so a secondary failure cannot mask
+                # the original exception, which is always re-raised below.
+                if self._connection.in_transaction:
+                    try:
+                        await self._connection.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass
+                raise
         finally:
             self._write_lock.release()

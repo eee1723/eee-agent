@@ -413,6 +413,45 @@ def test_write_transaction_rolls_back_on_cancellation(db_path: Path) -> None:
     _run(scenario())
 
 
+def test_write_transaction_rolls_back_when_commit_fails(db_path: Path) -> None:
+    async def scenario() -> None:
+        db = await RuntimeDatabase.open(db_path)
+        try:
+            # defer_foreign_keys pushes the FK check to COMMIT, so the INSERT
+            # succeeds and the IntegrityError surfaces at commit time. This
+            # specifically exercises a failure AFTER the transaction body but
+            # BEFORE the transaction is finalized, which is the path the
+            # write_transaction cleanup must still cover.
+            with pytest.raises(sqlite3.IntegrityError):
+                async with db.write_transaction() as conn:
+                    await conn.execute("PRAGMA defer_foreign_keys=ON")
+                    await conn.execute(
+                        _RUN_INSERT,
+                        (
+                            RUN_ID,
+                            f"ses_{'9' * 32}",
+                            "Created",
+                            "in",
+                            None,
+                            NOW_ISO,
+                            None,
+                            None,
+                            None,
+                            "{}",
+                        ),
+                    )
+            # No residue and the connection left the transaction on its own.
+            assert (await db.fetchone("SELECT COUNT(*) AS c FROM runs"))["c"] == 0
+            assert db._connection.in_transaction is False
+            # A subsequent transaction must succeed (no leftover transaction).
+            await add_session(db)
+            assert (await db.fetchone("SELECT COUNT(*) AS c FROM sessions"))["c"] == 1
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
 # --------------------------------------------------------------------------
 # 11. concurrent write_transaction serialization
 # --------------------------------------------------------------------------
