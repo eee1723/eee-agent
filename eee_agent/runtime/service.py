@@ -1,0 +1,627 @@
+"""RuntimeService: orchestrates repositories, runs, subscriptions, snapshots.
+
+The service is the single coordination layer above the durable repositories
+(``SessionRepository``, ``RunRepository``, ``EventStore``), the LangGraph
+``CheckpointManager``, and the provider-neutral ``AgentRunner``. It owns the
+application-database connection lifetime, the one in-memory active-run task
+reference, committed-event subscription delivery, restart reconciliation, and
+the successful-run event ordering.
+
+It deliberately stays below the transport and identity layers: no network
+protocol, authentication, or exclusive process lock is implemented here (those
+arrive in later tasks). It never calls a live LLM or Houdini; the
+``RunnerFactory`` seam lets offline tests inject a controllable runner while
+production wires the real read-only graph.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import Mapping
+
+from eee_agent.core import (
+    AgentError,
+    AgentException,
+    ErrorCategory,
+    runtime_version_report,
+)
+from eee_agent.runtime.agent_runner import (
+    RunnerCompleted,
+    RunnerEvent,
+    RunnerFactory,
+)
+from eee_agent.runtime.checkpoints import CheckpointManager
+from eee_agent.runtime.database import RuntimeDatabase
+from eee_agent.runtime.events import EventStore, ReplayResult
+from eee_agent.runtime.models import (
+    EventRecord,
+    RetentionClass,
+    RunRecord,
+    RunStatus,
+    SessionRecord,
+)
+from eee_agent.runtime.paths import RuntimePaths
+from eee_agent.runtime.runs import RunRepository
+from eee_agent.runtime.sessions import SessionRepository
+
+# A callback receives one committed EventRecord. It may be a plain function
+# (returning None) or an async function (returning an awaitable); the service
+# awaits awaitable results and isolates every callback failure.
+EventCallback = Callable[[EventRecord], "Awaitable[None] | None"]
+
+# Bounded wait for an active run to reach a terminal state during shutdown.
+_GRACEFUL_TIMEOUT_SECONDS = 10.0
+
+_TERMINAL_STATUSES = frozenset(
+    {RunStatus.COMPLETED, RunStatus.CANCELLED, RunStatus.FAILED}
+)
+
+# Generic failure surfaced at the service boundary. Raw exception text and
+# tracebacks never reach persisted Run/Event records; only this structured
+# error is stored and broadcast.
+_RUNTIME_FAILURE_ERROR = AgentError(
+    code="internal.runtime_failure",
+    category=ErrorCategory.INTERNAL_INVARIANT,
+    message_for_user="The runtime encountered an unexpected error.",
+)
+
+# Matches RunRepository's interrupted-run error so reconciliation emits the
+# identical structured error that the run row already stores.
+_INTERRUPTED_ERROR = AgentError(
+    code="runtime.interrupted",
+    category=ErrorCategory.INTERNAL_INVARIANT,
+    message_for_user="The previous Runtime process stopped before this run completed.",
+)
+
+
+def _checkpoint_cleanup_failed() -> AgentException:
+    return AgentException(
+        AgentError(
+            code="runtime.checkpoint_cleanup_failed",
+            category=ErrorCategory.INTERNAL_INVARIANT,
+            message_for_user=(
+                "The session was deleted but its checkpoint history could "
+                "not be removed."
+            ),
+            scene_may_have_changed=False,
+        )
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SessionSnapshot:
+    """A consistent point-in-time view of one session.
+
+    ``snapshot_seq`` is the session's ``last_seq`` captured inside the same
+    transaction that read the runs, so live events with ``seq > snapshot_seq``
+    can be replayed without a gap. ``version_report`` is the frozen Runtime
+    version report captured once at service open.
+    """
+
+    session: SessionRecord
+    runs: tuple[RunRecord, ...]
+    active_run: RunRecord | None
+    snapshot_seq: int
+    has_earlier_runs: bool
+    earliest_included_run_id: str | None
+    version_report: Mapping[str, object]
+
+
+class RuntimeService:
+    """Coordinates durable Runtime state and one active read-only run.
+
+    Lifecycle: open via :meth:`open` (an async context manager). Inside the
+    context, session/run operations are available. On exit the active run is
+    cancelled and converged, then the checkpoint manager and application
+    database close in reverse open order.
+    """
+
+    def __init__(self, database: RuntimeDatabase, paths: RuntimePaths) -> None:
+        self._database = database
+        self._paths = paths
+        self._sessions = SessionRepository(database)
+        self._runs = RunRepository(database)
+        self._events = EventStore(database)
+        # Frozen once per service lifetime; reused as every run's model snapshot
+        # so runtime_version_report is never called per-run.
+        self._version_report: dict[str, object] = runtime_version_report()
+        self._callbacks: set[EventCallback] = set()
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._checkpoints: CheckpointManager | None = None
+        self._runner: object | None = None
+
+    # ------------------------------------------------------------------
+    # lifecycle
+    # ------------------------------------------------------------------
+
+    @classmethod
+    @asynccontextmanager
+    async def open(
+        cls, paths: RuntimePaths, *, runner_factory: RunnerFactory
+    ) -> AsyncIterator["RuntimeService"]:
+        """Open a service in the approved order and close it in reverse.
+
+        Order: directories, application database, repositories/version report,
+        interrupted-run reconciliation, checkpoint manager, runner factory.
+        On exit (normal or exceptional) the active run is cancelled/converged,
+        then the checkpoint manager and database close. A failure partway
+        through initialization still closes whatever was opened.
+        """
+        database: RuntimeDatabase | None = None
+        checkpoints: CheckpointManager | None = None
+        service: RuntimeService | None = None
+        try:
+            paths.create_used_directories()
+            database = await RuntimeDatabase.open(paths.app_db)
+            service = cls(database, paths)
+            await service._reconcile()
+            checkpoints = CheckpointManager(paths.checkpoints_db)
+            await checkpoints.__aenter__()
+            service._checkpoints = checkpoints
+            service._runner = runner_factory(checkpoints.require_saver())
+            try:
+                yield service
+            finally:
+                await service._shutdown()
+        finally:
+            if checkpoints is not None:
+                # A cleanup error must not mask the caller's exception.
+                try:
+                    await checkpoints.__aexit__(None, None, None)
+                except BaseException:
+                    pass
+            if database is not None:
+                await database.close()
+
+    async def _shutdown(self) -> None:
+        # Cancel every active run task and wait for them to settle within the
+        # graceful timeout. A task that already started runs its own
+        # cancellation handler (Stopping -> Cancelled); a task cancelled before
+        # it ever started never entered its body, so its handler did not run.
+        items = list(self._tasks.items())
+        for _run_id, task in items:
+            if not task.done():
+                task.cancel()
+        if items:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(
+                        *(task for _, task in items), return_exceptions=True
+                    ),
+                    timeout=_GRACEFUL_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                # Tasks that did not converge are left to the next process's
+                # reconciliation; do not block shutdown indefinitely.
+                pass
+        # Drive any still-nonterminal active run to a terminal state directly,
+        # covering the pre-start cancellation case. This is idempotent: runs the
+        # tasks already terminalized are skipped.
+        for run_id, _task in items:
+            try:
+                current = await self._runs.get(run_id)
+            except Exception:
+                continue
+            if current.status in _TERMINAL_STATUSES:
+                continue
+            try:
+                await self._handle_cancellation(current.session_id, run_id)
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------
+    # session operations
+    # ------------------------------------------------------------------
+
+    async def create_session(self, title: str) -> SessionRecord:
+        session = await self._sessions.create(title)
+        await self._append_and_notify(
+            session.session_id,
+            None,
+            "session.created",
+            {
+                "session_id": session.session_id,
+                "title": session.title,
+                "status": session.status.value,
+            },
+            RetentionClass.DURABLE,
+        )
+        # Return the post-event record so last_seq reflects the committed
+        # session.created event.
+        return await self._sessions.get(session.session_id)
+
+    async def list_sessions(
+        self, include_archived: bool = False
+    ) -> list[SessionRecord]:
+        return await self._sessions.list(include_archived)
+
+    async def get_session(self, session_id: str) -> SessionRecord:
+        return await self._sessions.get(session_id)
+
+    async def rename_session(
+        self, session_id: str, title: str
+    ) -> SessionRecord:
+        session = await self._sessions.rename(session_id, title)
+        await self._append_and_notify(
+            session.session_id,
+            None,
+            "session.renamed",
+            {"session_id": session.session_id, "title": session.title},
+            RetentionClass.DURABLE,
+        )
+        return await self._sessions.get(session.session_id)
+
+    async def archive_session(self, session_id: str) -> SessionRecord:
+        session = await self._sessions.archive(session_id)
+        await self._append_and_notify(
+            session.session_id,
+            None,
+            "session.archived",
+            {"session_id": session.session_id},
+            RetentionClass.DURABLE,
+        )
+        return await self._sessions.get(session.session_id)
+
+    async def delete_session(self, session_id: str) -> None:
+        # The application delete commits first. Only then is the checkpoint
+        # thread removed; a checkpoint cleanup failure is reported as a
+        # structured error and never recreates the already-deleted session.
+        await self._sessions.delete_application_records(session_id)
+        checkpoints = self._checkpoints
+        if checkpoints is None:
+            return
+        try:
+            await checkpoints.delete_thread(session_id)
+        except Exception:
+            raise _checkpoint_cleanup_failed() from None
+
+    # ------------------------------------------------------------------
+    # run operations
+    # ------------------------------------------------------------------
+
+    async def start_run(
+        self, session_id: str, user_input: str
+    ) -> RunRecord:
+        # The frozen version report is the run's model snapshot. Atomic global
+        # acquisition happens inside create_and_acquire; run.created is committed
+        # before the task is created, and start_run returns without waiting.
+        run = await self._runs.create_and_acquire(
+            session_id, user_input, self._version_report
+        )
+        await self._append_and_notify(
+            run.session_id,
+            run.run_id,
+            "run.created",
+            {
+                "run_id": run.run_id,
+                "session_id": run.session_id,
+                "user_input": user_input,
+            },
+            RetentionClass.DURABLE,
+        )
+        task = asyncio.create_task(
+            self._run_guarded(run.session_id, run.run_id, user_input)
+        )
+        self._tasks[run.run_id] = task
+        return run
+
+    async def get_run(self, run_id: str) -> RunRecord:
+        return await self._runs.get(run_id)
+
+    async def wait_for_run(self, run_id: str) -> RunRecord:
+        # Shield the active task so a cancelled waiter (e.g. a disconnecting
+        # client) cannot cancel the actual run. A CancelledError here is either
+        # the waiter being cancelled (run still non-terminal -> re-raise) or the
+        # run itself being cancelled via stop_run (run now terminal -> return).
+        task = self._tasks.get(run_id)
+        if task is not None:
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                current = await self._runs.get(run_id)
+                if current.status in _TERMINAL_STATUSES:
+                    return current
+                raise
+        return await self._runs.get(run_id)
+
+    async def stop_run(
+        self, run_id: str, *, force: bool = False
+    ) -> RunRecord:
+        current = await self._runs.get(run_id)
+        if current.status in _TERMINAL_STATUSES:
+            # Already terminal: no-op, avoid an illegal duplicate transition.
+            return current
+        if not force and current.status not in (
+            RunStatus.STOP_REQUESTED,
+            RunStatus.STOPPING,
+        ):
+            # Cooperative stop persists StopRequested before cancelling. Return
+            # the just-persisted record (not a fresh re-read) so the observed
+            # state is deterministic regardless of when the task converges.
+            current = await self._transition_and_emit(
+                current.session_id, run_id, RunStatus.STOP_REQUESTED
+            )
+        task = self._tasks.get(run_id)
+        # Cancel at most once. A repeated stop request must not deliver a second
+        # CancelledError into a task that is already running its cancellation
+        # handler, which would interrupt that handler mid-transition and leave
+        # the run in a non-terminal state.
+        if task is not None and not task.done() and task.cancelling() == 0:
+            task.cancel()
+        return current
+
+    # ------------------------------------------------------------------
+    # replay / snapshot / subscribe
+    # ------------------------------------------------------------------
+
+    async def replay(
+        self, session_id: str, *, after_seq: int, limit: int
+    ) -> ReplayResult:
+        return await self._events.replay(
+            session_id, after_seq=after_seq, limit=limit
+        )
+
+    async def snapshot(self, session_id: str) -> SessionSnapshot:
+        data = await self._events.snapshot_data(session_id)
+        return SessionSnapshot(
+            session=data.session,
+            runs=data.runs,
+            active_run=data.active_run,
+            snapshot_seq=data.snapshot_seq,
+            has_earlier_runs=data.has_earlier_runs,
+            earliest_included_run_id=data.earliest_included_run_id,
+            version_report=self._version_report,
+        )
+
+    def subscribe(self, callback: EventCallback) -> Callable[[], None]:
+        """Register a committed-event callback; return idempotent unsubscribe."""
+        self._callbacks.add(callback)
+
+        def unsubscribe() -> None:
+            # discard is idempotent: repeated calls are safe no-ops.
+            self._callbacks.discard(callback)
+
+        return unsubscribe
+
+    # ------------------------------------------------------------------
+    # internal: append + notify, transitions, run task, handlers
+    # ------------------------------------------------------------------
+
+    async def _append_and_notify(
+        self,
+        session_id: str,
+        run_id: str | None,
+        event_type: str,
+        payload: dict[str, object],
+        retention_class: RetentionClass,
+    ) -> EventRecord:
+        # Subscribers are notified only after EventStore.append returns (i.e.
+        # after the event transaction commits), so every delivered EventRecord
+        # is durable and replayable.
+        record = await self._events.append(
+            session_id=session_id,
+            run_id=run_id,
+            event_type=event_type,
+            payload=payload,
+            retention_class=retention_class,
+        )
+        await self._notify(record)
+        return record
+
+    async def _notify(self, record: EventRecord) -> None:
+        # Iterate a snapshot so a callback cannot mutate the set mid-delivery.
+        # A failing callback (sync or async) is isolated: it cannot roll back
+        # the committed event and cannot block delivery to other subscribers.
+        for callback in list(self._callbacks):
+            try:
+                result = callback(record)
+            except Exception:
+                continue
+            if inspect.isawaitable(result):
+                try:
+                    await result
+                except Exception:
+                    pass
+
+    async def _transition_and_emit(
+        self,
+        session_id: str,
+        run_id: str,
+        target: RunStatus,
+        *,
+        final_response: str | None = None,
+        reason: str | None = None,
+    ) -> RunRecord:
+        current = await self._runs.get(run_id)
+        from_status = current.status
+        updated = await self._runs.transition(
+            run_id, target, final_response=final_response
+        )
+        payload: dict[str, object] = {
+            "from": from_status.value,
+            "to": target.value,
+        }
+        if reason is not None:
+            payload["reason"] = reason
+        await self._append_and_notify(
+            session_id,
+            run_id,
+            "run.state_changed",
+            payload,
+            RetentionClass.DURABLE,
+        )
+        return updated
+
+    async def _run_guarded(
+        self, session_id: str, run_id: str, user_input: str
+    ) -> None:
+        try:
+            await self._run(session_id, run_id, user_input)
+        finally:
+            # Drop the in-memory reference once the task ends. The persistent
+            # authority (runtime_state.active_run_id) was already cleared by the
+            # terminal transition inside _run.
+            self._tasks.pop(run_id, None)
+
+    async def _run(
+        self, session_id: str, run_id: str, user_input: str
+    ) -> None:
+        runner = self._runner
+        assert runner is not None  # opened in RuntimeService.open
+        try:
+            # Created -> PreparingContext -> Planning, then stream RunnerEvents,
+            # then Planning -> Finalizing, durable assistant final message, and
+            # Finalizing -> Completed. This ordering is the success contract.
+            await self._transition_and_emit(
+                session_id, run_id, RunStatus.PREPARING_CONTEXT
+            )
+            await self._transition_and_emit(
+                session_id, run_id, RunStatus.PLANNING
+            )
+            final_response = ""
+            usage: dict[str, int] = {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+            }
+            async for event in runner.stream(  # type: ignore[union-attr]
+                session_id=session_id, user_input=user_input
+            ):
+                if isinstance(event, RunnerEvent):
+                    await self._append_and_notify(
+                        session_id,
+                        run_id,
+                        event.event_type,
+                        dict(event.payload),
+                        event.retention_class,
+                    )
+                elif isinstance(event, RunnerCompleted):
+                    final_response = event.final_response
+                    usage = dict(event.usage)
+            await self._transition_and_emit(
+                session_id, run_id, RunStatus.FINALIZING
+            )
+            await self._append_and_notify(
+                session_id,
+                run_id,
+                "message.assistant_final",
+                {"text": final_response, "usage": dict(usage)},
+                RetentionClass.DURABLE,
+            )
+            await self._transition_and_emit(
+                session_id,
+                run_id,
+                RunStatus.COMPLETED,
+                final_response=final_response,
+            )
+        except asyncio.CancelledError:
+            # Drive the run to Cancelled via StopRequested -> Stopping ->
+            # Cancelled, persisting each transition, then re-raise so the task
+            # ends in a cancelled state for any awaiter.
+            await self._handle_cancellation(session_id, run_id)
+            raise
+        except Exception:
+            # Any other failure becomes internal.runtime_failure at the service
+            # boundary. The run reaches Failed; raw exception text is never
+            # persisted or broadcast.
+            await self._handle_failure(session_id, run_id)
+
+    async def _handle_cancellation(
+        self, session_id: str, run_id: str
+    ) -> None:
+        # Converge to Cancelled, emitting every required transition exactly
+        # once. A concurrent move (e.g. a simultaneous stop) is handled by
+        # re-reading on an invalid-transition error rather than failing.
+        while True:
+            current = await self._runs.get(run_id)
+            if current.status in _TERMINAL_STATUSES:
+                return
+            if current.status is RunStatus.STOPPING:
+                target = RunStatus.CANCELLED
+            elif current.status is RunStatus.STOP_REQUESTED:
+                target = RunStatus.STOPPING
+            else:
+                target = RunStatus.STOP_REQUESTED
+            try:
+                await self._transition_and_emit(session_id, run_id, target)
+            except AgentException as exc:
+                if exc.error.code == "runtime.invalid_run_transition":
+                    continue
+                raise
+
+    async def _handle_failure(
+        self, session_id: str, run_id: str
+    ) -> None:
+        error = _RUNTIME_FAILURE_ERROR
+        await self._append_and_notify(
+            session_id,
+            run_id,
+            "model.failed",
+            {"error": error.to_dict()},
+            RetentionClass.DURABLE,
+        )
+        current = await self._runs.get(run_id)
+        if current.status in _TERMINAL_STATUSES:
+            # Already terminal (e.g. concurrently stopped): do not perform an
+            # illegal transition into Failed.
+            return
+        from_status = current.status
+        await self._runs.fail(run_id, error)
+        await self._append_and_notify(
+            session_id,
+            run_id,
+            "run.state_changed",
+            {
+                "from": from_status.value,
+                "to": RunStatus.FAILED.value,
+                "reason": "runtime_failure",
+            },
+            RetentionClass.DURABLE,
+        )
+        await self._append_and_notify(
+            session_id,
+            run_id,
+            "run.failed",
+            {"error": error.to_dict()},
+            RetentionClass.DURABLE,
+        )
+
+    async def _reconcile(self) -> None:
+        # Capture the genuine pre-recovery status of every non-terminal run so
+        # the emitted run.state_changed records the real "from" state rather
+        # than the post-reconciliation Failed. reconcile_interrupted then fails
+        # each non-terminal row and clears the active slot atomically.
+        rows = await self._database.fetchall(
+            "SELECT run_id, session_id, status FROM runs "
+            "WHERE status NOT IN ('Completed', 'Cancelled', 'Failed')"
+        )
+        pre: dict[str, tuple[str, RunStatus]] = {}
+        for row in rows:
+            pre[row["run_id"]] = (row["session_id"], RunStatus(row["status"]))
+        changed = await self._runs.reconcile_interrupted()
+        for run in changed:
+            session_id, from_status = pre.get(
+                run.run_id, (run.session_id, RunStatus.FAILED)
+            )
+            await self._append_and_notify(
+                session_id,
+                run.run_id,
+                "run.state_changed",
+                {
+                    "from": from_status.value,
+                    "to": RunStatus.FAILED.value,
+                    "reason": "interrupted",
+                },
+                RetentionClass.DURABLE,
+            )
+            await self._append_and_notify(
+                session_id,
+                run.run_id,
+                "run.failed",
+                {"error": _INTERRUPTED_ERROR.to_dict()},
+                RetentionClass.DURABLE,
+            )
