@@ -22,9 +22,13 @@ Generated: 2026-07-15 (Asia/Shanghai)
   below as historical detail).
 - Task 13 accepted tip: `c8e6af1` (implementation `3b69532` plus the reviewed
   graceful-timeout/cleanup-order follow-up).
+- Task 14 is planned and not started. Its scope is Runtime v1 external
+  acceptance and delivery; the detailed gate is in
+  `docs/superpowers/plans/2026-07-15-runtime-next-milestones.md`.
 - The source worktree is clean and `feature/runtime` is ahead of
-  `origin/feature/runtime` by four commits: the three accepted implementation
-  commits plus the Codex-owned status-document commit `9ecc900`; none are
+  `origin/feature/runtime` by five commits: the three accepted implementation
+  commits plus the Codex-owned status/roadmap commits `70b7568` and
+  `dd2f0e2`; none are
   pushed yet.
 
 Do not merge this branch to `main` until the three accepted commits are pushed
@@ -55,6 +59,7 @@ the plan, diff review, adversarial diagnostics, and independent acceptance.
 | 11 Protocol/Auth/RuntimeLock | Complete, Codex accepted | `64fa688` |
 | 12 WebSocket server | Complete, Codex accepted | `724a8fb` |
 | 13 CLI/restart E2E/docs/final verification | Complete, Codex accepted | `c8e6af1` |
+| 14 Runtime v1 external acceptance and delivery | Planned, Codex owns gate | See next-milestones plan |
 
 ## Task 10: Accepted RuntimeService
 
@@ -265,16 +270,30 @@ git diff --check:                   exit 0
 All automated tests are offline. GLM-5.2 and Houdini read-only smokes remain
 manual acceptance activities and have not been run by the test suite.
 
+## Task 14: Planned Runtime v1 external acceptance and delivery
+
+Task 14 is intentionally a delivery/acceptance gate rather than speculative
+production code. It covers pushing the accepted branch, clean restore on the
+next computer, the manual GLM-5.2 read-only continuity smoke, the manual
+Houdini read-only smoke, and dated evidence. Claude Code must not start Task 15
+or invent a fix from a manual observation; Codex first records a reproducible
+RED symptom and issues a bounded follow-up prompt if implementation is needed.
+
+The authoritative checklist and the Task 15–19 roadmap are in
+`docs/superpowers/plans/2026-07-15-runtime-next-milestones.md`.
+
 ## Remaining Delivery Sequence
 
-1. Push the four local commits on `feature/runtime`:
-   `724a8fb`, `3b69532`, `c8e6af1`, and `9ecc900`.
+1. Push the five local commits on `feature/runtime`:
+   `724a8fb`, `3b69532`, `c8e6af1`, `70b7568`, and `dd2f0e2`.
 2. On the next computer, restore the branch from `origin/feature/runtime` and
    rerun the clean baseline verification below.
 3. Perform the separate manual GLM-5.2 and Houdini read-only smoke procedures
    from the Runtime plan, recording external-service failures separately.
 4. Decide whether to merge `feature/runtime` into `main`; do not merge during
    the migration without an explicit integration decision.
+5. Only after Task 14 is accepted, issue a separate Codex-approved Task 15
+   prompt for the Secure HoudiniBridge design/contract slice.
 
 ## New Computer Restore Procedure
 
@@ -332,8 +351,10 @@ Use this prompt in the first conversation on the new computer:
 ```text
 Resume the persistent Runtime milestone from origin/feature/runtime.
 
-Tasks 1-13 are complete and Codex-accepted. The accepted implementation tips
-are 724a8fb (Task 12), 3b69532 (Task 13), and c8e6af1 (Task 13 follow-up).
+Tasks 1-13 are complete and Codex-accepted. Task 14 is planned and is the next
+acceptance gate; it is not an implementation license. The accepted
+implementation tips are 724a8fb (Task 12), 3b69532 (Task 13), and c8e6af1
+(Task 13 follow-up).
 Read, in order:
 
 1. docs/superpowers/specs/2026-07-14-runtime-design.md
@@ -344,8 +365,8 @@ Read, in order:
 Run `uv sync --frozen --extra eval --python 3.11`, `uv lock --check`, the full
 pytest suite, compileall, and `git status` before any new work.
 
-There is no approved Task 14 yet. Do not modify production code, start a new
-feature, or run a manual GLM/Houdini smoke without a new Codex plan and prompt.
+Do not modify production code, start Task 15, or run a manual GLM/Houdini smoke
+without following the Task 14 checklist and a current Codex instruction.
 Claude Code is responsible only for the concrete implementation task supplied
 by Codex; Codex owns plan/status documents, diff review, adversarial checks,
 acceptance, and push/merge decisions. Use model `glm-5.2[1m]` when Codex assigns
