@@ -1043,6 +1043,62 @@ def test_consume_approval_concurrent_single_use(db_path: Path) -> None:
     _run(scenario())
 
 
+def test_consume_approval_rejects_tampered_identity_column(db_path: Path) -> None:
+    """consume_approval must fail closed on a tampered approval identity column.
+
+    Regression: a direct ``UPDATE approvals SET approval_id = ...`` to another
+    valid ``apr_*`` value leaves ``payload_json`` and its storage ``digest``
+    untouched, so the payload still decodes and its digest still verifies — yet
+    the denormalized row column and the decoded DTO disagree about whose
+    approval this is. ``consume_approval`` is the future single-use Apply
+    boundary, so it must detect that inconsistency via the same identity check
+    as the read paths and raise ``runtime.record_corrupt`` BEFORE any
+    expiry/digest handling or the Consumed state mutation, leaving
+    decision/state/events unchanged.
+    """
+
+    async def scenario() -> None:
+        db, repo = await fresh_repo(db_path)
+        try:
+            await _seed_approved(repo)
+
+            # Tamper ONLY the denormalized approval_id column: payload_json and
+            # its digest are left intact, so a digest check alone cannot catch
+            # this. The impostor is a distinct but valid apr_* identity.
+            impostor_id = f"apr_{'6' * 32}"
+            async with db.write_transaction() as conn:
+                await conn.execute(
+                    "UPDATE approvals SET approval_id = ? WHERE change_id = ?",
+                    (impostor_id, CHG),
+                )
+
+            with pytest.raises(AgentException) as exc:
+                await repo.consume_approval(CHG, now=SOON)
+            assert _err_code(exc.value) == "runtime.record_corrupt"
+
+            # No state mutation: the approval decision column stays Approved (not
+            # Consumed), the ChangeSet keeps its seeded state, and no events were
+            # appended (consume_approval is a plain primitive that never emits).
+            raw = await db.fetchone(
+                "SELECT approval_id, decision FROM approvals WHERE change_id = ?",
+                (CHG,),
+            )
+            assert raw is not None
+            assert raw["approval_id"] == impostor_id  # column still swapped...
+            assert raw["decision"] == "Approved"  # ...but NOT consumed.
+            stored = await repo.get_changeset(CHG)
+            assert stored.state is ChangeSetState.APPROVED
+            event_rows = await db.fetchall(
+                "SELECT event_type FROM events WHERE session_id = ? ORDER BY seq",
+                (SES,),
+            )
+            assert [r["event_type"] for r in event_rows] == []
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
 # --------------------------------------------------------------------------
 # receipts: idempotency + conflict + restart query
 # --------------------------------------------------------------------------

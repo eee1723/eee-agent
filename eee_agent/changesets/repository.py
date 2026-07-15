@@ -1136,13 +1136,25 @@ class ChangeSetRepository:
         now_utc = _require_utc_datetime(now, "now")
         async with self._database.write_transaction() as conn:
             cursor = await conn.execute(
-                "SELECT payload_json, digest, decision, changeset_digest, expires_at "
+                "SELECT approval_id, change_id, changeset_digest, decision, "
+                "expires_at, payload_json, digest "
                 "FROM approvals WHERE change_id = ?",
                 (cid,),
             )
             row = await cursor.fetchone()
             if row is None:
                 raise _approval_not_found()
+            # Integrity-first, like get_approval/_fetch_approval_record: verify
+            # the payload, decode the canonical record, and confirm the
+            # denormalized identity columns (approval_id/change_id/
+            # changeset_digest/decision) agree with it BEFORE any expiry/digest/
+            # state handling. consume_approval is the single-use Apply boundary,
+            # so a tampered identity column with an otherwise intact payload/
+            # digest must fail closed as runtime.record_corrupt and leave the row
+            # untouched rather than being consumed.
+            _verify_payload(row["payload_json"], row["digest"])
+            original = _decode_approval(_loads_canonical(row["payload_json"]))
+            _check_approval_row_identity(row, original)
             current_decision = ApprovalDecision(row["decision"])
             if current_decision is not ApprovalDecision.APPROVED:
                 raise _approval_already_consumed()
@@ -1157,8 +1169,6 @@ class ChangeSetRepository:
                 raise _changeset_not_found()
             if row["changeset_digest"] != cs_row["digest"]:
                 raise _approval_digest_mismatch()
-            _verify_payload(row["payload_json"], row["digest"])
-            original = _decode_approval(_loads_canonical(row["payload_json"]))
             consumed = ApprovalRecord(
                 schema_version=original.schema_version,
                 approval_id=original.approval_id,
