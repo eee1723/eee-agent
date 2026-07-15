@@ -11,6 +11,7 @@ class IdKind(StrEnum):
     EVENT = "evt"
     WORKSPACE = "ws"
     CHANGE = "chg"
+    APPROVAL = "apr"
     ARTIFACT = "art"
 
 
