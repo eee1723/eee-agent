@@ -67,8 +67,9 @@ tests, a 257-test focused regression slice, and a fresh full offline suite of
 1275 passed. Task 15-C (main-thread queue and Houdini-side scene query) is
 Codex-accepted at `c717e60` (implementation `3d4687f` plus the cross-thread
 Future-resolution fix); its final focused regression passed 311 tests and the
-fresh full offline suite passed 1329 tests. Task 15-D (real transport and
-integration acceptance) is next. The read-only design and executable breakdown are recorded in
+fresh full offline suite passed 1329 tests. Task 15-D (token handoff, real
+transport, and integration acceptance) is next. The read-only design and
+executable breakdown are recorded in
 `docs/superpowers/specs/2026-07-15-secure-houdini-bridge-readonly-design.md`
 and `docs/superpowers/plans/2026-07-15-secure-houdini-bridge-readonly.md`.
 
@@ -81,9 +82,16 @@ and `docs/superpowers/plans/2026-07-15-secure-houdini-bridge-readonly.md`.
 1. Restricted DTOs and compatibility parser: typed `scene.query` (including the current Houdini selection); reject unknown fields, stale scene epoch, wrong token, and oversized payloads.
 2. Houdini main-thread queue: bounded request queue, deterministic request completion, cancellation boundaries, and no direct background-thread `hou` calls.
 3. SceneBinding: scene epoch increments on load/clear, HIP identity is bounded, and all returned node facts are read-only.
-4. Bridge lifecycle and recovery: separate Bridge token, authenticated loopback transport, bounded shutdown, stale-request cleanup, and process-restart diagnostics.
+4. Bridge lifecycle and recovery: separate Bridge token delivered through an
+   atomic `bridge.token` handoff file, authenticated loopback transport,
+   bounded shutdown, stale-request cleanup, and process-restart diagnostics.
 
-**Acceptance gate:** pure Python contract tests, hython/Houdini integration tests, unauthorized/wrong-epoch tests, cancellation and queue-order tests, and proof that legacy unrestricted entry points are not used by Runtime by default.
+**Acceptance gate:** token-file write/read/cleanup and failure tests; pure
+Python contract tests; offline loopback transport tests; hython/Houdini
+integration tests; unauthorized/wrong-epoch tests; cancellation and
+queue-order tests; and proof that legacy unrestricted entry points are not used
+by Runtime by default. The full token must never appear in discovery, logs,
+SQLite, events, command lines, or environment variables.
 
 ## Task 16: Policy, typed ChangeSet, approval, and transactional execution
 

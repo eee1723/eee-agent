@@ -190,7 +190,36 @@ SceneBinding(
   writes only a fingerprinted discovery record; full Bridge tokens never enter
   logs, SQLite, or events.
 
-## 6. Security and compatibility invariants
+## 6. Token handoff and local identity files
+
+The discovery record is intentionally insufficient to authenticate a client:
+it contains the Bridge fingerprint, not the bearer token. The Houdini-side
+process therefore publishes the full Bridge token through a separate
+same-directory `bridge.token` handoff file. This is a local process handoff,
+not a second discovery channel and not a Runtime credential.
+
+- `bridge.token` contains exactly the UTF-8 token text plus one final newline;
+  it contains no JSON, metadata, Runtime token, or diagnostic text.
+- The token file is created with an atomic temporary-file-and-`os.replace`
+  sequence. A failed publication must leave neither a new discovery record nor
+  a listener that clients could mistake for a usable bridge.
+- On POSIX the final file is mode `0600`; on Windows the implementation must
+  use the current-user, machine-local state directory and document the
+  equivalent owner-only protection available on that platform. Tests must
+  prove that the full token is absent from discovery JSON, reprs, logs, and
+  exception text.
+- The client reads the token only from this explicit file handoff, verifies its
+  fingerprint against discovery before opening a request session, and keeps
+  the bearer only in memory for the hello frame. It must not fall back to an
+  environment variable, command-line argument, Runtime token, or SQLite row.
+- Startup publishes the token file before discovery; shutdown removes both
+  identity files after the listener has stopped. Removal is idempotent and
+  stale files from a previous process are replaced or removed before a new
+  identity is advertised.
+- Runtime and Bridge token files remain independent. A Runtime token must fail
+  Bridge authentication and a Bridge token must fail Runtime authentication.
+
+## 7. Security and compatibility invariants
 
 - Runtime and Bridge bearer tokens are generated, stored, and rotated
   independently.
@@ -201,14 +230,15 @@ SceneBinding(
   add a write tool or a general-purpose subagent.
 - Existing CLI selftest/prompt/stdio paths remain untouched by Task 15.
 
-## 7. Test contract
+## 8. Test contract
 
 Pure Python tests must prove:
 
 - strict parsing, duplicate-key rejection, size/number/key limits, and compact
   canonical serialization;
 - token separation, constant-time validation, wrong-token and wrong-version
-  failures;
+  failures; atomic `bridge.token` write/read/cleanup, fingerprint mismatch,
+  permission/failure handling, and proof that the token never enters discovery;
 - request-id retry behavior and deadline/cancellation mapping;
 - stale epoch, queue-full, unavailable, and bounded error mappings;
 - no HOM object or arbitrary function is serializable through the DTO;
@@ -225,12 +255,14 @@ Real Houdini/hython tests must prove:
 - concurrent requests execute in FIFO order on the main-thread pump;
 - cancellation/deadline does not leave a queue item or HOM reference behind;
 - bridge shutdown removes local identity files and releases its port.
+- a failed token/discovery publication leaves no usable listener or partial
+  identity file, and a restarted bridge can replace stale files safely.
 
 Acceptance requires the focused contract/integration suites, the full offline
 Runtime suite, `uv lock --check`, compileall, diff check, and a manual Houdini
 selection smoke. No ChangeSet or UI test is part of this task.
 
-## 8. Promotion rule
+## 9. Promotion rule
 
 Task 15 is accepted only when the read-only bridge behavior is independently
 verified and the authorized diff contains no scene-write path. Task 17-A may

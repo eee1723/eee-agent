@@ -24,7 +24,7 @@ Task 15 creates these focused files:
 
 - `eee_agent/houdini_bridge/__init__.py` — stable exports for the strict client/DTO surface.
 - `eee_agent/houdini_bridge/contracts.py` — frozen request, response, error, SceneBinding, and scene-query records; strict validation and canonical JSON.
-- `eee_agent/houdini_bridge/auth.py` — Bridge identity/token generation, fingerprint, constant-time validation, and discovery payload without the full token.
+- `eee_agent/houdini_bridge/auth.py` — Bridge identity/token generation, fingerprint, constant-time validation, fingerprint-only discovery, and atomic `bridge.token` handoff.
 - `eee_agent/houdini_bridge/client.py` — authenticated loopback request client; returns plain DTOs and never returns rpyc/HOM proxies.
 - `eee_agent/houdini_bridge/queue.py` — bounded FIFO request queue and cancellation/deadline state machine, independent of `hou`.
 - `houdini_side/secure_bridge.py` — Houdini-side read-only adapter, main-thread pump, scene epoch callbacks, and loopback server entrypoint.
@@ -215,11 +215,18 @@ git add eee_agent/houdini_bridge/queue.py houdini_side/secure_bridge.py tests/ru
 git commit -m "feat: add main-thread read-only Houdini bridge queue"
 ```
 
-## Task 15-D: Real transport and integration acceptance
+## Task 15-D: Real transport, token handoff, and integration acceptance
 
-**Files:** Modify `eee_agent/houdini_bridge/client.py` and `houdini_side/secure_bridge.py`; create `tests/runtime/test_houdini_bridge_transport.py` and `tests/runtime/houdini_bridge_smoke.py`; modify only the Task 15 section of `README.md` and `CLAUDE.md` if installation instructions are required.
+**Files:** Modify `eee_agent/houdini_bridge/auth.py`, `eee_agent/houdini_bridge/client.py`, and `houdini_side/secure_bridge.py`; extend the focused auth/client tests; create `tests/runtime/test_houdini_bridge_transport.py` and `tests/runtime/houdini_bridge_smoke.py`; modify only the Task 15 section of `README.md` and `CLAUDE.md` if installation instructions are required.
 
-- [ ] **Step 1: Write RED offline loopback transport tests**
+- [ ] **Step 1: Write RED token-handoff and offline loopback tests**
+
+Add RED coverage for the approved local identity handoff before adding a
+listener. The tests must cover atomic write/read of `bridge.token`, exact
+token-file contents, POSIX owner-only permissions where supported, replacement
+of stale files, idempotent cleanup, fingerprint verification, and publication
+failure leaving no partial token/discovery file. Assert that discovery JSON,
+reprs, logs, and error text never contain the full token.
 
 Use the real `BridgeClient` and a real loopback `asyncio.start_server` with a fake injected scene adapter to test hello authentication, wrong-token rejection, one `scene.query` request/response, request-id matching, frame limits, stale epoch mapping, and clean server/client shutdown. These tests must not import `hou` and must not call the real Houdini process.
 
@@ -229,13 +236,25 @@ Run:
 uv run --extra eval pytest tests/runtime/test_houdini_bridge_transport.py -q
 ```
 
-Expected RED: the server entrypoint does not yet exist.
+Expected RED: the token-file API and server entrypoint do not yet exist.
 
-- [ ] **Step 2: Implement the framed loopback server**
+- [ ] **Step 2: Implement the token handoff and framed loopback server**
+
+Add explicit auth helpers for the `bridge.token` file. The client must be able
+to load the token together with discovery, verify the advertised fingerprint,
+and construct its in-memory identity without accepting a Runtime token or an
+environment/CLI fallback. Keep the full token out of `BridgeIdentity.__repr__`,
+discovery payloads, diagnostics, and exceptions.
 
 Add a server lifecycle to `houdini_side/secure_bridge.py` that binds only to `127.0.0.1`, publishes Bridge discovery using `write_bridge_discovery`, authenticates the first hello frame with `validate_bridge_token`, parses requests with `parse_request`, submits the operation to `MainThreadReadQueue`, and serializes `BridgeResponse` results/errors. The server must never dispatch arbitrary names or return HOM objects. The Houdini process must drive `queue.pump_one()` from its main-thread event callback; the network loop may run independently only for transport I/O.
 
-The server must reject wrong protocol/kind/token, duplicate keys, invalid frames, stale epochs, unknown operations, oversized frames, and requests after shutdown. `close()` is idempotent, removes discovery, closes sockets, rejects queued work, and does not save/clear/mutate the HIP.
+Startup must publish `bridge.token` atomically before discovery. If either
+identity publication step fails, the listener must be closed and no discovery
+record or partial token file may remain. Shutdown is ordered: stop accepting
+requests, drain/reject bounded work, close sockets, then remove both identity
+files; `close()` is idempotent and does not save/clear/mutate the HIP.
+
+The server must reject wrong protocol/kind/token, duplicate keys, invalid frames, stale epochs, unknown operations, oversized frames, and requests after shutdown.
 
 - [ ] **Step 3: Verify offline transport GREEN**
 
@@ -246,7 +265,14 @@ uv run --extra eval pytest tests/runtime/test_houdini_bridge_queue.py tests/runt
 
 - [ ] **Step 4: Write the explicit smoke helper**
 
-The helper must connect to the Bridge discovery data using the framed TCP client, perform the token handshake, issue `scene.query`, print only bounded DTO facts, select a known test node through the Houdini UI/manual script, issue a second query, and assert the selected path appears. It must never create/delete/connect/set parameters/save/export or call the legacy `eee_agent.bridge` client.
+The helper must read `bridge.token` from the same state directory as the
+discovery record, verify the discovery fingerprint, connect using the framed
+TCP client, perform the token handshake, issue `scene.query`, print only
+bounded DTO facts, select a known test node through the Houdini UI/manual
+script, issue a second query, and assert the selected path appears. It must
+never print the token or place it in a command line, environment variable,
+log, or exception; it must never create/delete/connect/set parameters/save/
+export or call the legacy `eee_agent.bridge` client.
 
 - [ ] **Step 5: Run offline RED/GREEN regression before Houdini**
 
@@ -261,7 +287,7 @@ Expected: all Task 15 tests pass before starting Houdini.
 Start Houdini 21.0.440, load the bridge script from the repository, and run:
 
 ```powershell
-& "D:\houdini\bin\hython.exe" tests/runtime/houdini_bridge_smoke.py --host 127.0.0.1 --port 18811
+& "D:\houdini\bin\hython.exe" tests/runtime/houdini_bridge_smoke.py --state-dir "$env:TEMP\eee-bridge-smoke" --host 127.0.0.1 --port 18811
 ```
 
 The smoke must prove loopback binding, token authentication, selection parity, node/type facts, geometry bounds, load/clear epoch increment, Save/Save As epoch stability, stale-epoch rejection, FIFO ordering, cancellation, and clean shutdown. Record the before/after scene fingerprint and assert no mutation.
@@ -281,7 +307,7 @@ Expected: zero failures, no new skips/xfailed tests, lock/compile/diff checks ex
 - [ ] **Step 8: Commit Task 15-D**
 
 ```powershell
-git add eee_agent/houdini_bridge/client.py houdini_side/secure_bridge.py tests/runtime/test_houdini_bridge_transport.py tests/runtime/houdini_bridge_smoke.py README.md CLAUDE.md
+git add eee_agent/houdini_bridge/auth.py eee_agent/houdini_bridge/client.py houdini_side/secure_bridge.py tests/runtime/test_houdini_bridge_auth.py tests/runtime/test_houdini_bridge_client.py tests/runtime/test_houdini_bridge_transport.py tests/runtime/houdini_bridge_smoke.py README.md CLAUDE.md
 git commit -m "feat: expose authenticated read-only Houdini scene query"
 ```
 
