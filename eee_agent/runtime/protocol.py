@@ -105,6 +105,29 @@ def _payload_too_large() -> AgentException:
     )
 
 
+class _DuplicateKeyError(ValueError):
+    """Raised by the JSON object_pairs_hook on any duplicate object key."""
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """object_pairs_hook that rejects duplicate keys at any object depth."""
+    seen: set[str] = set()
+    for key, _value in pairs:
+        if key in seen:
+            raise _DuplicateKeyError("duplicate object key")
+        seen.add(key)
+    return dict(pairs)
+
+
+def _snapshot_json(value: object) -> object:
+    """Return a fresh, independent JSON tree copy.
+
+    Rejects non-JSON values, cycles, and non-finite floats (including
+    overflow-to-inf) at construction time so a later encode cannot fail.
+    """
+    return thaw_json(freeze_json(value))
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeCommand:
     """A parsed Runtime command envelope."""
@@ -124,11 +147,13 @@ def parse_command(raw: str | bytes | bytearray) -> RuntimeCommand:
     ``runtime.capability_unavailable``); any other command type raises
     ``protocol.unknown_command``.
     """
-    if isinstance(raw, str):
+    if type(raw) is str:
         data = raw.encode("utf-8")
-    elif isinstance(raw, (bytes, bytearray)):
-        data = bytes(raw)
+    elif type(raw) is bytes:
+        data = raw
     else:
+        # Reject bytearray, memoryview, and str/bytes subclasses: the contract
+        # accepts exactly str or bytes.
         raise _invalid_envelope()
 
     if len(data) > MAX_MESSAGE_BYTES:
@@ -140,9 +165,13 @@ def parse_command(raw: str | bytes | bytearray) -> RuntimeCommand:
         raise _invalid_json() from exc
 
     try:
-        obj = json.loads(text)
-    except (json.JSONDecodeError, ValueError) as exc:
+        obj = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
+    except json.JSONDecodeError as exc:
         raise _invalid_json() from exc
+    except _DuplicateKeyError as exc:
+        # Duplicate keys (at any depth) silently taking the last value would
+        # violate the strict five-field / strict-JSON contract.
+        raise _invalid_envelope() from exc
 
     if not isinstance(obj, dict):
         raise _invalid_envelope()
@@ -196,13 +225,17 @@ def parse_command(raw: str | bytes | bytearray) -> RuntimeCommand:
 
 
 def success_response(request_id: str, result: object) -> dict[str, object]:
-    """Build a fresh success response envelope."""
+    """Build a fresh success response envelope.
+
+    ``result`` is deep-snapshotted into an independent JSON tree (and rejected
+    up front if it contains non-JSON values, cycles, or non-finite floats).
+    """
     return {
         "protocol": PROTOCOL,
         "kind": "response",
         "request_id": request_id,
         "ok": True,
-        "result": result,
+        "result": _snapshot_json(result),
     }
 
 
@@ -231,7 +264,12 @@ def event_envelope(
     payload: dict[str, JsonValue],
     schema_version: int = 1,
 ) -> dict[str, object]:
-    """Build a fresh event envelope. ``run_id`` is nullable for session events."""
+    """Build a fresh event envelope.
+
+    ``run_id`` is nullable for session events. ``payload`` is deep-snapshotted
+    into an independent JSON tree (and rejected up front if it contains
+    non-JSON values, cycles, or non-finite floats).
+    """
     return {
         "protocol": PROTOCOL,
         "kind": "event",
@@ -241,7 +279,7 @@ def event_envelope(
         "seq": seq,
         "timestamp": timestamp,
         "type": event_type,
-        "payload": payload,
+        "payload": _snapshot_json(payload),
         "schema_version": schema_version,
     }
 

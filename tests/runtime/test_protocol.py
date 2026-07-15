@@ -403,3 +403,193 @@ def test_encode_envelope_is_deterministic() -> None:
     assert encode_envelope(env) == encode_envelope(
         {"m": [3, 2, 1], "a": 2, "z": 1}
     )
+
+
+# --------------------------------------------------------------------------
+# strict-envelope regressions (Codex round 5)
+# --------------------------------------------------------------------------
+
+
+def _json_with_duplicate_top_level(field: str) -> str:
+    parts: list[str] = []
+
+    def emit(k: str, v: str) -> None:
+        parts.append(f'"{k}":{v}')
+
+    emit("protocol", '"eee.runtime/1"')
+    if field == "protocol":
+        emit("protocol", '"eee.runtime/1"')
+    emit("kind", '"command"')
+    emit("request_id", '"r1"')
+    if field == "request_id":
+        emit("request_id", '"r2"')
+    emit("type", '"runtime.ping"')
+    if field == "type":
+        emit("type", '"runtime.ping"')
+    emit("payload", "{}")
+    if field == "payload":
+        emit("payload", "{}")
+    return "{" + ",".join(parts) + "}"
+
+
+@pytest.mark.parametrize(
+    "field", ["protocol", "request_id", "type", "payload"]
+)
+def test_parse_command_rejects_duplicate_top_level_key(field: str) -> None:
+    raw = _json_with_duplicate_top_level(field)
+    with pytest.raises(AgentException) as exc:
+        parse_command(raw)
+    assert _err(exc) == ("protocol.invalid_envelope", "protocol")
+
+
+def test_parse_command_rejects_duplicate_nested_payload_key() -> None:
+    raw = (
+        '{"protocol":"eee.runtime/1","kind":"command","request_id":"r1",'
+        '"type":"runtime.ping","payload":{"a":1,"a":2}}'
+    )
+    with pytest.raises(AgentException) as exc:
+        parse_command(raw)
+    assert _err(exc) == ("protocol.invalid_envelope", "protocol")
+
+
+def test_duplicate_key_error_does_not_leak_values() -> None:
+    secret = "secret-id-12345"
+    raw = (
+        '{"protocol":"eee.runtime/1","protocol":"eee.runtime/1",'
+        '"kind":"command","request_id":"' + secret + '","request_id":"' + secret + '",'
+        '"type":"runtime.ping","payload":{}}'
+    )
+    with pytest.raises(AgentException) as exc:
+        parse_command(raw)
+    assert _err(exc) == ("protocol.invalid_envelope", "protocol")
+    assert secret not in exc.value.error.message_for_user
+    assert secret not in str(exc.value.error.to_dict())
+
+
+class _StrSub(str):
+    pass
+
+
+class _BytesSub(bytes):
+    pass
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        bytearray(b'{"protocol":"eee.runtime/1","kind":"command","request_id":"r1","type":"runtime.ping","payload":{}}'),
+        memoryview(b'{"protocol":"eee.runtime/1","kind":"command","request_id":"r1","type":"runtime.ping","payload":{}}'),
+        _StrSub('{"protocol":"eee.runtime/1","kind":"command","request_id":"r1","type":"runtime.ping","payload":{}}'),
+        _BytesSub(b'{"protocol":"eee.runtime/1","kind":"command","request_id":"r1","type":"runtime.ping","payload":{}}'),
+    ],
+    ids=["bytearray", "memoryview", "str-subclass", "bytes-subclass"],
+)
+def test_parse_command_rejects_non_str_bytes_types(bad) -> None:
+    with pytest.raises(AgentException) as exc:
+        parse_command(bad)
+    assert _err(exc) == ("protocol.invalid_envelope", "protocol")
+
+
+def test_success_response_deep_snapshots_result() -> None:
+    result = {"a": [1, 2], "b": {"c": 3}}
+    resp = success_response("r1", result)
+    # Mutate the caller's object after construction.
+    result["a"].append(3)
+    result["b"]["c"] = 99
+    result["new"] = 1
+    assert resp["result"] == {"a": [1, 2], "b": {"c": 3}}
+
+
+def test_success_response_calls_do_not_share_nested_objects() -> None:
+    r1 = success_response("r1", {"a": [1]})
+    r2 = success_response("r1", {"a": [1]})
+    r1["result"]["a"].append(2)
+    assert r2["result"]["a"] == [1]
+
+
+def test_event_envelope_deep_snapshots_payload() -> None:
+    payload = {"x": [1, 2], "y": {"z": 3}}
+    env = event_envelope(
+        event_id="e",
+        session_id="s",
+        run_id=None,
+        seq=1,
+        timestamp=_NOW,
+        event_type="t",
+        payload=payload,
+    )
+    payload["x"].append(3)
+    payload["y"]["z"] = 99
+    payload["new"] = 1
+    assert env["payload"] == {"x": [1, 2], "y": {"z": 3}}
+
+
+def test_event_envelope_calls_do_not_share_nested_payload() -> None:
+    a = event_envelope(
+        event_id="e", session_id="s", run_id=None, seq=1,
+        timestamp=_NOW, event_type="t", payload={"a": [1]},
+    )
+    b = event_envelope(
+        event_id="e", session_id="s", run_id=None, seq=1,
+        timestamp=_NOW, event_type="t", payload={"a": [1]},
+    )
+    a["payload"]["a"].append(2)
+    assert b["payload"]["a"] == [1]
+
+
+@pytest.mark.parametrize(
+    "bad_result",
+    [
+        {"x": float("nan")},
+        {"x": float("inf")},
+        {1, 2},  # non-JSON type
+    ],
+    ids=["nan", "inf", "set"],
+)
+def test_success_response_rejects_non_json_result(bad_result) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        success_response("r1", bad_result)
+
+
+def test_success_response_rejects_cycle_in_result() -> None:
+    cyclic: dict = {}
+    cyclic["self"] = cyclic
+    with pytest.raises((TypeError, ValueError)):
+        success_response("r1", cyclic)
+
+
+@pytest.mark.parametrize(
+    "bad_payload",
+    [
+        {"x": float("nan")},
+        {"x": float("inf")},
+        {"x": {1, 2}},
+    ],
+    ids=["nan", "inf", "set"],
+)
+def test_event_envelope_rejects_non_json_payload(bad_payload) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        event_envelope(
+            event_id="e",
+            session_id="s",
+            run_id=None,
+            seq=1,
+            timestamp=_NOW,
+            event_type="t",
+            payload=bad_payload,
+        )
+
+
+def test_event_envelope_rejects_cycle_in_payload() -> None:
+    cyclic: dict = {}
+    cyclic["self"] = cyclic
+    with pytest.raises((TypeError, ValueError)):
+        event_envelope(
+            event_id="e",
+            session_id="s",
+            run_id=None,
+            seq=1,
+            timestamp=_NOW,
+            event_type="t",
+            payload=cyclic,
+        )
