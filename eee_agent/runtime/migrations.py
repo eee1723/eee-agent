@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Exact schema v1 DDL from the approved design spec section 7.3. No IF NOT
 # EXISTS: a partially-wrong schema must surface, not be silently masked.
@@ -60,9 +61,109 @@ CREATE TABLE runtime_state (
 );
 """
 
+# Exact schema v2 DDL (Task 16). Additive only: it creates the four typed
+# changeset tables and leaves every v1 table untouched. No IF NOT EXISTS: a
+# partially-wrong schema must surface, not be silently masked.
+MIGRATION_V2_SQL = """
+CREATE TABLE workspaces (
+    workspace_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    instance_id TEXT NOT NULL,
+    scene_epoch INTEGER NOT NULL CHECK (scene_epoch >= 1),
+    revision TEXT NOT NULL CHECK (length(revision) = 64),
+    created_by_run TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    updated_at TEXT NOT NULL,
+    digest TEXT NOT NULL CHECK (length(digest) = 64),
+    payload_json TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1)
+);
+
+CREATE INDEX workspaces_by_session ON workspaces(session_id, workspace_id);
+
+CREATE TABLE changesets (
+    change_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    workspace_id TEXT,
+    digest TEXT NOT NULL CHECK (length(digest) = 64),
+    state TEXT NOT NULL CHECK (state IN (
+        'Proposed', 'AwaitingApproval', 'Approved', 'Applying', 'Applied',
+        'RolledBack', 'CriticalRecovery', 'Stale', 'Rejected', 'Expired'
+    )),
+    created_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1)
+);
+
+CREATE INDEX changesets_by_session ON changesets(session_id, change_id);
+CREATE INDEX changesets_by_state ON changesets(state, change_id);
+
+CREATE TABLE approvals (
+    approval_id TEXT PRIMARY KEY,
+    change_id TEXT NOT NULL REFERENCES changesets(change_id) ON DELETE CASCADE,
+    changeset_digest TEXT NOT NULL CHECK (length(changeset_digest) = 64),
+    decision TEXT NOT NULL CHECK (decision IN (
+        'Pending', 'Approved', 'Rejected', 'Consumed', 'Expired'
+    )),
+    decided_by TEXT CHECK (decided_by IS NULL OR decided_by = 'local_user'),
+    requested_at TEXT NOT NULL,
+    decided_at TEXT,
+    expires_at TEXT NOT NULL,
+    approved_instance_id TEXT,
+    approved_scene_epoch INTEGER
+        CHECK (approved_scene_epoch IS NULL OR approved_scene_epoch >= 1),
+    updated_at TEXT NOT NULL,
+    digest TEXT NOT NULL CHECK (length(digest) = 64),
+    payload_json TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    UNIQUE(change_id)
+);
+
+CREATE INDEX approvals_by_change ON approvals(change_id);
+CREATE INDEX approvals_by_decision ON approvals(decision, approval_id);
+
+CREATE TABLE change_receipts (
+    change_id TEXT PRIMARY KEY REFERENCES changesets(change_id) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK (status IN (
+        'Applied', 'AlreadyApplied', 'RolledBack', 'Partial', 'CriticalRecovery'
+    )),
+    instance_id TEXT NOT NULL,
+    scene_epoch INTEGER NOT NULL CHECK (scene_epoch >= 1),
+    digest TEXT NOT NULL CHECK (length(digest) = 64),
+    payload_json TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1)
+);
+
+CREATE INDEX change_receipts_by_status ON change_receipts(status, change_id);
+"""
+
 # Ordered migrations. Each entry is (version, SQL script). The orchestrator
 # splits the script into statements and runs them in one atomic transaction.
-MIGRATIONS: tuple[tuple[int, str], ...] = ((1, MIGRATION_V1_SQL),)
+MIGRATIONS: tuple[tuple[int, str], ...] = (
+    (1, MIGRATION_V1_SQL),
+    (2, MIGRATION_V2_SQL),
+)
+
+
+def migration_checksum(script: str) -> str:
+    """Deterministic SHA-256 of a migration's exact SQL script text.
+
+    The checksum covers the precise script stored in :data:`MIGRATIONS`, so any
+    tampering with an applied migration's recorded checksum (or a script change
+    without a version bump) is detectable on the next open.
+    """
+    if type(script) is not str:
+        raise TypeError("migration script must be a string")
+    return hashlib.sha256(script.encode("utf-8")).hexdigest()
+
+
+def script_for_version(version: int) -> str | None:
+    """Return the exact SQL script registered for ``version``, or ``None``."""
+    for stored_version, script in MIGRATIONS:
+        if stored_version == version:
+            return script
+    return None
 
 
 def split_sql_statements(script: str) -> list[str]:

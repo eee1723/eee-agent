@@ -91,14 +91,14 @@ async def add_event(
 
 
 # --------------------------------------------------------------------------
-# 1. empty database -> schema v1
+# 1. empty database -> schema v2 (v1 tables preserved, four v2 tables added)
 # --------------------------------------------------------------------------
 
-def test_empty_database_reaches_schema_v1(db_path: Path) -> None:
+def test_empty_database_reaches_schema_v2(db_path: Path) -> None:
     async def scenario() -> None:
         db = await RuntimeDatabase.open(db_path)
         try:
-            assert await db.schema_version() == 1
+            assert await db.schema_version() == 2
             names = await db.table_names()
             assert {
                 "schema_migrations",
@@ -106,6 +106,10 @@ def test_empty_database_reaches_schema_v1(db_path: Path) -> None:
                 "runs",
                 "events",
                 "runtime_state",
+                "workspaces",
+                "changesets",
+                "approvals",
+                "change_receipts",
             } <= names
             row = await db.fetchone(
                 "SELECT singleton_id, active_run_id, updated_at FROM runtime_state"
@@ -132,11 +136,11 @@ def test_reopen_does_not_rerun_migration(db_path: Path) -> None:
         await db.close()
         db2 = await RuntimeDatabase.open(db_path)
         try:
-            assert await db2.schema_version() == 1
+            assert await db2.schema_version() == 2
             rows = await db2.fetchall(
                 "SELECT version FROM schema_migrations ORDER BY version"
             )
-            assert [r["version"] for r in rows] == [1]
+            assert [r["version"] for r in rows] == [1, 2]
         finally:
             await db2.close()
 
@@ -181,7 +185,7 @@ def test_newer_schema_is_rejected_and_connection_closed(db_path: Path) -> None:
         db_path,
         "CREATE TABLE schema_migrations "
         "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
-        [2],
+        [3],
     )
     with pytest.raises(RuntimeError, match="newer than this Runtime"):
         _run(RuntimeDatabase.open(db_path))
@@ -189,7 +193,7 @@ def test_newer_schema_is_rejected_and_connection_closed(db_path: Path) -> None:
     # The failed open() must have released the file handle (Windows-safe).
     raw = sqlite3.connect(db_path)
     try:
-        assert raw.execute("SELECT version FROM schema_migrations").fetchone()[0] == 2
+        assert raw.execute("SELECT version FROM schema_migrations").fetchone()[0] == 3
     finally:
         raw.close()
 
@@ -808,3 +812,184 @@ def test_deleting_active_run_sets_runtime_state_null(db_path: Path) -> None:
             await db.close()
 
     _run(scenario())
+
+
+# --------------------------------------------------------------------------
+# 15. schema v2 migration checksums (Task 16-B1)
+# --------------------------------------------------------------------------
+
+import hashlib  # noqa: E402  (local to the checksum section)
+
+
+def _expected_checksum(script: str) -> str:
+    return hashlib.sha256(script.encode("utf-8")).hexdigest()
+
+
+def _seed_legacy_v1_database(db_path: Path, *, with_session: bool = False) -> None:
+    """Build a pre-checksum schema-v1 database the way the old Runtime did.
+
+    The ``schema_migrations`` table has no ``checksum`` column, exactly one v1
+    row is applied, and the v1 application tables + runtime_state singleton
+    exist. Optionally seeds a session row so migration preservation is tested.
+    """
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.execute(
+            "CREATE TABLE schema_migrations "
+            "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        for statement in migrations_mod.split_sql_statements(migrations_mod.MIGRATION_V1_SQL):
+            raw.execute(statement)
+        raw.execute(
+            "INSERT INTO runtime_state(singleton_id, active_run_id, updated_at) "
+            "VALUES (1, NULL, ?)",
+            (NOW_ISO,),
+        )
+        raw.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+            (1, NOW_ISO),
+        )
+        if with_session:
+            raw.execute(_SESSION_INSERT, (SESSION_ID, "T", "active", NOW_ISO, NOW_ISO, 0, 0))
+        raw.commit()
+    finally:
+        raw.close()
+
+
+def test_migration_rows_carry_sha256_checksum_of_script(db_path: Path) -> None:
+    async def scenario() -> None:
+        db = await RuntimeDatabase.open(db_path)
+        try:
+            cols = await db.fetchall("PRAGMA table_info(schema_migrations)")
+            assert "checksum" in {row["name"] for row in cols}
+            rows = await db.fetchall(
+                "SELECT version, checksum FROM schema_migrations ORDER BY version"
+            )
+            assert [r["version"] for r in rows] == [1, 2]
+            expected = {
+                v: _expected_checksum(script) for v, script in migrations_mod.MIGRATIONS
+            }
+            for row in rows:
+                assert row["checksum"] == expected[row["version"]]
+                assert len(row["checksum"]) == 64
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_legacy_v1_database_without_checksum_is_upgraded(db_path: Path) -> None:
+    _seed_legacy_v1_database(db_path, with_session=True)
+    async def scenario() -> None:
+        db = await RuntimeDatabase.open(db_path)
+        try:
+            assert await db.schema_version() == 2
+            # checksum column added and v1 backfilled with the known checksum.
+            row = await db.fetchone(
+                "SELECT checksum FROM schema_migrations WHERE version = 1"
+            )
+            assert row["checksum"] == _expected_checksum(migrations_mod.MIGRATION_V1_SQL)
+            # v2 applied with its own checksum.
+            row2 = await db.fetchone(
+                "SELECT checksum FROM schema_migrations WHERE version = 2"
+            )
+            assert row2["checksum"] == _expected_checksum(migrations_mod.MIGRATION_V2_SQL)
+            # v1 data preserved; v2 tables now available.
+            assert (await db.fetchone("SELECT COUNT(*) AS c FROM sessions"))["c"] == 1
+            names = await db.table_names()
+            assert {"workspaces", "changesets", "approvals", "change_receipts"} <= names
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_legacy_v1_database_round_trips_sessions_runs_events(db_path: Path) -> None:
+    _seed_legacy_v1_database(db_path, with_session=True)
+    async def scenario() -> None:
+        db = await RuntimeDatabase.open(db_path)
+        try:
+            await add_run(db)
+            await add_event(db, rid=RUN_ID, seq=1)
+            assert (await db.fetchone("SELECT COUNT(*) AS c FROM runs"))["c"] == 1
+            assert (await db.fetchone("SELECT COUNT(*) AS c FROM events"))["c"] == 1
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_tampered_migration_checksum_fails_closed(db_path: Path) -> None:
+    async def setup() -> None:
+        db = await RuntimeDatabase.open(db_path)
+        await db.close()
+
+    _run(setup())
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.execute(
+            "UPDATE schema_migrations SET checksum = ? WHERE version = 1",
+            ("0" * 64,),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+    with pytest.raises(RuntimeError, match="checksum"):
+        _run(RuntimeDatabase.open(db_path))
+
+
+def test_reopened_database_revalidates_checksums(db_path: Path) -> None:
+    async def scenario() -> None:
+        db = await RuntimeDatabase.open(db_path)
+        await add_session(db)
+        await db.close()
+        # A normal reopen must re-read and re-validate every checksum.
+        db2 = await RuntimeDatabase.open(db_path)
+        try:
+            assert await db2.schema_version() == 2
+            assert (await db2.fetchone("SELECT COUNT(*) AS c FROM sessions"))["c"] == 1
+        finally:
+            await db2.close()
+
+    _run(scenario())
+
+
+def test_failed_v2_migration_leaves_no_partial_tables(db_path: Path) -> None:
+    # Seed a v1-only legacy database, then make the v2 script fail partway: it
+    # creates one table then errors. The atomic v2 transaction must roll back so
+    # no partial v2 schema is visible and the v1 data remains intact.
+    _seed_legacy_v1_database(db_path, with_session=True)
+    bad_v2 = (
+        "CREATE TABLE tmp_v2_partial(x INTEGER);\n"
+        "INSERT INTO no_such_table(x) VALUES (1);"
+    )
+    monkey_v2 = (
+        (1, migrations_mod.MIGRATION_V1_SQL),
+        (2, bad_v2),
+    )
+    original = migrations_mod.MIGRATIONS
+    migrations_mod.MIGRATIONS = monkey_v2  # type: ignore[assignment]
+    try:
+        with pytest.raises(sqlite3.Error):
+            _run(RuntimeDatabase.open(db_path))
+    finally:
+        migrations_mod.MIGRATIONS = original  # type: ignore[assignment]
+
+    raw = sqlite3.connect(db_path)
+    try:
+        tables = {
+            r[0]
+            for r in raw.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        versions = [
+            r[0] for r in raw.execute("SELECT version FROM schema_migrations").fetchall()
+        ]
+        sessions = raw.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+    finally:
+        raw.close()
+    assert "tmp_v2_partial" not in tables
+    assert "changesets" not in tables
+    assert versions == [1]  # v2 not recorded
+    assert sessions == 1  # v1 data intact

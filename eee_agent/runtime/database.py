@@ -21,23 +21,38 @@ _PRAGMAS = (
 
 _MIGRATIONS_DDL = (
     "CREATE TABLE IF NOT EXISTS schema_migrations "
-    "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+    "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL, "
+    "checksum TEXT NOT NULL)"
 )
 
 
-def _validate_history(applied: list[int]) -> None:
-    if len(set(applied)) != len(applied):
+def _validate_history(applied: list[tuple[int, str]]) -> None:
+    versions = [version for version, _ in applied]
+    if len(set(versions)) != len(versions):
         raise RuntimeError("duplicate schema migration versions in history")
-    if applied and max(applied) > migrations.SCHEMA_VERSION:
+    if versions and max(versions) > migrations.SCHEMA_VERSION:
         raise RuntimeError(
-            f"database schema version {max(applied)} is newer than this Runtime "
+            f"database schema version {max(versions)} is newer than this Runtime "
             f"(version {migrations.SCHEMA_VERSION})"
         )
-    expected = list(range(1, len(applied) + 1))
-    if sorted(applied) != expected:
+    expected = list(range(1, len(versions) + 1))
+    if sorted(versions) != expected:
         raise RuntimeError(
-            f"non-contiguous schema migration history: {sorted(applied)}"
+            f"non-contiguous schema migration history: {sorted(versions)}"
         )
+    # Every applied row must carry the deterministic SHA-256 of its exact SQL
+    # script. A tampered checksum (or a script changed without a version bump)
+    # fails closed before any migration runs.
+    for version, stored_checksum in applied:
+        script = migrations.script_for_version(version)
+        if script is None:
+            raise RuntimeError(
+                f"no migration script for applied schema version {version}"
+            )
+        if stored_checksum != migrations.migration_checksum(script):
+            raise RuntimeError(
+                f"checksum mismatch for schema migration version {version}"
+            )
 
 
 class RuntimeDatabase:
@@ -61,11 +76,12 @@ class RuntimeDatabase:
             connection.row_factory = aiosqlite.Row
             for pragma in _PRAGMAS:
                 await connection.execute(pragma)
-            await connection.execute(_MIGRATIONS_DDL)
+            await cls._ensure_schema_migrations_table(connection)
             applied = await cls._read_applied(connection)
             _validate_history(applied)
+            applied_versions = {version for version, _ in applied}
             for version, script in migrations.MIGRATIONS:
-                if version in applied:
+                if version in applied_versions:
                     continue
                 await cls._apply_migration(connection, version, script)
         except BaseException:
@@ -74,18 +90,56 @@ class RuntimeDatabase:
         return cls(connection)
 
     @staticmethod
-    async def _read_applied(connection: aiosqlite.Connection) -> list[int]:
+    async def _ensure_schema_migrations_table(
+        connection: aiosqlite.Connection,
+    ) -> None:
+        """Create the migrations table, and upgrade a legacy v1 table.
+
+        A fresh database gets the checksum column from :data:`_MIGRATIONS_DDL`.
+        A legacy v1 database whose ``schema_migrations`` table predates
+        checksums is upgraded transactionally: the column is added and every
+        already-applied version is backfilled with the deterministic checksum of
+        its known script. Unknown/future versions are left for
+        :func:`_validate_history` to reject.
+        """
+        await connection.execute(_MIGRATIONS_DDL)
+        cursor = await connection.execute("PRAGMA table_info(schema_migrations)")
+        columns = {row["name"] for row in await cursor.fetchall()}
+        if "checksum" in columns:
+            return
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            await connection.execute(
+                "ALTER TABLE schema_migrations "
+                "ADD COLUMN checksum TEXT NOT NULL DEFAULT ''"
+            )
+            for version, script in migrations.MIGRATIONS:
+                await connection.execute(
+                    "UPDATE schema_migrations SET checksum = ? WHERE version = ?",
+                    (migrations.migration_checksum(script), version),
+                )
+            await connection.execute("COMMIT")
+        except BaseException:
+            try:
+                await connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+
+    @staticmethod
+    async def _read_applied(connection: aiosqlite.Connection) -> list[tuple[int, str]]:
         cursor = await connection.execute(
-            "SELECT version FROM schema_migrations ORDER BY version"
+            "SELECT version, checksum FROM schema_migrations ORDER BY version"
         )
         rows = await cursor.fetchall()
-        return [int(row[0]) for row in rows]
+        return [(int(row[0]), row[1]) for row in rows]
 
     @staticmethod
     async def _apply_migration(
         connection: aiosqlite.Connection, version: int, script: str
     ) -> None:
         applied_at = datetime.now(timezone.utc).isoformat()
+        checksum = migrations.migration_checksum(script)
         await connection.execute("BEGIN IMMEDIATE")
         try:
             for statement in migrations.split_sql_statements(script):
@@ -99,8 +153,9 @@ class RuntimeDatabase:
                     (applied_at,),
                 )
             await connection.execute(
-                "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-                (version, applied_at),
+                "INSERT INTO schema_migrations(version, applied_at, checksum) "
+                "VALUES (?, ?, ?)",
+                (version, applied_at, checksum),
             )
             await connection.execute("COMMIT")
         except BaseException:
