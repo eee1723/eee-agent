@@ -126,16 +126,44 @@ Remove-Item -LiteralPath $out -Force
   `sop/*.txt` node source scope; the 4 project skills (`project_verified_skill`);
   no stored absolute machine path (URL-safe regex over decoded attribute values).
 
-### Final hashes (final verified build command)
+### Final build hash — target-input-snapshot-specific (NOT universally reproducible)
 
-Read directly from the single final production build above (`--out $out`,
-then `validate_cache` → `valid`, then `run_eval.py --kb $out`). The entity/edge/
-unresolved/ambiguous counts above and the evaluator metrics below come from this
-same build. Determinism was confirmed by running the build a second time — both
-builds produced identical hashes:
+The manifest hash is a fingerprint of the **exact build input snapshot**, not a
+universal constant. It is reproduced only when the source snapshot below matches;
+a different SOP inventory (different installed SOP operators / HDAs / config), a
+different zip byte-packaging of the same docs, or a different Houdini patch level
+yields a **different** manifest hash while preserving the same parsed entity
+counts (the documentation content is identical even when the byte fingerprint
+differs). Two consecutive fresh builds from this worktree against `D:\houdini`
+reproduce deterministically **within this environment**:
 
 - **manifest_sha256:** `e4c6e29d0699808cb10053e01dd37be75894781bb3f72b873ce2807a5824e295`
 - **node_inventory_sha256:** `7d3e4a9492f45b0dff54b5bdae5dd3c1ae35e6a3ba8ea5ae6811c1a0d1a26b1f`
+
+Auditable source snapshot this hash corresponds to (read from the same cache's
+manifest `source_archives`, `skill_sources` and `node_inventory_sha256`):
+
+| input | sha256 |
+|---|---|
+| `nodes.zip` (5,944,063 B) | `f3f03b8ed9a9cbf0297a8d5ef14d64099402a2cf05cde226ddcefcb2fac80143` |
+| `hom.zip` (1,130,218 B) | `f60653a4a635025852fad34446ae2b8f3c052c1e1fb34198e64a413337436921` |
+| `vex.zip` (684,257 B) | `5d69040c8aebd626a3022abca01c09711cc7ac64073f28c879b9519e9e23742d` |
+| `skills/parametric-building/SKILL.md` | `8f4a4076480f1d259c8620ba9bc8835a097058450691b77fc7cd5d0e4bcf3827` |
+| `skills/procedural-components/SKILL.md` | `7b259f4b3b423fbd6fb56cf421f89c71a875aed0207789b4340253458eb4cd3e` |
+| `skills/sop-cookbook/SKILL.md` | `d498c8be45b3257ce7619b35fe04fecbadbbd8848b7733fccd6cad4317deb10c` |
+| `skills/vex-patterns/SKILL.md` | `e27c3dcfd9367ac666d9e520d088f4986dc7f5104a2e794e3f8b717b53caf9e2` |
+
+**Reproducibility scope:** this hash is **not** claimed to reproduce on a machine
+whose input snapshot differs, and it must not be described as a universally
+reproducible final-build hash. The audit environment (also `D:\houdini`, also
+`21.0.440`) reproduces **deterministically but differently** as manifest
+`04d766a741530128a60f7ef90b45bf2aebcaf450392e4cabb70d92b19142a3fd` / inventory
+`d6e1c9b23db9df020213ee15f321320b5a67992b9796f2b4bd81cc073fc9f6c3` — with the
+**same** counts (entities 8476, edges 26131, unresolved 6027, ambiguous 694) and
+`validate_cache=valid`. That divergence (identical parsed content, different
+manifest hash) is precisely why the hash is qualified here as snapshot-specific.
+The counts, `validate_cache=valid`, and the evaluator metrics recorded below are
+all read from this same single cache.
 
 ### Golden evaluator metrics (`run_eval.py --kb <final cache>`)
 
