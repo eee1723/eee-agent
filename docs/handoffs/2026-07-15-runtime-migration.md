@@ -22,14 +22,12 @@ Generated: 2026-07-15 (Asia/Shanghai)
   below as historical detail).
 - Task 13 accepted tip: `c8e6af1` (implementation `3b69532` plus the reviewed
   graceful-timeout/cleanup-order follow-up).
-- Task 14 is planned and not started. Its scope is Runtime v1 external
-  acceptance and delivery; the detailed gate is in
+- Task 14 is in progress. The accepted branch has been pushed; clean restore
+  and manual Runtime/Houdini acceptance remain. The detailed gate is in
   `docs/superpowers/plans/2026-07-15-runtime-next-milestones.md`.
-- The source worktree is clean and `feature/runtime` is ahead of
-  `origin/feature/runtime` by five commits: the three accepted implementation
-  commits plus the Codex-owned status/roadmap commits `70b7568` and
-  `dd2f0e2`; none are
-  pushed yet.
+- The source worktree is clean and `feature/runtime` is synchronized with
+  `origin/feature/runtime` at `9293174`; all six Runtime delivery commits are
+  now pushed.
 
 Do not merge this branch to `main` until the three accepted commits are pushed
 and the final integration decision is made. Manual GLM/Houdini acceptance is
@@ -59,7 +57,7 @@ the plan, diff review, adversarial diagnostics, and independent acceptance.
 | 11 Protocol/Auth/RuntimeLock | Complete, Codex accepted | `64fa688` |
 | 12 WebSocket server | Complete, Codex accepted | `724a8fb` |
 | 13 CLI/restart E2E/docs/final verification | Complete, Codex accepted | `c8e6af1` |
-| 14 Runtime v1 external acceptance and delivery | Planned, Codex owns gate | See next-milestones plan |
+| 14 Runtime v1 external acceptance and delivery | In progress: pushed, restore/smokes pending | See next-milestones plan |
 
 ## Task 10: Accepted RuntimeService
 
@@ -284,8 +282,7 @@ The authoritative checklist and the Task 15–19 roadmap are in
 
 ## Remaining Delivery Sequence
 
-1. Push the five local commits on `feature/runtime`:
-   `724a8fb`, `3b69532`, `c8e6af1`, `70b7568`, and `dd2f0e2`.
+1. Push completed: `feature/runtime` is at `9293174` on GitHub.
 2. On the next computer, restore the branch from `origin/feature/runtime` and
    rerun the clean baseline verification below.
 3. Perform the separate manual GLM-5.2 and Houdini read-only smoke procedures

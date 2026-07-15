@@ -22,7 +22,7 @@
 
 ## Task 14: Runtime v1 external acceptance and delivery gate
 
-**Status:** Planned. No new production-code scope is approved until this gate is completed or a narrowly scoped defect is isolated.
+**Status:** In progress. The accepted branch was pushed to `origin/feature/runtime` at `9293174`; clean restore and manual GLM/Houdini acceptance are pending.
 
 **Owner split:** Codex/user performs the manual smoke and delivery actions. Claude Code may implement only a follow-up fix prompt naming the exact files and regression tests supplied by Codex.
 
@@ -30,7 +30,7 @@
 
 ### 14.1 Push and clean restore
 
-- Push the five local commits currently ahead of `origin/feature/runtime` on `feature/runtime`; never force-push and never merge to `main` in this gate.
+- Push the five local commits currently ahead of `origin/feature/runtime` on `feature/runtime`; this sub-step is complete at `9293174`. Never force-push and never merge to `main` in this gate.
 - On the target computer, clone/fetch `origin/feature/runtime`, rebuild Python 3.11 dependencies with `uv sync --frozen --extra eval --python 3.11`, and do not transfer `.venv`, SQLite files, tokens, discovery files, logs, or `.env`.
 - Verify `uv lock --check`, `uv run --extra eval pytest -q`, `uv run python -m compileall -q eee_agent tests`, `git diff --check`, and a clean worktree. The expected current baseline is at least 1111 passed with no failures; machine-dependent environment probes may be skipped only if no new skip is introduced.
 
