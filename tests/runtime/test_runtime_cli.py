@@ -212,3 +212,93 @@ def test_async_main_surfaces_lock_contention_without_half_open_state(
     # did not leave the OS lock held).
     with RuntimeLock(paths.lock_file):
         pass
+
+
+# --------------------------------------------------------------------------
+# 3. graceful-timeout wiring + identity-cleanup ordering
+# --------------------------------------------------------------------------
+
+
+def test_async_main_passes_graceful_timeout_to_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The CLI --graceful-timeout value must reach RuntimeService.open.
+    home = tmp_path / "home"
+    monkeypatch.setenv("EEE_RUNTIME_HOME", str(home))
+    _hermetic_provider_env(monkeypatch)
+
+    from eee_agent.runtime.service import RuntimeService
+
+    original_open = RuntimeService.open
+    captured: dict = {}
+
+    def spying_open(*args, **kwargs):
+        captured["graceful_timeout"] = kwargs.get("graceful_timeout", "MISSING")
+        return original_open(*args, **kwargs)
+
+    monkeypatch.setattr(RuntimeService, "open", spying_open)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(async_main(["serve", "--graceful-timeout", "7"]))
+        try:
+            discovery = home / "state" / "runtime.json"
+            for _ in range(200):
+                if discovery.exists():
+                    break
+                await asyncio.sleep(0.05)
+            assert discovery.exists(), "Runtime did not start"
+        finally:
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=15)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+
+    asyncio.run(scenario())
+    assert captured.get("graceful_timeout") == 7.0
+
+
+def test_serve_until_shutdown_cleans_identity_after_server_exit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Identity cleanup must run AFTER the server context exits (server/client
+    # resources close first), deterministically, with no real socket or waits.
+    import eee_agent.runtime.__main__ as main_mod
+    from eee_agent.runtime.auth import create_identity
+
+    log: list[str] = []
+
+    class _FakeServer:
+        def __init__(self) -> None:
+            self.port = 59999
+            self.entered = asyncio.Event()
+
+        async def __aenter__(self) -> "_FakeServer":
+            log.append("server_enter")
+            self.entered.set()
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            log.append("server_exit")
+
+    def fake_cleanup(identity, state_dir):
+        log.append("cleanup")
+
+    monkeypatch.setattr(main_mod, "cleanup_identity_files", fake_cleanup)
+
+    async def scenario() -> None:
+        server = _FakeServer()
+        identity = create_identity()
+        task = asyncio.create_task(
+            main_mod._serve_until_shutdown(
+                server, identity, tmp_path / "state", host="127.0.0.1"
+            )
+        )
+        await server.entered.wait()  # server entered (deterministic; no sleep)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+    # server context exits BEFORE identity files are cleaned up.
+    assert log == ["server_enter", "server_exit", "cleanup"]

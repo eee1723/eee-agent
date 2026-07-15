@@ -1731,3 +1731,66 @@ def test_service_does_not_import_websocket_or_lock() -> None:
     assert "lock" not in imported_names
     assert "protocol" not in imported_names
     assert "auth" not in imported_names
+
+
+# --------------------------------------------------------------------------
+# configured graceful shutdown timeout
+# --------------------------------------------------------------------------
+
+
+def test_open_stores_configured_graceful_timeout(paths: RuntimePaths) -> None:
+    runner = FakeRunner(_success_items("done"))
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths, runner_factory=_factory_for(runner), graceful_timeout=7.5
+        ) as service:
+            assert service.graceful_timeout == 7.5
+
+    _run(scenario())
+
+
+def test_open_defaults_graceful_timeout_to_ten(paths: RuntimePaths) -> None:
+    from eee_agent.runtime.service import _GRACEFUL_TIMEOUT_SECONDS
+
+    runner = FakeRunner(_success_items("done"))
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths, runner_factory=_factory_for(runner)
+        ) as service:
+            # Existing callers that omit graceful_timeout keep the 10s default
+            # (Tasks 1-12 compatibility).
+            assert service.graceful_timeout == _GRACEFUL_TIMEOUT_SECONDS == 10.0
+
+    _run(scenario())
+
+
+def test_shutdown_uses_instance_graceful_timeout(paths: RuntimePaths) -> None:
+    # _shutdown must pass the service's graceful_timeout to the active-task
+    # convergence wait, not the module default. A blocking runner keeps the run
+    # active so the shutdown wait_for is exercised; a spy records its timeout.
+    import eee_agent.runtime.service as service_mod
+
+    runner = FakeRunner(_success_items("done"), gate=asyncio.Event())  # never set
+    captured: list = []
+    real_wait_for = asyncio.wait_for
+
+    async def spy_wait_for(awaitable, timeout=None):
+        captured.append(timeout)
+        return await real_wait_for(awaitable, timeout=timeout)
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths, runner_factory=_factory_for(runner), graceful_timeout=3.5
+        ) as service:
+            session = await service.create_session("A")
+            await service.start_run(session.session_id, "x")
+            await _wait_until_streaming(runner)  # run active, blocked on the gate
+        # context exit -> _shutdown cancels + convergence wait_for(timeout=...)
+
+    with pytest.MonkeyPatch().context() as mp:
+        mp.setattr(service_mod.asyncio, "wait_for", spy_wait_for)
+        _run(scenario())
+
+    assert 3.5 in captured

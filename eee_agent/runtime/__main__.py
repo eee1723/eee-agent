@@ -20,10 +20,16 @@ import math
 import signal
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from eee_agent.core import AgentException
 from eee_agent.runtime.agent_runner import build_agent_runner
-from eee_agent.runtime.auth import cleanup_identity_files, create_identity, write_identity_files
+from eee_agent.runtime.auth import (
+    RuntimeIdentity,
+    cleanup_identity_files,
+    create_identity,
+    write_identity_files,
+)
 from eee_agent.runtime.lock import RuntimeLock
 from eee_agent.runtime.paths import RuntimePaths
 from eee_agent.runtime.protocol import PROTOCOL
@@ -141,6 +147,32 @@ async def _await_shutdown() -> None:
                     pass
 
 
+async def _serve_until_shutdown(
+    server: RuntimeWebSocketServer,
+    identity: RuntimeIdentity,
+    state_dir: Path,
+    *,
+    host: str,
+) -> None:
+    """Bind ``server``, publish discovery, and serve until shutdown.
+
+    Identity cleanup runs AFTER the server context exits (so server/client
+    resources close first) and BEFORE the enclosing service context exits. The
+    ``try/finally`` wrapping ``async with server:`` guarantees cleanup on a
+    normal stop, cancellation, and ``KeyboardInterrupt``.
+    """
+    try:
+        async with server:
+            # The server has bound its actual (possibly ephemeral) port now;
+            # publish discovery so clients can find and authenticate it.
+            write_identity_files(
+                identity, state_dir, host=host, port=server.port
+            )
+            await _await_shutdown()
+    finally:
+        cleanup_identity_files(identity, state_dir)
+
+
 async def async_main(argv: Sequence[str] | None = None) -> int:
     """Run the Runtime lifecycle until shutdown, then release every resource.
 
@@ -150,11 +182,12 @@ async def async_main(argv: Sequence[str] | None = None) -> int:
     has bound its real port — publish the identity/token/discovery files.
 
     Shutdown is the reverse and is guaranteed on normal exit, cancellation, and
-    ``KeyboardInterrupt``: discovery files are cleaned up (PID/nonce guarded),
-    the server stops accepting, the service cancels any active run and closes
-    the checkpoint manager and database, and the lock is released. The nested
-    context managers express the dependency order, so unwinding always closes in
-    reverse. A lock-contention :class:`AgentException` propagates before any
+    ``KeyboardInterrupt``: the server stops accepting and closes, the identity
+    files are cleaned up (PID/nonce guarded), the service cancels any active run
+    (waiting up to the configured graceful timeout) and closes the checkpoint
+    manager and database, and the lock is released. The nested context managers
+    express the dependency order, so unwinding always closes in reverse. A
+    lock-contention :class:`AgentException` propagates before any
     service/server/identity is created.
     """
     args = parse_args(argv)
@@ -167,24 +200,16 @@ async def async_main(argv: Sequence[str] | None = None) -> int:
     with RuntimeLock(paths.lock_file):
         identity = create_identity()
         async with RuntimeService.open(
-            paths, runner_factory=build_agent_runner
+            paths,
+            runner_factory=build_agent_runner,
+            graceful_timeout=args.graceful_timeout,
         ) as service:
             server = RuntimeWebSocketServer(
                 service, identity, host=args.host, port=args.port
             )
-            async with server:
-                # The server has bound its actual (possibly ephemeral) port now;
-                # publish discovery so clients can find and authenticate it.
-                write_identity_files(
-                    identity,
-                    paths.state_dir,
-                    host=args.host,
-                    port=server.port,
-                )
-                try:
-                    await _await_shutdown()
-                finally:
-                    cleanup_identity_files(identity, paths.state_dir)
+            await _serve_until_shutdown(
+                server, identity, paths.state_dir, host=args.host
+            )
     return 0
 
 

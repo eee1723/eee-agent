@@ -152,9 +152,19 @@ class RuntimeService:
     database close in reverse open order.
     """
 
-    def __init__(self, database: RuntimeDatabase, paths: RuntimePaths) -> None:
+    def __init__(
+        self,
+        database: RuntimeDatabase,
+        paths: RuntimePaths,
+        *,
+        graceful_timeout: float = _GRACEFUL_TIMEOUT_SECONDS,
+    ) -> None:
         self._database = database
         self._paths = paths
+        # Configured graceful shutdown timeout (seconds) used by _shutdown when
+        # waiting for an active run to converge. Defaults to the historical 10s
+        # so existing callers (Tasks 1-12) are unchanged.
+        self._graceful_timeout = graceful_timeout
         self._sessions = SessionRepository(database)
         self._runs = RunRepository(database)
         self._events = EventStore(database)
@@ -168,6 +178,11 @@ class RuntimeService:
         self._checkpoints: CheckpointManager | None = None
         self._runner: object | None = None
 
+    @property
+    def graceful_timeout(self) -> float:
+        """The configured graceful-shutdown timeout (seconds)."""
+        return self._graceful_timeout
+
     # ------------------------------------------------------------------
     # lifecycle
     # ------------------------------------------------------------------
@@ -175,7 +190,11 @@ class RuntimeService:
     @classmethod
     @asynccontextmanager
     async def open(
-        cls, paths: RuntimePaths, *, runner_factory: RunnerFactory
+        cls,
+        paths: RuntimePaths,
+        *,
+        runner_factory: RunnerFactory,
+        graceful_timeout: float = _GRACEFUL_TIMEOUT_SECONDS,
     ) -> AsyncIterator["RuntimeService"]:
         """Open a service in the approved order and close it in reverse.
 
@@ -195,7 +214,7 @@ class RuntimeService:
         try:
             paths.create_used_directories()
             database = await RuntimeDatabase.open(paths.app_db)
-            service = cls(database, paths)
+            service = cls(database, paths, graceful_timeout=graceful_timeout)
             await service._reconcile()
             checkpoints = CheckpointManager(paths.checkpoints_db)
             await checkpoints.__aenter__()
@@ -239,7 +258,7 @@ class RuntimeService:
             try:
                 await asyncio.wait_for(
                     asyncio.gather(*items, return_exceptions=True),
-                    timeout=_GRACEFUL_TIMEOUT_SECONDS,
+                    timeout=self._graceful_timeout,
                 )
             except asyncio.TimeoutError:
                 # Tasks that did not converge are left to the next process's
