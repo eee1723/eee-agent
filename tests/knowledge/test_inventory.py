@@ -6,6 +6,7 @@ and the hython subprocess is replaced by an injected runner.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import types
 from pathlib import Path
@@ -15,7 +16,9 @@ import pytest
 from eee_agent.knowledge.inventory import (
     HfsResolutionError,
     HythonInventoryError,
+    HythonInventorySnapshot,
     InventoryError,
+    load_inventory_snapshot,
     load_sop_inventory,
     resolve_hfs,
 )
@@ -50,6 +53,17 @@ def _recording_runner(stdout: str = "[]", returncode: int = 0, stderr: str = "")
 
     runner.calls = calls  # type: ignore[attr-defined]
     return runner
+
+
+def _snapshot(
+    types=("apex::buildfkgraph", "loadslices"),
+    version=(21, 0, 440),
+    build: str = "21.0.440",
+) -> str:
+    """Canned hython snapshot stdout (a strict JSON object)."""
+    return json.dumps(
+        {"version": list(version), "build": build, "sop_node_types": list(types)}
+    )
 
 
 # --- resolve_hfs ----------------------------------------------------------
@@ -136,108 +150,177 @@ def test_eee_hfs_invalid_raises_not_fallthrough(tmp_path: Path) -> None:
         resolve_hfs(None, {"EEE_HFS": str(invalid), "HFS": str(fake)}, ())
 
 
-# --- load_sop_inventory ---------------------------------------------------
+# --- load_inventory_snapshot ----------------------------------------------
 
-def test_inventory_uses_hython_without_shell(tmp_path: Path) -> None:
+def test_snapshot_returns_version_build_and_operators(tmp_path: Path) -> None:
     hfs = make_fake_hfs(tmp_path)
-    runner = _recording_runner(stdout='["apex::buildfkgraph", "loadslices"]')
-    inventory = load_sop_inventory(hfs, runner=runner)
-    assert inventory == frozenset({"apex::buildfkgraph", "loadslices"})
+    runner = _recording_runner(stdout=_snapshot())
+    snap = load_inventory_snapshot(hfs, runner=runner)
+    assert isinstance(snap, HythonInventorySnapshot)
+    assert snap.houdini_version == "21.0.440"
+    assert snap.houdini_build == "21.0.440"
+    assert snap.sop_node_types == frozenset({"apex::buildfkgraph", "loadslices"})
+
+
+def test_snapshot_program_uses_hython_without_shell(tmp_path: Path) -> None:
+    hfs = make_fake_hfs(tmp_path)
+    runner = _recording_runner(stdout=_snapshot())
+    load_inventory_snapshot(hfs, runner=runner)
     args, kwargs = runner.calls[0]
     assert args[0] == str(hfs / "bin" / "hython.exe")
     assert args[1] == "-c"
     assert isinstance(args[2], str) and "import hou" in args[2]
     assert "sopNodeTypeCategory" in args[2]
+    assert "applicationVersion" in args[2]
     assert kwargs["shell"] is False
     assert kwargs["capture_output"] is True
     assert kwargs["text"] is True
     assert kwargs["timeout"] == 30
 
 
-def test_inventory_custom_timeout_passed(tmp_path: Path) -> None:
+def test_snapshot_custom_timeout_passed(tmp_path: Path) -> None:
     hfs = make_fake_hfs(tmp_path)
-    runner = _recording_runner(stdout="[]")
-    load_sop_inventory(hfs, runner=runner, timeout_seconds=7)
+    runner = _recording_runner(stdout=_snapshot())
+    load_inventory_snapshot(hfs, runner=runner, timeout_seconds=7)
     assert runner.calls[0][1]["timeout"] == 7
 
 
-def test_inventory_timeout_raises(tmp_path: Path) -> None:
+def test_snapshot_timeout_raises(tmp_path: Path) -> None:
     hfs = make_fake_hfs(tmp_path)
 
     def runner(args, **kwargs):
         raise subprocess.TimeoutExpired(cmd=args, timeout=kwargs.get("timeout", 30))
 
     with pytest.raises(HythonInventoryError):
-        load_sop_inventory(hfs, runner=runner, timeout_seconds=5)
+        load_inventory_snapshot(hfs, runner=runner, timeout_seconds=5)
 
 
-def test_inventory_nonzero_exit_raises(tmp_path: Path) -> None:
+def test_snapshot_nonzero_exit_raises(tmp_path: Path) -> None:
     hfs = make_fake_hfs(tmp_path)
     runner = _recording_runner(stdout="", returncode=1, stderr="boom")
     with pytest.raises(HythonInventoryError):
-        load_sop_inventory(hfs, runner=runner)
+        load_inventory_snapshot(hfs, runner=runner)
 
 
-def test_inventory_malformed_json_rejected(tmp_path: Path) -> None:
+def test_snapshot_malformed_json_rejected(tmp_path: Path) -> None:
     hfs = make_fake_hfs(tmp_path)
     with pytest.raises(HythonInventoryError):
-        load_sop_inventory(hfs, runner=_recording_runner(stdout="not json"))
+        load_inventory_snapshot(hfs, runner=_recording_runner(stdout="not json"))
 
 
-def test_inventory_json_with_log_text_rejected(tmp_path: Path) -> None:
+def test_snapshot_json_with_log_text_rejected(tmp_path: Path) -> None:
     hfs = make_fake_hfs(tmp_path)
     with pytest.raises(HythonInventoryError):
-        load_sop_inventory(hfs, runner=_recording_runner(stdout='["a"] extra log'))
+        load_inventory_snapshot(hfs, runner=_recording_runner(stdout=_snapshot() + " log"))
 
 
-def test_inventory_top_level_must_be_list(tmp_path: Path) -> None:
+def test_snapshot_top_level_must_be_object(tmp_path: Path) -> None:
     hfs = make_fake_hfs(tmp_path)
     with pytest.raises(HythonInventoryError):
-        load_sop_inventory(hfs, runner=_recording_runner(stdout='"notalist"'))
+        load_inventory_snapshot(hfs, runner=_recording_runner(stdout='["a"]'))
 
 
-def test_inventory_non_string_member_rejected(tmp_path: Path) -> None:
+def test_snapshot_version_must_be_three_ints(tmp_path: Path) -> None:
     hfs = make_fake_hfs(tmp_path)
     with pytest.raises(HythonInventoryError):
-        load_sop_inventory(hfs, runner=_recording_runner(stdout='[1, "a"]'))
+        load_inventory_snapshot(hfs, runner=_recording_runner(stdout=_snapshot(version=[21, 0])))
+    with pytest.raises(HythonInventoryError):
+        load_inventory_snapshot(
+            hfs, runner=_recording_runner(stdout=_snapshot(version=[21, "0", 440]))
+        )
 
 
-def test_inventory_empty_name_rejected(tmp_path: Path) -> None:
+def test_snapshot_build_must_be_consistent_with_version(tmp_path: Path) -> None:
     hfs = make_fake_hfs(tmp_path)
     with pytest.raises(HythonInventoryError):
-        load_sop_inventory(hfs, runner=_recording_runner(stdout='[""]'))
+        load_inventory_snapshot(
+            hfs, runner=_recording_runner(stdout=_snapshot(build="21.0.500"))
+        )
 
 
-def test_inventory_control_char_rejected(tmp_path: Path) -> None:
+def test_snapshot_build_must_be_non_empty(tmp_path: Path) -> None:
     hfs = make_fake_hfs(tmp_path)
     with pytest.raises(HythonInventoryError):
-        load_sop_inventory(hfs, runner=_recording_runner(stdout='["a\\u0000b"]'))
+        load_inventory_snapshot(hfs, runner=_recording_runner(stdout=_snapshot(build="")))
 
 
-def test_inventory_duplicates_collapse(tmp_path: Path) -> None:
+def test_snapshot_types_must_be_non_empty_array(tmp_path: Path) -> None:
     hfs = make_fake_hfs(tmp_path)
-    runner = _recording_runner(stdout='["a", "a", "b"]')
-    assert load_sop_inventory(hfs, runner=runner) == frozenset({"a", "b"})
+    with pytest.raises(HythonInventoryError):
+        load_inventory_snapshot(hfs, runner=_recording_runner(stdout=_snapshot(types=())))
 
 
-def test_inventory_hython_missing_raises(tmp_path: Path) -> None:
+def test_snapshot_non_string_type_rejected(tmp_path: Path) -> None:
+    hfs = make_fake_hfs(tmp_path)
+    payload = json.dumps(
+        {"version": [21, 0, 440], "build": "21.0.440", "sop_node_types": [1, "a"]}
+    )
+    with pytest.raises(HythonInventoryError):
+        load_inventory_snapshot(hfs, runner=_recording_runner(stdout=payload))
+
+
+def test_snapshot_empty_type_name_rejected(tmp_path: Path) -> None:
+    hfs = make_fake_hfs(tmp_path)
+    with pytest.raises(HythonInventoryError):
+        load_inventory_snapshot(hfs, runner=_recording_runner(stdout=_snapshot(types=("a", ""))))
+
+
+def test_snapshot_control_char_in_type_rejected(tmp_path: Path) -> None:
+    hfs = make_fake_hfs(tmp_path)
+    # A control character (SOH) inside a type name must be rejected.
+    payload = _snapshot(types=("a" + chr(1) + "b",))
+    with pytest.raises(HythonInventoryError):
+        load_inventory_snapshot(hfs, runner=_recording_runner(stdout=payload))
+
+
+def test_snapshot_duplicates_collapse(tmp_path: Path) -> None:
+    hfs = make_fake_hfs(tmp_path)
+    runner = _recording_runner(stdout=_snapshot(types=("a", "a", "b")))
+    snap = load_inventory_snapshot(hfs, runner=runner)
+    assert snap.sop_node_types == frozenset({"a", "b"})
+
+
+def test_snapshot_hython_missing_raises(tmp_path: Path) -> None:
     hfs = make_fake_hfs(tmp_path)
     (hfs / "bin" / "hython.exe").unlink()
     with pytest.raises(HythonInventoryError):
-        load_sop_inventory(hfs, runner=_recording_runner())
+        load_inventory_snapshot(hfs, runner=_recording_runner(stdout=_snapshot()))
 
 
-def test_inventory_no_absolute_path_leaked(tmp_path: Path) -> None:
+def test_snapshot_no_absolute_path_leaked(tmp_path: Path) -> None:
     hfs = make_fake_hfs(tmp_path)
-    runner = _recording_runner(stdout='["apex::buildfkgraph", "loadslices"]')
-    inventory = load_sop_inventory(hfs, runner=runner)
-    for name in inventory:
+    runner = _recording_runner(stdout=_snapshot())
+    snap = load_inventory_snapshot(hfs, runner=runner)
+    for name in snap.sop_node_types:
         assert "/" not in name
         assert "\\" not in name
 
 
-def test_inventory_errors_are_contextual(tmp_path: Path) -> None:
+def test_snapshot_errors_are_contextual(tmp_path: Path) -> None:
     hfs = make_fake_hfs(tmp_path)
     with pytest.raises(HythonInventoryError) as exc_info:
-        load_sop_inventory(hfs, runner=_recording_runner(stdout="not json"))
+        load_inventory_snapshot(hfs, runner=_recording_runner(stdout="not json"))
     assert isinstance(exc_info.value, InventoryError)
+
+
+# --- load_sop_inventory (compat facade) -----------------------------------
+
+def test_load_sop_inventory_returns_only_operators(tmp_path: Path) -> None:
+    hfs = make_fake_hfs(tmp_path)
+    runner = _recording_runner(stdout=_snapshot())
+    result = load_sop_inventory(hfs, runner=runner)
+    assert isinstance(result, frozenset)
+    assert result == frozenset({"apex::buildfkgraph", "loadslices"})
+
+
+def test_load_sop_inventory_custom_timeout(tmp_path: Path) -> None:
+    hfs = make_fake_hfs(tmp_path)
+    runner = _recording_runner(stdout=_snapshot())
+    load_sop_inventory(hfs, runner=runner, timeout_seconds=7)
+    assert runner.calls[0][1]["timeout"] == 7
+
+
+def test_load_sop_inventory_propagates_errors(tmp_path: Path) -> None:
+    hfs = make_fake_hfs(tmp_path)
+    with pytest.raises(HythonInventoryError):
+        load_sop_inventory(hfs, runner=_recording_runner(stdout="not json"))

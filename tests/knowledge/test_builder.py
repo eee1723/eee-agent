@@ -1,0 +1,274 @@
+"""Tests for safe source loading, the stale-aware build lock and the atomic
+explicit builder.
+
+No real Houdini installation is required: HFS is never read (the ``--selftest``
+synthetic corpus and injected locks/runners drive every path).
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import zipfile
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+from eee_agent.knowledge.build import BuildError, BuildOptions, build_cache, main
+from eee_agent.knowledge.lock import (
+    LOCK_STALE_TTL_SECONDS,
+    LockBusy,
+    acquire_build_lock,
+    lock_path_for,
+    release_build_lock,
+)
+from eee_agent.knowledge.sources import SourceError, load_archive_entries, load_skill_sources
+from eee_agent.knowledge.writer import validate_cache
+
+
+def _dt(seconds: int) -> datetime:
+    return datetime(2026, 7, 15, 12, 0, 0) + timedelta(seconds=seconds)
+
+
+def _make_zip(entries) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, data in entries:
+            zf.writestr(name, data)
+    return buf.getvalue()
+
+
+# --- sources --------------------------------------------------------------
+
+def test_load_archive_entries_returns_logical_names() -> None:
+    data = _make_zip([("sop/boolean.txt", b"x"), ("hou/Node.txt", b"y")])
+    entries = load_archive_entries(data)
+    assert {logical for logical, _ in entries} == {"sop/boolean.txt", "hou/Node.txt"}
+    assert dict(entries)["sop/boolean.txt"] == b"x"
+
+
+def test_load_archive_entries_normalizes_backslash_names() -> None:
+    data = _make_zip([("sop\\boolean.txt", b"x")])
+    assert {logical for logical, _ in load_archive_entries(data)} == {"sop/boolean.txt"}
+
+
+@pytest.mark.parametrize("bad", ["../escape.txt", "/abs.txt", "C:/drive.txt", "a/../../b.txt"])
+def test_load_archive_entries_rejects_unsafe(bad: str) -> None:
+    with pytest.raises(SourceError):
+        load_archive_entries(_make_zip([(bad, b"x")]))
+
+
+def test_load_skill_sources_reads_skills(tmp_path: Path) -> None:
+    skills = tmp_path / "skills"
+    for name in ("vex-patterns", "sop-cookbook"):
+        (skills / name).mkdir(parents=True)
+        (skills / name / "SKILL.md").write_text(f"# {name}\nbody\n")
+    fps, entries = load_skill_sources(skills, tmp_path)
+    logicals = {fp.logical_name for fp in fps}
+    assert logicals == {
+        "skills/vex-patterns/SKILL.md", "skills/sop-cookbook/SKILL.md",
+    }
+    assert {logical for logical, _ in entries} == logicals
+
+
+# --- lock -----------------------------------------------------------------
+
+def test_acquire_creates_lock_file_with_owner(tmp_path: Path) -> None:
+    lock = tmp_path / "k.lock"
+    acquire_build_lock(
+        lock, pid=100, started_at=_dt(0), nonce="n1",
+        pid_exists=lambda p: True, now=lambda: _dt(0), stale_ttl_seconds=100,
+    )
+    assert lock.is_file()
+    data = json.loads(lock.read_text())
+    assert data["pid"] == 100
+    assert data["nonce"] == "n1"
+    assert "started_at" in data
+
+
+def test_active_lock_is_rejected(tmp_path: Path) -> None:
+    lock = tmp_path / "k.lock"
+    acquire_build_lock(
+        lock, pid=100, started_at=_dt(0), nonce="n1",
+        pid_exists=lambda p: True, now=lambda: _dt(0), stale_ttl_seconds=100,
+    )
+    with pytest.raises(LockBusy):
+        acquire_build_lock(
+            lock, pid=200, started_at=_dt(0), nonce="n2",
+            pid_exists=lambda p: True, now=lambda: _dt(50), stale_ttl_seconds=100,
+        )
+
+
+def test_stale_lock_reclaimed_when_pid_gone_and_aged(tmp_path: Path) -> None:
+    lock = tmp_path / "k.lock"
+    acquire_build_lock(
+        lock, pid=100, started_at=_dt(0), nonce="n1",
+        pid_exists=lambda p: True, now=lambda: _dt(0), stale_ttl_seconds=100,
+    )
+    # pid 100 is now gone and 200s > 100s ttl -> reclaim.
+    acquire_build_lock(
+        lock, pid=200, started_at=_dt(200), nonce="n2",
+        pid_exists=lambda p: False, now=lambda: _dt(200), stale_ttl_seconds=100,
+    )
+    data = json.loads(lock.read_text())
+    assert data["pid"] == 200
+    assert data["nonce"] == "n2"
+
+
+def test_stale_lock_not_reclaimed_if_pid_alive(tmp_path: Path) -> None:
+    lock = tmp_path / "k.lock"
+    acquire_build_lock(
+        lock, pid=100, started_at=_dt(0), nonce="n1",
+        pid_exists=lambda p: True, now=lambda: _dt(0), stale_ttl_seconds=100,
+    )
+    with pytest.raises(LockBusy):
+        acquire_build_lock(
+            lock, pid=200, started_at=_dt(200), nonce="n2",
+            pid_exists=lambda p: True, now=lambda: _dt(200), stale_ttl_seconds=100,
+        )
+
+
+def test_stale_lock_not_reclaimed_if_too_recent(tmp_path: Path) -> None:
+    lock = tmp_path / "k.lock"
+    acquire_build_lock(
+        lock, pid=100, started_at=_dt(0), nonce="n1",
+        pid_exists=lambda p: True, now=lambda: _dt(0), stale_ttl_seconds=100,
+    )
+    # pid gone but only 50s old (< 100s ttl) -> still busy.
+    with pytest.raises(LockBusy):
+        acquire_build_lock(
+            lock, pid=200, started_at=_dt(50), nonce="n2",
+            pid_exists=lambda p: False, now=lambda: _dt(50), stale_ttl_seconds=100,
+        )
+
+
+def test_release_removes_only_own_nonce(tmp_path: Path) -> None:
+    lock = tmp_path / "k.lock"
+    acquire_build_lock(
+        lock, pid=100, started_at=_dt(0), nonce="n1",
+        pid_exists=lambda p: True, now=lambda: _dt(0), stale_ttl_seconds=100,
+    )
+    release_build_lock(lock, nonce="other")
+    assert lock.is_file()  # wrong nonce -> not removed
+    release_build_lock(lock, nonce="n1")
+    assert not lock.is_file()
+
+
+# --- build ----------------------------------------------------------------
+
+def test_build_selftest_writes_valid_cache(tmp_path: Path) -> None:
+    out = tmp_path / "knowledge.sqlite3"
+    manifest = build_cache(
+        BuildOptions(output=out, selftest=True),
+        now=lambda: _dt(0), pid_exists=lambda p: False,
+    )
+    assert out.is_file()
+    validate_cache(out)  # build self-check passes
+    assert manifest.kb_schema_version == 1
+    assert manifest.houdini_version == "21.0.440"
+    assert manifest.houdini_build == "21.0.440"
+    assert manifest.node_inventory_sha256  # inventory hash recorded
+
+
+def test_build_atomic_no_leftover_temps_and_lock_released(tmp_path: Path) -> None:
+    out = tmp_path / "knowledge.sqlite3"
+    build_cache(
+        BuildOptions(output=out, selftest=True),
+        now=lambda: _dt(0), pid_exists=lambda p: False,
+    )
+    assert not list(tmp_path.glob("knowledge.sqlite3.tmp.*"))
+    assert not (tmp_path / "knowledge.sqlite3.lock").exists()
+
+
+def test_failed_build_preserves_previous_cache(tmp_path: Path) -> None:
+    final = tmp_path / "knowledge.sqlite3"
+    final.write_bytes(b"previous-valid-cache")
+
+    def raising_writer(path, bundle, manifest):
+        Path(path).write_bytes(b"partial-temp")
+        raise BuildError("simulated writer failure")
+
+    with pytest.raises(BuildError):
+        build_cache(
+            BuildOptions(output=final, selftest=True),
+            now=lambda: _dt(0), pid_exists=lambda p: False,
+            writer=raising_writer,
+        )
+    assert final.read_bytes() == b"previous-valid-cache"
+    assert not list(tmp_path.glob("knowledge.sqlite3.tmp.*"))
+
+
+def test_failed_build_releases_lock(tmp_path: Path) -> None:
+    out = tmp_path / "knowledge.sqlite3"
+
+    def raising_writer(path, bundle, manifest):
+        raise BuildError("boom")
+
+    with pytest.raises(BuildError):
+        build_cache(
+            BuildOptions(output=out, selftest=True),
+            now=lambda: _dt(0), pid_exists=lambda p: False,
+            writer=raising_writer,
+        )
+    assert not (tmp_path / "knowledge.sqlite3.lock").exists()
+
+
+def test_active_lock_blocks_build(tmp_path: Path) -> None:
+    out = tmp_path / "knowledge.sqlite3"
+    lock = lock_path_for(out)
+    acquire_build_lock(
+        lock, pid=999, started_at=_dt(0), nonce="other",
+        pid_exists=lambda p: True, now=lambda: _dt(0),
+        stale_ttl_seconds=LOCK_STALE_TTL_SECONDS,
+    )
+    with pytest.raises(BuildError):
+        build_cache(
+            BuildOptions(output=out, selftest=True),
+            now=lambda: _dt(0), pid_exists=lambda p: True,
+        )
+    assert not out.exists()
+    # The other build's lock must not have been deleted.
+    assert lock.is_file()
+
+
+def test_build_manifest_records_real_version_and_inventory_hash(tmp_path: Path) -> None:
+    out = tmp_path / "knowledge.sqlite3"
+    manifest = build_cache(
+        BuildOptions(output=out, selftest=True),
+        now=lambda: _dt(0), pid_exists=lambda p: False,
+    )
+    from eee_agent.knowledge.manifest import hash_inventory
+    assert manifest.node_inventory_sha256 == hash_inventory(frozenset({"boolean"}))
+    assert manifest.houdini_version == manifest.houdini_build == "21.0.440"
+
+
+# --- main / --selftest ----------------------------------------------------
+
+def test_main_selftest_returns_json_summary(capsys) -> None:
+    rc = main(["--selftest"])
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["ok"] is True
+    assert data["selftest"] is True
+    assert data["kb_schema_version"] == 1
+    assert "manifest_sha256" in data
+    assert data["entity_count"] > 0
+    assert data["edge_count"] > 0
+    assert data["houdini_build"] == "21.0.440"
+
+
+def test_main_selftest_leaves_no_cache_in_cwd(capsys) -> None:
+    before = set(Path.cwd().glob("*.sqlite3"))
+    rc = main(["--selftest"])
+    assert rc == 0
+    capsys.readouterr()
+    after = set(Path.cwd().glob("*.sqlite3"))
+    assert before == after
+
+
+def test_main_real_build_requires_out(capsys) -> None:
+    rc = main([])
+    assert rc != 0
+    err = capsys.readouterr().err
+    assert json.loads(err)["ok"] is False
