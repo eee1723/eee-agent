@@ -34,8 +34,13 @@ Generated: 2026-07-15 (Asia/Shanghai)
   Focused contract tests: 97 passed; Task 15-A regression slice: 261 passed;
   fresh full offline suite: 1208 passed. No transport, queue, Houdini-side
   adapter, UI, or scene-write code has started.
-- The latest local tip is `4c22d45`; it is ready to push after this status
-  update.
+- Task 15-B Bridge identity/authenticated client is Codex-accepted at
+  `379a5c8`. Auth suite: 33 passed; client suite: 34 passed; focused
+  regression: 257 passed; fresh full offline suite: 1275 passed. It uses a
+  framed loopback client with injected fake transport and changes no server,
+  queue, Houdini adapter, UI, or scene-write path.
+- The latest local tip is `379a5c8`; it is ready to push after this status
+  update. Task 15-C is next.
 
 Do not merge this branch to `main` until the three accepted commits are pushed
 and the final integration decision is made. Manual GLM/Houdini acceptance is
@@ -305,8 +310,31 @@ The commit changes exactly `eee_agent/houdini_bridge/__init__.py`,
 `eee_agent/houdini_bridge/contracts.py`, and
 `tests/runtime/test_houdini_bridge_contracts.py`. It imports neither `hou` nor
 `rpyc`, reuses the Runtime canonical JSON freezer, and exposes only frozen
-read-only DTOs. Task 15-B is the next implementation task; no Claude prompt
-for it has been issued yet.
+read-only DTOs. Task 15-B was then implemented and independently accepted as
+documented below.
+
+## Task 15-B: Accepted Bridge identity and authenticated client (`379a5c8`)
+
+Independent verification confirmed:
+
+```text
+Auth suite:                 33 passed
+Client suite:               34 passed
+Focused regression:         257 passed
+Full offline suite:         1275 passed
+uv lock --check:            exit 0
+compileall:                 exit 0
+git diff --check:            exit 0
+```
+
+The commit changes exactly `eee_agent/houdini_bridge/auth.py`,
+`eee_agent/houdini_bridge/client.py`,
+`tests/runtime/test_houdini_bridge_auth.py`, and
+`tests/runtime/test_houdini_bridge_client.py`. It uses a 4-byte big-endian
+length-prefixed loopback client, a separate Bridge token, constant-time token
+validation, strict frame limits, deadline/cancellation cleanup, and DTO-only
+responses. Task 15-C is next; no Houdini server, main-thread queue, UI, or
+scene-write path has been started.
 
 ## Remaining Delivery Sequence
 

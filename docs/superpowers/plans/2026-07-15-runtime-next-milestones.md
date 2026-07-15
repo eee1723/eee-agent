@@ -61,10 +61,11 @@
 **Dependency:** Task 14 accepted, or an explicit decision to proceed with manual smoke pending.
 
 **Current state:** Task 15-A (strict DTO and error contracts) is Codex-accepted
-at `4c22d45`. It delivered 97 focused contract tests and the Task 15-A
-regression slice passed 261 tests; the fresh full offline suite passed 1208
-tests. Task 15-B (Bridge identity and authenticated client) is next. The
-read-only design and executable breakdown are recorded in
+at `4c22d45`, and Task 15-B (Bridge identity and authenticated client) is
+Codex-accepted at `379a5c8`. Task 15-B delivered 33 auth tests, 34 client
+tests, a 257-test focused regression slice, and a fresh full offline suite of
+1275 passed. Task 15-C (main-thread queue and Houdini-side scene query) is
+next. The read-only design and executable breakdown are recorded in
 `docs/superpowers/specs/2026-07-15-secure-houdini-bridge-readonly-design.md`
 and `docs/superpowers/plans/2026-07-15-secure-houdini-bridge-readonly.md`.
 
