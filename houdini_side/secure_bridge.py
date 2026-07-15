@@ -39,9 +39,15 @@ from eee_agent.houdini_bridge.auth import (
     write_bridge_identity_files,
 )
 from eee_agent.houdini_bridge.changesets import (
+    APPLY_OPERATION,
     CHANGESET_V1,
+    RECEIPT_OPERATION,
+    ApplyResponse,
     PreflightResponse,
+    ReceiptResponse,
+    parse_apply_request,
     parse_preflight_request,
+    parse_receipt_request,
     validate_capabilities,
 )
 from eee_agent.houdini_bridge.contracts import (
@@ -439,6 +445,13 @@ def _make_preflight_adapter(adapter: "HoudiniSceneAdapter") -> object:
     return ChangeSetPreflightAdapter(adapter)
 
 
+def _make_executor(adapter: "HoudiniSceneAdapter") -> object:
+    """Lazily build the transactional ChangeSet executor (Task 16-D)."""
+    from houdini_side.changeset_executor import ChangeSetExecutor
+
+    return ChangeSetExecutor(adapter)
+
+
 class _QueuedError:
     """A bounded bridge error produced by queue/operation failure.
 
@@ -492,6 +505,7 @@ class BridgeServer:
         self._state_dir = Path(state_dir)
         self._queue = queue if queue is not None else MainThreadReadQueue()
         self._preflight = _make_preflight_adapter(adapter)
+        self._executor = _make_executor(adapter)
         self._closed = False
         self._writers: list[object] = []
         self._listener: object | None = None
@@ -587,6 +601,13 @@ class BridgeServer:
                 pass
         # 2. Drain/reject queued work so no handler stays awaiting a future.
         self._queue.shutdown()
+        # 2b. Let an already-running transaction finish before touching the
+        # adapter, identity files, or writers. After shutdown, pending_count can
+        # only represent the one synchronous item already running on the Houdini
+        # pump thread; queued items were rejected above. Typed Bridge operations
+        # cannot call close(), so this wait cannot re-enter from that pump item.
+        while self._queue.pending_count:
+            time.sleep(0.001)
         # 3. Close tracked connection writers so handlers wind down.
         for writer in list(self._writers):
             try:
@@ -706,6 +727,30 @@ class BridgeServer:
                     message_for_user="The bridge does not support changeset preflight.",
                 )
             return await self._serve_preflight(frame_bytes)
+        if operation == APPLY_OPERATION:
+            if CHANGESET_V1 not in self._capabilities:
+                request_id = obj.get("request_id")
+                if type(request_id) is not str:
+                    request_id = _MALFORMED_REQUEST_ID
+                return self._error_envelope(
+                    request_id,
+                    code="bridge.capability_unavailable",
+                    category="capability",
+                    message_for_user="The bridge does not support changeset apply.",
+                )
+            return await self._serve_apply(frame_bytes)
+        if operation == RECEIPT_OPERATION:
+            if CHANGESET_V1 not in self._capabilities:
+                request_id = obj.get("request_id")
+                if type(request_id) is not str:
+                    request_id = _MALFORMED_REQUEST_ID
+                return self._error_envelope(
+                    request_id,
+                    code="bridge.capability_unavailable",
+                    category="capability",
+                    message_for_user="The bridge does not support changeset receipt queries.",
+                )
+            return await self._serve_receipt(frame_bytes)
         request_id = obj.get("request_id")
         if type(request_id) is not str:
             request_id = _MALFORMED_REQUEST_ID
@@ -787,6 +832,100 @@ class BridgeServer:
                 retryable=result.retryable,
             )
         response = PreflightResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
+        return response.to_json().encode("utf-8")
+
+    async def _serve_apply(self, frame_bytes: bytes) -> bytes:
+        """Parse + queue a ``changeset.apply`` request; return the receipt bytes.
+
+        Admission checks the advertised capability and the write-freeze state
+        BEFORE the main-thread transaction runs. Pre-transaction failures (stale
+        scene/manifest/identity, locked target, a non-holding precondition, or a
+        digest conflict) surface as a structured bridge error and perform zero
+        writes. Transaction outcomes (Applied/RolledBack/Partial/CriticalRecovery)
+        are returned as a typed :class:`ChangeReceipt`.
+        """
+        try:
+            request = parse_apply_request(frame_bytes)
+        except (TypeError, ValueError):
+            return self._error_envelope(
+                _MALFORMED_REQUEST_ID,
+                code="bridge.invalid_request",
+                category="protocol",
+                message_for_user="The apply request is not valid.",
+            )
+        request_id = request.request_id
+        if self._executor.write_frozen:  # type: ignore[attr-defined]
+            return self._error_envelope(
+                request_id,
+                code="bridge.write_frozen",
+                category="write_frozen",
+                message_for_user=(
+                    "The bridge is frozen for writes after an uncertain recovery."
+                ),
+                retryable=False,
+            )
+        apply_request = request
+
+        def operation() -> object:
+            return self._executor.apply(apply_request)  # type: ignore[union-attr]
+
+        result = await self._run_on_queue(request_id, request.deadline_ms, operation)
+        if isinstance(result, _QueuedError):
+            return self._error_envelope(
+                request_id,
+                code=result.code,
+                category=result.category,
+                message_for_user=result.message_for_user,
+                retryable=result.retryable,
+            )
+        response = ApplyResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
+        return response.to_json().encode("utf-8")
+
+    async def _serve_receipt(self, frame_bytes: bytes) -> bytes:
+        """Parse + queue a ``changeset.receipt`` request; return the receipt bytes.
+
+        A receipt query only reads the process-local receipt cache; it never
+        touches or mutates the scene. A not-found id/digest is a bounded,
+        retryable ``changeset.receipt_unavailable`` error. The cache lookup is
+        serialized through the shared FIFO so it cannot race an in-flight apply.
+        """
+        try:
+            request = parse_receipt_request(frame_bytes)
+        except (TypeError, ValueError):
+            return self._error_envelope(
+                _MALFORMED_REQUEST_ID,
+                code="bridge.invalid_request",
+                category="protocol",
+                message_for_user="The receipt request is not valid.",
+            )
+        request_id = request.request_id
+        receipt_request = request
+
+        def operation() -> object:
+            return self._executor.receipt(  # type: ignore[union-attr]
+                receipt_request.change_id,
+                receipt_request.changeset_digest,
+                scene_epoch=receipt_request.scene_epoch,
+            )
+
+        result = await self._run_on_queue(request_id, request.deadline_ms, operation)
+        if isinstance(result, _QueuedError):
+            return self._error_envelope(
+                request_id,
+                code=result.code,
+                category=result.category,
+                message_for_user=result.message_for_user,
+                retryable=result.retryable,
+            )
+        if result is None:
+            return self._error_envelope(
+                request_id,
+                code="changeset.receipt_unavailable",
+                category="not_found",
+                message_for_user="No receipt is cached for this change id and digest.",
+                retryable=True,
+            )
+        response = ReceiptResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
         return response.to_json().encode("utf-8")
 
     async def _run_on_queue(

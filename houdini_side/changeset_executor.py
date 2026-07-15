@@ -31,25 +31,37 @@ agree with the supplied manifest); these raw values are never exposed in a DTO.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
+from collections import OrderedDict
+from datetime import datetime, timezone
+
 from eee_agent.changesets.contracts import (
+    ChangeReceipt,
+    CheckpointPlan,
     ConditionResult,
     ConnectInput,
     CreateNode,
     NodeAbsent,
     NodeIdentityEquals,
     NodeRef,
+    ParmSnapshot,
     ParmValueEquals,
+    ReceiptStatus,
     SceneBindingEquals,
     SetParm,
     WireInputEquals,
     WireRef,
+    WireSnapshot,
     WorkspaceManifest,
     WorkspaceRevisionEquals,
     _derive_create_path,
     _parm_value_json,
     _validate_parm_value,
 )
+from eee_agent.changesets.policy import evaluate_policy
 from eee_agent.houdini_bridge.changesets import (
+    ApplyRequest,
     PreflightNodeFact,
     PreflightParmFact,
     PreflightRequest,
@@ -532,22 +544,37 @@ class ChangeSetPreflightAdapter:
         return facts
 
     def _read_wire_source(self, node: object, index: int) -> WireRef | None:
+        """Read the typed source wired into ``node`` input ``index``.
+
+        The source node is read via ``node.inputs()[index]`` (reliable across
+        Houdini node kinds in 21.0.440); ``inputConnections().outputNode()`` can
+        return the node itself for some kinds. The output index is read from
+        ``inputConnections()``.
+        """
         try:
-            connections = node.inputConnections()  # type: ignore[union-attr]
-        except Exception:  # noqa: BLE001 — a node with no connections reports nothing
+            all_inputs = node.inputs()  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001 — a node with no inputs reports nothing
+            all_inputs = ()
+        src_node: object | None = None
+        if isinstance(all_inputs, (tuple, list)) and 0 <= index < len(all_inputs):
+            src_node = all_inputs[index]
+        if src_node is None:
             return None
-        for conn in connections:
-            if int(conn.inputIndex()) != index:
-                continue
-            src_node = conn.outputNode()  # type: ignore[union-attr]
-            source = NodeRef(
-                node_id=_read_user_data(src_node, _NODE_ID_KEY),
-                path=str(src_node.path()),
-                expected_type=str(src_node.type().name()),
-                expected_workspace_id=_read_user_data(src_node, _WS_KEY),
-            )
-            return WireRef(source=source, source_output_index=int(conn.outputIndex()))  # type: ignore[union-attr]
-        return None
+        output_index = 0
+        try:
+            for conn in node.inputConnections():  # type: ignore[union-attr]
+                if int(conn.inputIndex()) == index:
+                    output_index = int(conn.outputIndex())  # type: ignore[union-attr]
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+        source = NodeRef(
+            node_id=_read_user_data(src_node, _NODE_ID_KEY),
+            path=str(src_node.path()),  # type: ignore[union-attr]
+            expected_type=str(src_node.type().name()),  # type: ignore[union-attr]
+            expected_workspace_id=_read_user_data(src_node, _WS_KEY),
+        )
+        return WireRef(source=source, source_output_index=output_index)
 
     # --------------------------------------------------------------- conditions
 
@@ -658,3 +685,1044 @@ def _wire_equal(actual: WireRef | None, expected: WireRef | None) -> bool:
         and actual.source.expected_type == expected.source.expected_type
         and actual.source_output_index == expected.source_output_index
     )
+
+
+# ==========================================================================
+# Task 16-D: transactional ChangeSet executor (apply / rollback / receipt)
+#
+# The executor reuses the accepted read-only preflight adapter to re-validate
+# every binding/identity/precondition/create-target-absence fact from the
+# CURRENT scene immediately before the first write (zero writes on any
+# pre-transaction failure). It then captures a bounded before snapshot, derives
+# inverse actions internally (no inverse/delete is ever accepted from the wire),
+# executes the ordered create/set/connect effects inside exactly one
+# ``hou.undos.group``, mirrors the ownership keys on created nodes, re-reads the
+# expected postconditions, and returns an :class:`Applied` receipt only after
+# reconciliation succeeds. On execution or reconciliation failure it runs the
+# derived inverses in strict reverse order and classifies the result as
+# ``RolledBack``/``Partial``/``CriticalRecovery``; ``Partial``/``CriticalRecovery``
+# freeze further writes until an explicit process restart.
+#
+# All HOM access happens inside the single synchronous ``apply`` callable that
+# the shared :class:`~eee_agent.houdini_bridge.queue.MainThreadReadQueue` pumps
+# on the Houdini main thread. There is no second queue, worker, or task, and no
+# HOM access on the socket loop.
+# ==========================================================================
+
+
+_RECEIPT_CACHE_MAX = 256
+_UNDO_LABEL_PREFIX = "EEE Agent - "
+
+
+def _frozen() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="bridge.write_frozen",
+        category="write_frozen",
+        message_for_user=(
+            "The bridge is frozen for writes after an uncertain recovery; "
+            "restart the bridge before applying further changes."
+        ),
+        retryable=False,
+    )
+
+
+def _conflict() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="changeset.receipt_conflict",
+        category="conflict",
+        message_for_user=(
+            "A different ChangeSet digest was already applied for this change id."
+        ),
+        retryable=False,
+    )
+
+
+def _precondition_failed() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="changeset.stale",
+        category="stale",
+        message_for_user="A ChangeSet precondition does not hold against the current scene.",
+        retryable=True,
+    )
+
+
+def _backup_unavailable() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="bridge.backup_unavailable",
+        category="backup",
+        message_for_user=(
+            "The ChangeSet requires a backup, but no backup capability is available."
+        ),
+        retryable=False,
+    )
+
+
+def _apply_failed(message: str) -> HoudiniAdapterError:
+    # Raised only when a write cannot even start; transaction-internal write
+    # failures are classified into receipts, not raised.
+    return HoudiniAdapterError(
+        code="changeset.apply_failed",
+        category="apply_failed",
+        message_for_user=message,
+    )
+
+
+def _policy_denied(denial_codes: tuple[str, ...]) -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="policy.denied",
+        category="policy",
+        message_for_user=(
+            "The ChangeSet is denied by policy against the current scene facts."
+        ),
+        retryable=False,
+        technical_detail_ref=",".join(denial_codes) if denial_codes else None,
+    )
+
+
+def _mandatory_omitted(message: str) -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="changeset.stale",
+        category="stale",
+        message_for_user=message,
+        retryable=True,
+    )
+
+
+def _stale_scene() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="bridge.stale_scene",
+        category="stale_scene",
+        message_for_user="The Houdini scene changed; refresh before continuing.",
+        retryable=True,
+    )
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _inverse_condition_kind(tag: str) -> str:
+    """The ConditionResult kind that matches an inverse tag (F10)."""
+    if tag == "parm":
+        return "parm.value_equals"
+    if tag == "wire":
+        return "wire.input_equals"
+    return "node.absent"
+
+
+# --------------------------------------------------------------------------
+# mandatory derived preconditions / postconditions / checkpoint coverage
+# (design sections 4.3 and 8). The executor derives these from every operation
+# and rejects a ChangeSet that omits or contradicts them before any write.
+# --------------------------------------------------------------------------
+
+
+def _created_ref(op: CreateNode) -> NodeRef:
+    return NodeRef(
+        node_id=op.node_id,
+        path=_derive_create_path(op.parent.path, op.node_name),
+        expected_type=op.node_type,
+        expected_workspace_id=op.workspace_id,
+    )
+
+
+def derive_mandatory_preconditions(
+    operations, binding, workspace: WorkspaceManifest | None
+) -> list[object]:
+    """Mandatory preconditions the executor derives from the operations.
+
+    A ChangeSet must include every one of these (and may add more). Omission or
+    contradiction (a supplied condition with the same identity but different
+    facts) fails closed before writes, because the exact mandatory fact is then
+    absent from the supplied set.
+    """
+    pre: list[object] = [
+        SceneBindingEquals(
+            instance_id=binding.instance_id,
+            scene_epoch=binding.scene_epoch,
+        )
+    ]
+    if workspace is not None:
+        pre.append(
+            WorkspaceRevisionEquals(
+                workspace_id=workspace.workspace_id, revision=workspace.revision
+            )
+        )
+    # Nodes created earlier in this transaction do not exist at preflight time, so
+    # they get no node.identity_equals precondition (they are proven absent and are
+    # brought into being by the create); only pre-existing references do.
+    created_ids = {op.node_id for op in operations if isinstance(op, CreateNode)}
+    for op in operations:
+        if isinstance(op, CreateNode):
+            pre.append(NodeAbsent(path=_derive_create_path(op.parent.path, op.node_name), node_id=op.node_id))
+            pre.append(NodeIdentityEquals(node=op.parent))
+        elif isinstance(op, SetParm):
+            if op.target.node_id not in created_ids:
+                pre.append(NodeIdentityEquals(node=op.target))
+            pre.append(ParmValueEquals(target=op.target, parm_name=op.parm_name, value=op.expected_old_value))
+        elif isinstance(op, ConnectInput):
+            if op.target.node_id not in created_ids:
+                pre.append(NodeIdentityEquals(node=op.target))
+            if op.source.node_id not in created_ids:
+                pre.append(NodeIdentityEquals(node=op.source))
+            pre.append(
+                WireInputEquals(
+                    target=op.target, input_index=op.input_index, source=op.expected_old_source
+                )
+            )
+    return pre
+
+
+def derive_mandatory_postconditions(operations) -> list[object]:
+    """Mandatory post-write postconditions derived from the operations."""
+    post: list[object] = []
+    for op in operations:
+        if isinstance(op, CreateNode):
+            post.append(NodeIdentityEquals(node=_created_ref(op)))
+        elif isinstance(op, SetParm):
+            post.append(ParmValueEquals(target=op.target, parm_name=op.parm_name, value=op.value))
+        elif isinstance(op, ConnectInput):
+            post.append(
+                WireInputEquals(
+                    target=op.target,
+                    input_index=op.input_index,
+                    source=WireRef(source=op.source, source_output_index=op.source_output_index),
+                )
+            )
+    return post
+
+
+def derive_mandatory_checkpoint(operations) -> tuple[list[NodeRef], list[ParmSnapshot], list[WireSnapshot]]:
+    """Exact before-snapshot coverage derived from the operations (design 4.4)."""
+    nodes: list[NodeRef] = []
+    parms: list[ParmSnapshot] = []
+    wires: list[WireSnapshot] = []
+    for op in operations:
+        if isinstance(op, CreateNode):
+            nodes.append(op.parent)
+        elif isinstance(op, SetParm):
+            nodes.append(op.target)
+            parms.append(ParmSnapshot(target=op.target, parm_name=op.parm_name))
+        elif isinstance(op, ConnectInput):
+            nodes.append(op.target)
+            nodes.append(op.source)
+            wires.append(WireSnapshot(target=op.target, input_index=op.input_index))
+    return nodes, parms, wires
+
+
+def _canonical(item: object) -> str:
+    return canonical_json_dumps(item.to_dict())  # type: ignore[attr-defined]
+
+
+def _dedup(items: list[object]) -> list[object]:
+    """Dedup by canonical form, preserving first occurrence.
+
+    Multiple operations referencing the same node yield the same derived fact
+    (e.g. two ``NodeIdentityEquals(child)``); the ChangeSet constructor rejects
+    duplicate identities, so the derived set must be deduped.
+    """
+    seen: set[str] = set()
+    out: list[object] = []
+    for item in items:
+        key = _canonical(item)
+        if key not in seen:
+            seen.add(key)
+            out.append(item)
+    return out
+
+
+def _verify_superset(supplied: list[object], mandatory: list[object], label: str) -> None:
+    supplied_keys = {_canonical(item) for item in supplied}
+    for required in mandatory:
+        if _canonical(required) not in supplied_keys:
+            raise _mandatory_omitted(
+                f"The ChangeSet {label} omits a mandatory derived fact."
+            )
+
+
+def verify_mandatory_coverage(changeset: ChangeSet, workspace: WorkspaceManifest | None) -> None:
+    """Reject (zero writes) unless the ChangeSet carries every derived fact."""
+    _verify_superset(
+        list(changeset.preconditions),
+        _dedup(derive_mandatory_preconditions(changeset.operations, changeset.scene_binding, workspace)),
+        "preconditions",
+    )
+    _verify_superset(
+        list(changeset.expected_postconditions),
+        _dedup(derive_mandatory_postconditions(changeset.operations)),
+        "expected_postconditions",
+    )
+    m_nodes, m_parms, m_wires = derive_mandatory_checkpoint(changeset.operations)
+    plan = changeset.checkpoint_plan
+    _verify_superset(list(plan.nodes), _dedup(list(m_nodes)), "checkpoint_plan.nodes")
+    _verify_superset(list(plan.parameters), _dedup(list(m_parms)), "checkpoint_plan.parameters")
+    _verify_superset(list(plan.wires), _dedup(list(m_wires)), "checkpoint_plan.wires")
+
+
+class _Snapshot:
+    """Bounded before/after fact set: node existence + parm values + wire sources.
+
+    Values are stored in JSON-able form (parm scalars/lists, wire dicts) so the
+    deterministic revision hash and postcondition evaluation share one read.
+    """
+
+    __slots__ = ("nodes", "parms", "wires")
+
+    def __init__(self) -> None:
+        self.nodes: dict[str, dict[str, object]] = {}
+        self.parms: dict[tuple[str, str], dict[str, object]] = {}
+        self.wires: dict[tuple[str, int], dict[str, object] | None] = {}
+
+
+class ChangeSetExecutor:
+    """Transactional ChangeSet executor bound to a scene adapter.
+
+    Reuses :class:`ChangeSetPreflightAdapter` for zero-write re-validation and
+    stable-id-first reference collection, then performs the short write
+    transaction. Same-package access to ``scene_adapter._hou`` is intentional.
+    """
+
+    def __init__(
+        self,
+        scene_adapter: HoudiniSceneAdapter,
+        *,
+        receipt_cache_max: int = _RECEIPT_CACHE_MAX,
+    ) -> None:
+        if not isinstance(scene_adapter, HoudiniSceneAdapter):
+            raise TypeError("scene_adapter must be a HoudiniSceneAdapter")
+        if type(receipt_cache_max) is not int or receipt_cache_max <= 0:
+            raise ValueError("receipt_cache_max must be a positive integer")
+        self._scene = scene_adapter
+        self._preflight = ChangeSetPreflightAdapter(scene_adapter)
+        self._receipts: "OrderedDict[tuple[str, str], ChangeReceipt]" = OrderedDict()
+        self._receipt_cache_max = receipt_cache_max
+        self._write_frozen = False
+        self._current_run_id: str = ""
+
+    @property
+    def _hou(self) -> object:
+        return self._scene._hou  # type: ignore[attr-defined]
+
+    @property
+    def write_frozen(self) -> bool:
+        """True once a Partial/CriticalRecovery receipt froze writes."""
+        return self._write_frozen
+
+    @property
+    def _tracked_epoch(self) -> int:
+        # In-memory scene epoch (no HOM access) — safe to read from a receipt query.
+        return self._scene._scene_epoch  # type: ignore[attr-defined]
+
+    def binding(self):  # type: ignore[no-untyped-def]
+        """Delegate the current scene binding (tracked epoch + instance)."""
+        return self._scene.binding()
+
+    # --------------------------------------------------------------- receipt query
+
+    def receipt(
+        self,
+        change_id: str,
+        changeset_digest: str,
+        *,
+        scene_epoch: int | None = None,
+    ) -> ChangeReceipt | None:
+        """Return the cached terminal receipt for ``(change_id, digest)`` or None.
+
+        Never touches or mutates the scene. A supplied ``scene_epoch`` is checked
+        against the in-memory tracked epoch BEFORE any cache access (a stale
+        receipt request fails closed). A cached terminal result for the same
+        change id under a DIFFERENT digest is a ``changeset.receipt_conflict``.
+        Cache bounds and deterministic eviction are tested; the cache is
+        process-local and not persisted.
+        """
+        if scene_epoch is not None and scene_epoch != self._tracked_epoch:
+            raise _stale_scene()
+        for (cached_id, cached_digest), _r in self._receipts.items():
+            if cached_id == change_id and cached_digest != changeset_digest:
+                raise _conflict()
+        return self._receipts.get((change_id, changeset_digest))
+
+    # --------------------------------------------------------------- apply
+
+    def apply(self, request: ApplyRequest) -> ChangeReceipt:
+        """Execute one admitted ChangeSet transactionally; return its receipt.
+
+        Pre-transaction failures (write freeze, digest conflict, backup
+        required, stale scene/manifest/identity, locked target, a precondition
+        that does not hold, missing/contradictory derived facts, or any policy
+        denial) raise :class:`HoudiniAdapterError` and perform zero writes.
+        Execution or reconciliation failures return a ``RolledBack``/``Partial``/
+        ``CriticalRecovery`` receipt and never claim success; the transaction
+        phase never raises out of this method.
+        """
+        if self._write_frozen:
+            raise _frozen()
+
+        hou = self._hou
+        changeset = request.changeset
+        digest = request.changeset_digest
+        change_id = changeset.change_id
+        key = (change_id, digest)
+
+        # Idempotency: a prior SUCCESS for the exact (change_id, digest) replays
+        # as AlreadyApplied (zero writes). A prior non-success is returned verbatim
+        # (do not re-run the transaction). Same id + different digest is a conflict.
+        cached = self._receipts.get(key)
+        if cached is not None:
+            if cached.status in (ReceiptStatus.APPLIED, ReceiptStatus.ALREADY_APPLIED):
+                return self._already_applied(cached)
+            return cached
+        self._reject_conflicting_digest(change_id, digest)
+
+        if changeset.risk_summary.requires_backup:
+            raise _backup_unavailable()
+
+        # ---- Zero-write re-validation ----------------------------------------
+        # Preflight re-derives binding/identity/create-absence and evaluates the
+        # supplied preconditions from the current scene (raises on stale/identity).
+        preflight_result = self._preflight.preflight(request)
+        if not preflight_result.all_preconditions_hold:
+            raise _precondition_failed()
+        self._reject_locked_changes(preflight_result, changeset)
+        # F2: the ChangeSet must carry every derived pre/postcondition and the
+        # exact before-snapshot coverage; omission/contradiction fails closed.
+        verify_mandatory_coverage(changeset, request.workspace)
+        # F1: re-run the accepted pure policy engine against the current workspace
+        # and current lock facts; any denial fails closed before writes.
+        decision = evaluate_policy(
+            changeset,
+            workspace=request.workspace,
+            locked_node_paths=self._locked_paths(preflight_result),
+        )
+        if not decision.allowed:
+            raise _policy_denied(decision.denial_codes)
+
+        binding = self.binding()
+        self._current_run_id = changeset.run_id
+        index = self._index_scene_by_node_id(hou)
+        before = self._snapshot(hou, changeset, index)
+        before_revision = self._revision(before)
+
+        # ---- TRANSACTION: from the first write on, never raise; always receipt --
+        applied_op_ids: list[str] = []
+        inverses: list[tuple] = []
+        write_error: BaseException | None = None
+        try:
+            with hou.undos.group(_UNDO_LABEL_PREFIX + change_id):  # type: ignore[union-attr]
+                for op in changeset.operations:
+                    self._execute_op(hou, op, index, inverses, applied_op_ids)
+        except Exception as exc:  # noqa: BLE001 — any execution failure -> rollback
+            write_error = exc
+
+        post_results: tuple[ConditionResult, ...] = ()
+        reconciled = False
+        if write_error is None:
+            try:
+                after_index = self._index_scene_by_node_id(hou)
+                after = self._snapshot(hou, changeset, after_index)
+                post_results = self._evaluate_postconditions(changeset, after, binding)
+                reconciled = all(result.passed for result in post_results)
+            except Exception:  # noqa: BLE001 — reconciliation crash -> uncertain
+                reconciled = False
+            if reconciled:
+                after_revision = self._revision(after)
+                receipt = ChangeReceipt(
+                    change_id=change_id,
+                    status=ReceiptStatus.APPLIED,
+                    instance_id=binding.instance_id,
+                    scene_epoch=binding.scene_epoch,
+                    before_revision=before_revision,
+                    after_revision=after_revision,
+                    applied_op_ids=tuple(applied_op_ids),
+                    postcondition_results=post_results,
+                    rollback_results=(),
+                    scene_may_have_changed=False,
+                    completed_at=_now(),
+                )
+                self._cache(key, receipt)
+                return receipt
+
+        # Failure (write error, postcondition failure, or reconciliation crash):
+        # attempt rollback, classify truthfully, and freeze on uncertainty.
+        rollback_results, rollback_ok = self._safe_rollback(hou, inverses)
+        after_revision = self._safe_after_revision(hou, changeset, before_revision)
+        status, scene_may_have_changed = self._classify_failure(
+            rollback_results, rollback_ok
+        )
+        if status != ReceiptStatus.ROLLED_BACK:
+            # An uncertain recovery freezes further writes until process restart.
+            self._write_frozen = True
+        receipt = ChangeReceipt(
+            change_id=change_id,
+            status=status,
+            instance_id=binding.instance_id,
+            scene_epoch=binding.scene_epoch,
+            before_revision=before_revision,
+            after_revision=after_revision,
+            applied_op_ids=tuple(applied_op_ids),
+            postcondition_results=post_results,
+            rollback_results=rollback_results,
+            scene_may_have_changed=scene_may_have_changed,
+            completed_at=_now(),
+        )
+        self._cache(key, receipt)
+        return receipt
+
+    # --------------------------------------------------------------- idempotency
+
+    def _already_applied(self, cached: ChangeReceipt) -> ChangeReceipt:
+        return ChangeReceipt(
+            change_id=cached.change_id,
+            status=ReceiptStatus.ALREADY_APPLIED,
+            instance_id=cached.instance_id,
+            scene_epoch=cached.scene_epoch,
+            before_revision=cached.before_revision,
+            after_revision=cached.after_revision,
+            applied_op_ids=(),
+            postcondition_results=cached.postcondition_results,
+            rollback_results=(),
+            scene_may_have_changed=False,
+            completed_at=_now(),
+        )
+
+    def _reject_conflicting_digest(self, change_id: str, digest: str) -> None:
+        for (cached_id, cached_digest), _receipt in self._receipts.items():
+            if cached_id == change_id and cached_digest != digest:
+                raise _conflict()
+
+    def _reject_locked_changes(self, preflight_result: PreflightResult, changeset) -> None:
+        """Reject a ChangeSet that writes to a locked node (zero writes).
+
+        The accepted 16-C preflight reports ``is_locked`` as a fact but does not
+        gate on it (preflight is read-only). The transaction must not mutate a
+        locked target, so this re-derivation fails closed before any write.
+        """
+        locked = self._locked_paths(preflight_result)
+        if not locked:
+            return
+        for ref in self._changed_targets(changeset):
+            if ref.path in locked:
+                raise _stale("A changed target is locked in the current scene.")
+
+    @staticmethod
+    def _locked_paths(preflight_result: PreflightResult) -> frozenset[str]:
+        return frozenset(
+            fact.requested.path for fact in preflight_result.node_facts if fact.is_locked
+        )
+
+    def _changed_targets(self, changeset) -> list[NodeRef]:  # type: ignore[no-untyped-def]
+        targets: list[NodeRef] = []
+        for op in changeset.operations:
+            if isinstance(op, SetParm):
+                targets.append(op.target)
+            elif isinstance(op, ConnectInput):
+                targets.append(op.target)
+                targets.append(op.source)
+        return targets
+
+    def _cache(self, key: tuple[str, str], receipt: ChangeReceipt) -> None:
+        self._receipts[key] = receipt
+        while len(self._receipts) > self._receipt_cache_max:
+            self._receipts.popitem(last=False)
+
+    # --------------------------------------------------------------- writes
+
+    def _execute_op(
+        self,
+        hou: object,
+        op: object,
+        index: dict[str, list[object]],
+        inverses: list[tuple],
+        applied_op_ids: list[str],
+    ) -> None:
+        """Execute one typed effect, mirroring ownership and journaling inverses.
+
+        Each inverse is journaled as soon as its restoration facts/object exist
+        and BEFORE the (next) mutating HOM call, so a mirror/mutate failure can
+        never strand an applied effect without a rollback entry. ``index`` is
+        mutated in place when a node is created so later ops can resolve it.
+        """
+        if isinstance(op, CreateNode):
+            self._execute_create(hou, op, index, inverses, applied_op_ids)
+        elif isinstance(op, SetParm):
+            self._execute_set_parm(hou, op, index, inverses, applied_op_ids)
+        elif isinstance(op, ConnectInput):
+            self._execute_connect(hou, op, index, inverses, applied_op_ids)
+        else:
+            raise _apply_failed("Unsupported operation kind.")  # pragma: no cover - closed union
+
+    def _execute_create(
+        self,
+        hou: object,
+        op: CreateNode,
+        index: dict[str, list[object]],
+        inverses: list[tuple],
+        applied_op_ids: list[str],
+    ) -> None:
+        parent = self._resolve_existing(hou, op.parent, index)
+        if parent is None:
+            raise _apply_failed("The create parent was not found in the scene.")
+        created = parent.createNode(op.node_type, op.node_name)  # type: ignore[attr-defined]
+        derived_path = _derive_create_path(op.parent.path, op.node_name)
+        # Journal the create-inverse immediately: the node now exists, so any
+        # failure in the mirror steps (or a later op) must roll it back.
+        inverses.append(
+            ("create", created, derived_path, op.node_id, op.workspace_id,
+             op.capability, op.role, self._current_run_id)
+        )
+        applied_op_ids.append(op.op_id)
+        index.setdefault(op.node_id, []).append(created)
+        # Mirror the six ownership keys (design 4.1); node_id first so the node
+        # is identifiable even if a later mirror step fails. Each step may fail;
+        # the create is already journaled for rollback.
+        created.setUserData(_NODE_ID_KEY, op.node_id)  # type: ignore[attr-defined]
+        created.setUserData(_WS_KEY, op.workspace_id)  # type: ignore[attr-defined]
+        created.setUserData(_CAP_KEY, op.capability)  # type: ignore[attr-defined]
+        created.setUserData(_ROLE_KEY, op.role)  # type: ignore[attr-defined]
+        created.setUserData(_SCHEMA_KEY, _SUPPORTED_SCHEMA_VERSION)  # type: ignore[attr-defined]
+        created.setUserData(_RUN_KEY, self._current_run_id)  # type: ignore[attr-defined]
+
+    def _execute_set_parm(
+        self,
+        hou: object,
+        op: SetParm,
+        index: dict[str, list[object]],
+        inverses: list[tuple],
+        applied_op_ids: list[str],
+    ) -> None:
+        node = self._resolve_existing(hou, op.target, index)
+        if node is None:
+            raise _apply_failed("The parameter target was not found in the scene.")
+        old_value, _existed = self._read_parm_value(node, op.parm_name)
+        # Journal the inverse (captured before-state) BEFORE the mutating call,
+        # so a mutate-then-raise still has an exact restoration entry.
+        inverses.append(("parm", op.target, op.parm_name, old_value))
+        self._write_parm_value(node, op.parm_name, op.value)
+        applied_op_ids.append(op.op_id)
+
+    def _execute_connect(
+        self,
+        hou: object,
+        op: ConnectInput,
+        index: dict[str, list[object]],
+        inverses: list[tuple],
+        applied_op_ids: list[str],
+    ) -> None:
+        target = self._resolve_existing(hou, op.target, index)
+        source = self._resolve_existing(hou, op.source, index)
+        if target is None:
+            raise _apply_failed("The wire target was not found in the scene.")
+        if source is None:
+            raise _apply_failed("The wire source was not found in the scene.")
+        old_source = self._read_wire_source(target, op.input_index)
+        inverses.append(("wire", op.target, op.input_index, old_source))
+        target.setInput(op.input_index, source, op.source_output_index)  # type: ignore[attr-defined]
+        applied_op_ids.append(op.op_id)
+
+    # --------------------------------------------------------------- rollback
+
+    def _safe_rollback(
+        self, hou: object, inverses: list[tuple]
+    ) -> tuple[tuple[ConditionResult, ...], bool]:
+        """Run derived inverses in strict reverse order; never raise.
+
+        Returns the per-inverse results and an ``ok`` flag that is False if the
+        rollback pass itself could not complete (index rebuild or iteration
+        crash). Individual inverse failures are captured as failing results, not
+        raised.
+        """
+        try:
+            index = self._index_scene_by_node_id(hou)
+        except Exception:  # noqa: BLE001 — cannot even index -> uncertain
+            return (), False
+        results: list[ConditionResult] = []
+        for inverse in reversed(inverses):
+            try:
+                results.append(self._rollback_one(hou, inverse, index))
+            except Exception:  # noqa: BLE001 — a single inverse must not abort the rest
+                results.append(
+                    ConditionResult(kind=_inverse_condition_kind(inverse[0]), passed=False, detail=None)
+                )
+        return tuple(results), True
+
+    def _rollback_one(
+        self, hou: object, inverse: tuple, index: dict[str, list[object]]
+    ) -> ConditionResult:
+        kind = inverse[0]
+        if kind == "create":
+            return self._rollback_create(hou, inverse)
+        if kind == "parm":
+            _tag, ref, name, old_value = inverse  # type: ignore[misc]
+            return self._rollback_parm(hou, ref, name, old_value, index)
+        if kind == "wire":
+            _tag, ref, idx, old_source = inverse  # type: ignore[misc]
+            return self._rollback_wire(hou, ref, idx, old_source, index)
+        return ConditionResult(kind="node.absent", passed=False, detail=None)
+
+    def _rollback_create(self, hou: object, inverse: tuple) -> ConditionResult:
+        """Destroy a node created by THIS transaction after full identity proof.
+
+        The inverse carries the actual created node object and the exact mirrored
+        identity this transaction intended. Rollback destroys it only if the
+        object is still at the derived path and every mirrored key can be READ
+        (a read exception refuses destroy — uncertain recovery) and is either
+        unset (a mirror step failed mid-way) or matches the intended value.
+        """
+        _tag, created, path, node_id, ws_id, cap, role, run_id = inverse  # type: ignore[misc]
+        alive_path = self._safe_path(created)
+        if alive_path is None:
+            # Already gone: the rollback goal (absence) is met.
+            return ConditionResult(kind="node.absent", passed=self._node_gone(hou, path), detail=None)
+        if alive_path != path:
+            return ConditionResult(kind="node.absent", passed=False, detail=None)
+        intended = {
+            _NODE_ID_KEY: node_id,
+            _WS_KEY: ws_id,
+            _CAP_KEY: cap,
+            _ROLE_KEY: role,
+            _SCHEMA_KEY: _SUPPORTED_SCHEMA_VERSION,
+            _RUN_KEY: run_id,
+        }
+        # F10: read each mirrored key STRICTLY. A read that raises (not merely
+        # returns None) must refuse destroy → uncertain recovery + freeze. A key
+        # that is unset (None) is allowed (mirror step may have failed mid-way).
+        verified = True
+        for key, intended_value in intended.items():
+            value, ok = self._read_user_data_strict(created, key)
+            if not ok:
+                verified = False
+                break
+            if value is not None and value != intended_value:
+                verified = False
+                break
+        if verified:
+            try:
+                created.destroy()  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001 — destroy failure => not restored
+                verified = False
+        return ConditionResult(
+            kind="node.absent", passed=bool(verified and self._node_gone(hou, path)), detail=None
+        )
+
+    def _rollback_parm(
+        self,
+        hou: object,
+        ref: NodeRef,
+        name: str,
+        old_value: object,
+        index: dict[str, list[object]],
+    ) -> ConditionResult:
+        node = self._resolve_existing(hou, ref, index)
+        if node is None:
+            return ConditionResult(kind="parm.value_equals", passed=False, detail=None)
+        try:
+            self._write_parm_value(node, name, old_value)
+        except Exception:  # noqa: BLE001
+            return ConditionResult(kind="parm.value_equals", passed=False, detail=None)
+        current, _existed = self._read_parm_value(node, name)
+        return ConditionResult(
+            kind="parm.value_equals", passed=_parm_equal(current, old_value), detail=None
+        )
+
+    def _rollback_wire(
+        self,
+        hou: object,
+        ref: NodeRef,
+        idx: int,
+        old_source: WireRef | None,
+        index: dict[str, list[object]],
+    ) -> ConditionResult:
+        node = self._resolve_existing(hou, ref, index)
+        if node is None:
+            return ConditionResult(kind="wire.input_equals", passed=False, detail=None)
+        try:
+            if old_source is None:
+                node.setInput(idx, None)  # type: ignore[attr-defined]
+            else:
+                src = self._resolve_existing(hou, old_source.source, index)
+                if src is None:
+                    return ConditionResult(kind="wire.input_equals", passed=False, detail=None)
+                node.setInput(idx, src, old_source.source_output_index)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            return ConditionResult(kind="wire.input_equals", passed=False, detail=None)
+        current = self._read_wire_source(node, idx)
+        return ConditionResult(
+            kind="wire.input_equals", passed=_wire_equal(current, old_source), detail=None
+        )
+
+    def _classify_failure(
+        self, rollback_results: tuple[ConditionResult, ...], rollback_ok: bool
+    ) -> tuple[ReceiptStatus, bool]:
+        """Classify a failed transaction truthfully (F4).
+
+        ``rollback_ok False`` (rollback itself crashed) is always uncertain ->
+        ``CriticalRecovery``. Otherwise the per-inverse results decide: a full
+        clean restore is ``RolledBack`` (scene restored); a mixed restore is
+        ``Partial``; a total restore failure is ``CriticalRecovery``.
+        """
+        if not rollback_ok:
+            return ReceiptStatus.CRITICAL_RECOVERY, True
+        if not rollback_results:
+            # Nothing was applied before the failure -> nothing to undo -> clean.
+            return ReceiptStatus.ROLLED_BACK, False
+        passed = sum(1 for r in rollback_results if r.passed)
+        if passed == len(rollback_results):
+            return ReceiptStatus.ROLLED_BACK, False
+        if passed == 0:
+            return ReceiptStatus.CRITICAL_RECOVERY, True
+        return ReceiptStatus.PARTIAL, True
+
+    def _safe_after_revision(
+        self, hou: object, changeset: ChangeSet, before_revision: str
+    ) -> str:
+        """Best-effort post-failure revision; falls back to before on read error."""
+        try:
+            post_index = self._index_scene_by_node_id(hou)
+            return self._revision(self._snapshot(hou, changeset, post_index))
+        except Exception:  # noqa: BLE001 — never let revision computation escape
+            return before_revision
+
+    @staticmethod
+    def _safe_path(node: object) -> str | None:
+        try:
+            return str(node.path())  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 — deleted/inaccessible node
+            return None
+
+    @staticmethod
+    def _read_user_data_strict(node: object, key: str) -> tuple[str | None, bool]:
+        """Read a mirrored key with an explicit success flag (F10).
+
+        Returns ``(value, ok)``. ``ok`` is False on ANY read exception (the
+        identity could not be proven → destroy must be refused). A successful
+        read returning None means the key is genuinely unset (allowed).
+        """
+        try:
+            value = node.userData(key)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            return None, False
+        if value is None:
+            return None, True
+        return str(value), True
+
+    @staticmethod
+    def _node_gone(hou: object, path: str) -> bool:
+        try:
+            return hou.node(path) is None  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            return False
+
+    # --------------------------------------------------------------- postconditions
+
+    def _evaluate_postconditions(
+        self, changeset, after: _Snapshot, binding  # type: ignore[no-untyped-def]
+    ) -> tuple[ConditionResult, ...]:
+        results: list[ConditionResult] = []
+        for cond in changeset.expected_postconditions:
+            kind = cond.kind
+            if isinstance(cond, NodeIdentityEquals):
+                fact = after.nodes.get(_identity(cond.node))
+                passed = fact is not None and bool(fact.get("exists")) and self._node_identity_holds(fact, cond.node)
+            elif isinstance(cond, ParmValueEquals):
+                slot = after.parms.get((_identity(cond.target), cond.parm_name))
+                passed = slot is not None and bool(slot.get("exists")) and _parm_equal(slot.get("value"), cond.value)
+            elif isinstance(cond, WireInputEquals):
+                current = after.wires.get((_identity(cond.target), cond.input_index))
+                passed = _wire_equal(current, cond.source)
+            else:  # pragma: no cover - postcondition union is closed
+                raise _apply_failed(f"Unsupported postcondition kind: {kind!r}")
+            results.append(ConditionResult(kind=kind, passed=passed, detail=None))
+        return tuple(results)
+
+    @staticmethod
+    def _node_identity_holds(fact: dict[str, object], ref: NodeRef) -> bool:
+        if not bool(fact.get("exists")):
+            return False
+        if fact.get("path") != ref.path:
+            return False
+        if fact.get("type") != ref.expected_type:
+            return False
+        if ref.node_id is not None and fact.get("node_id") != ref.node_id:
+            return False
+        if ref.expected_workspace_id is not None and (
+            fact.get("workspace_id") is None or fact.get("workspace_id") != ref.expected_workspace_id
+        ):
+            return False
+        return True
+
+    # --------------------------------------------------------------- snapshot
+
+    def _snapshot(
+        self, hou: object, changeset, index: dict[str, list[object]]
+    ) -> _Snapshot:
+        snap = _Snapshot()
+        for ref in self._preflight._collect_node_refs(changeset):
+            node = self._resolve_existing(hou, ref, index)
+            snap.nodes[_identity(ref)] = self._node_fact_dict(node)
+        for ref, name in self._parm_targets(changeset):
+            node = self._resolve_existing(hou, ref, index)
+            value, existed = self._read_parm_value(node, name) if node is not None else (None, False)
+            snap.parms[(_identity(ref), name)] = {
+                "exists": existed,
+                "value": _parm_value_json(value) if value is not None else None,
+            }
+        for ref, idx in self._wire_targets(changeset):
+            node = self._resolve_existing(hou, ref, index)
+            source = self._read_wire_source(node, idx) if node is not None else None
+            snap.wires[(_identity(ref), idx)] = source
+        return snap
+
+    def _parm_targets(self, changeset) -> list[tuple[NodeRef, str]]:  # type: ignore[no-untyped-def]
+        targets: list[tuple[NodeRef, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def add(target: NodeRef, name: str) -> None:
+            key = (_identity(target), name)
+            if key not in seen:
+                seen.add(key)
+                targets.append((target, name))
+
+        for op in changeset.operations:
+            if isinstance(op, SetParm):
+                add(op.target, op.parm_name)
+        for cond in changeset.expected_postconditions:
+            if isinstance(cond, ParmValueEquals):
+                add(cond.target, cond.parm_name)
+        return targets
+
+    def _wire_targets(self, changeset) -> list[tuple[NodeRef, int]]:  # type: ignore[no-untyped-def]
+        targets: list[tuple[NodeRef, int]] = []
+        seen: set[tuple[str, int]] = set()
+
+        def add(target: NodeRef, index: int) -> None:
+            key = (_identity(target), index)
+            if key not in seen:
+                seen.add(key)
+                targets.append((target, index))
+
+        for op in changeset.operations:
+            if isinstance(op, ConnectInput):
+                add(op.target, op.input_index)
+        for cond in changeset.expected_postconditions:
+            if isinstance(cond, WireInputEquals):
+                add(cond.target, cond.input_index)
+        return targets
+
+    @staticmethod
+    def _node_fact_dict(node: object | None) -> dict[str, object]:
+        if node is None:
+            return {
+                "exists": False,
+                "path": None,
+                "type": None,
+                "parent": None,
+                "node_id": None,
+                "workspace_id": None,
+            }
+        parent = node.parent()  # type: ignore[attr-defined]
+        return {
+            "exists": True,
+            "path": str(node.path()),  # type: ignore[attr-defined]
+            "type": str(node.type().name()),  # type: ignore[attr-defined]
+            "parent": str(parent.path()) if parent is not None else "/",  # type: ignore[attr-defined]
+            "node_id": _read_user_data(node, _NODE_ID_KEY),
+            "workspace_id": _read_user_data(node, _WS_KEY),
+        }
+
+    def _revision(self, snap: _Snapshot) -> str:
+        payload = {
+            "nodes": [[k, v] for k, v in sorted(snap.nodes.items())],
+            "parms": [[list(k), v] for k, v in sorted(snap.parms.items())],
+            "wires": [
+                [list(k), (v.to_dict() if v is not None else None)]
+                for k, v in sorted(snap.wires.items())
+            ],
+        }
+        return hashlib.sha256(canonical_json_dumps(payload).encode("utf-8")).hexdigest()
+
+    # --------------------------------------------------------------- resolution + reads
+
+    def _index_scene_by_node_id(self, hou: object) -> dict[str, list[object]]:
+        root = hou.node("/")  # type: ignore[union-attr]
+        nodes = () if root is None else tuple(root.allSubChildren())  # type: ignore[attr-defined]
+        index: dict[str, list[object]] = {}
+        for node in nodes:
+            node_id = _read_user_data(node, _NODE_ID_KEY)
+            if node_id is None:
+                continue
+            index.setdefault(node_id, []).append(node)
+        return index
+
+    def _resolve_existing(
+        self, hou: object, ref: NodeRef, index: dict[str, list[object]]
+    ) -> object | None:
+        """Resolve a reference to its current HOM node (stable id first)."""
+        if ref.node_id is None:
+            return hou.node(ref.path)  # type: ignore[union-attr]
+        mirrors = index.get(ref.node_id, ())
+        if len(mirrors) > 1:
+            raise _ambiguous()
+        if mirrors:
+            return mirrors[-1]
+        return hou.node(ref.path)  # type: ignore[union-attr]
+
+    def _read_parm_value(self, node: object, name: str) -> tuple[object | None, bool]:
+        parm = node.parm(name)  # type: ignore[attr-defined]
+        if parm is not None:
+            return self._bounded_parm(parm.eval()), True  # type: ignore[attr-defined]
+        pt = node.parmTuple(name)  # type: ignore[attr-defined]
+        if pt is not None and pt.size() > 1:  # type: ignore[attr-defined]
+            return self._bounded_parm(tuple(pt.eval())), True  # type: ignore[attr-defined]
+        return None, False
+
+    def _write_parm_value(self, node: object, name: str, value: object) -> None:
+        if isinstance(value, tuple):
+            pt = node.parmTuple(name)  # type: ignore[attr-defined]
+            if pt is None:
+                raise _apply_failed("The parameter tuple was not found on the node.")
+            pt.set(tuple(value))  # type: ignore[attr-defined]
+            return
+        parm = node.parm(name)  # type: ignore[attr-defined]
+        if parm is None:
+            raise _apply_failed("The parameter was not found on the node.")
+        parm.set(value)  # type: ignore[attr-defined]
+
+    @staticmethod
+    def _bounded_parm(raw: object) -> object:
+        try:
+            return _validate_parm_value(raw, "parm value")
+        except (TypeError, ValueError) as exc:
+            raise _apply_failed("A parameter has an unsupported or unbounded value.") from exc
+
+    def _read_wire_source(self, node: object, index: int) -> WireRef | None:
+        """Read the typed source wired into ``node`` input ``index``.
+
+        The source node is read via ``node.inputs()[index]``, which is reliable
+        across Houdini node kinds; ``inputConnections().outputNode()`` is not
+        (it can return the node itself for some node kinds in 21.0.440). The
+        source output index is read from ``inputConnections()``.
+        """
+        try:
+            all_inputs = node.inputs()  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            all_inputs = ()
+        src_node: object | None = None
+        if isinstance(all_inputs, (tuple, list)) and 0 <= index < len(all_inputs):
+            src_node = all_inputs[index]
+        if src_node is None:
+            return None
+        output_index = 0
+        try:
+            for conn in node.inputConnections():  # type: ignore[attr-defined]
+                if int(conn.inputIndex()) == index:  # type: ignore[attr-defined]
+                    output_index = int(conn.outputIndex())  # type: ignore[attr-defined]
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+        source = NodeRef(
+            node_id=_read_user_data(src_node, _NODE_ID_KEY),
+            path=str(src_node.path()),  # type: ignore[attr-defined]
+            expected_type=str(src_node.type().name()),  # type: ignore[attr-defined]
+            expected_workspace_id=_read_user_data(src_node, _WS_KEY),
+        )
+        return WireRef(source=source, source_output_index=output_index)

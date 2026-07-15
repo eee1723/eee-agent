@@ -32,9 +32,15 @@ from eee_agent.houdini_bridge.auth import (
 )
 from eee_agent.houdini_bridge.changesets import (
     CHANGESET_V1,
+    ApplyRequest,
+    ApplyResponse,
     PreflightRequest,
     PreflightResult,
+    ReceiptRequest,
+    ReceiptResponse,
+    parse_apply_response,
     parse_preflight_response,
+    parse_receipt_response,
     validate_capabilities,
 )
 from eee_agent.houdini_bridge.contracts import (
@@ -407,6 +413,129 @@ class BridgeClient:
                 technical_detail_ref=err.technical_detail_ref,
             )
         return response.result
+
+    async def apply(self, request: ApplyRequest):  # type: ignore[no-untyped-def]
+        """Send a ``changeset.apply`` request and return the typed ChangeReceipt.
+
+        Requires the advertised ``changeset.v1`` capability; if it is absent the
+        client fails closed with ``bridge.capability_unavailable`` and sends no
+        frame. The short transaction runs to completion on the server once it
+        starts: a client cancellation/deadline that lands mid-transaction does
+        not interrupt the writes, but the result is not delivered here. In that
+        case the caller recovers the outcome via :meth:`receipt`. On a server
+        bridge error the structured fields are re-raised as
+        :class:`BridgeClientError`; the connection is left open for that case.
+        """
+        from eee_agent.changesets.contracts import ChangeReceipt
+
+        if type(request) is not ApplyRequest:
+            raise TypeError("request must be an ApplyRequest")
+        if CHANGESET_V1 not in self._capabilities:
+            raise _client_error(
+                "bridge.capability_unavailable",
+                "capability",
+                "The bridge does not support changeset apply.",
+                retryable=False,
+            )
+        if not self._helloed or self._transport is None:
+            raise RuntimeError(
+                "BridgeClient.apply() requires a successful open()/hello"
+            )
+        response_bytes = await self._exchange(request.to_json(), request.deadline_ms)
+        try:
+            response = parse_apply_response(response_bytes)
+        except (TypeError, ValueError) as exc:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response is not a valid apply envelope.",
+            ) from exc
+        if response.request_id != request.request_id:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response does not match the request id.",
+            )
+        if response.error is not None:
+            err = response.error
+            raise BridgeClientError(
+                code=err.code,
+                category=err.category,
+                message_for_user=err.message_for_user,
+                retryable=err.retryable,
+                technical_detail_ref=err.technical_detail_ref,
+            )
+        result = response.result
+        if type(result) is not ChangeReceipt:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge apply response is not a valid receipt.",
+            )
+        return result
+
+    async def receipt(self, request: ReceiptRequest):  # type: ignore[no-untyped-def]
+        """Send a ``changeset.receipt`` request and return the typed ChangeReceipt.
+
+        Requires the advertised ``changeset.v1`` capability; if it is absent the
+        client fails closed with ``bridge.capability_unavailable`` and sends no
+        frame. A receipt query never mutates the scene. A not-found or digest-
+        conflict is surfaced as a :class:`BridgeClientError` (codes
+        ``changeset.receipt_unavailable`` / ``changeset.receipt_conflict``).
+        """
+        from eee_agent.changesets.contracts import ChangeReceipt
+
+        if type(request) is not ReceiptRequest:
+            raise TypeError("request must be a ReceiptRequest")
+        if CHANGESET_V1 not in self._capabilities:
+            raise _client_error(
+                "bridge.capability_unavailable",
+                "capability",
+                "The bridge does not support changeset receipt queries.",
+                retryable=False,
+            )
+        if not self._helloed or self._transport is None:
+            raise RuntimeError(
+                "BridgeClient.receipt() requires a successful open()/hello"
+            )
+        response_bytes = await self._exchange(request.to_json(), request.deadline_ms)
+        try:
+            response = parse_receipt_response(response_bytes)
+        except (TypeError, ValueError) as exc:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response is not a valid receipt envelope.",
+            ) from exc
+        if response.request_id != request.request_id:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response does not match the request id.",
+            )
+        if response.error is not None:
+            err = response.error
+            raise BridgeClientError(
+                code=err.code,
+                category=err.category,
+                message_for_user=err.message_for_user,
+                retryable=err.retryable,
+                technical_detail_ref=err.technical_detail_ref,
+            )
+        result = response.result
+        if type(result) is not ChangeReceipt:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge receipt response is not a valid receipt.",
+            )
+        return result
 
     # -- internals --------------------------------------------------------
 

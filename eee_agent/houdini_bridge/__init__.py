@@ -8,8 +8,9 @@ Houdini-side adapter (15-D).
 The package imports **neither** ``hou`` **nor** ``rpyc``. Runtime consumes only
 plain JSON DTOs from this surface; no live HOM object ever crosses the boundary.
 
-The additive Task 16-C ``changeset.v1`` capability and typed preflight DTOs live
-in :mod:`eee_agent.houdini_bridge.changesets`. They are exposed here through a
+The additive Task 16 ``changeset.v1`` capability and the typed preflight
+(Task 16-C) / apply / receipt (Task 16-D) DTOs live in
+:mod:`eee_agent.houdini_bridge.changesets`. They are exposed here through a
 lazy ``__getattr__`` (PEP 562) so importing this package never eagerly pulls in
 the ChangeSet contracts — that would form an import cycle, because the Task 16-A
 ChangeSet contracts import :class:`SceneBinding` from this package.
@@ -29,22 +30,38 @@ from eee_agent.houdini_bridge.contracts import (
     parse_response,
 )
 
-# Additive preflight symbols exposed lazily (see ``__getattr__`` below).
+# Additive changeset symbols exposed lazily (see ``__getattr__`` below).
 _LAZY_PREFLIGHT = {
+    "APPLY_OPERATION",
+    "ApplyRequest",
+    "ApplyResponse",
     "CHANGESET_V1",
+    "OPERATION",
     "PreflightNodeFact",
     "PreflightParmFact",
     "PreflightRequest",
     "PreflightResponse",
     "PreflightResult",
     "PreflightWireFact",
+    "RECEIPT_OPERATION",
+    "ReceiptRequest",
+    "ReceiptResponse",
+    "decode_change_receipt",
+    "parse_apply_request",
+    "parse_apply_response",
     "parse_preflight_request",
     "parse_preflight_response",
+    "parse_receipt_request",
+    "parse_receipt_response",
     "validate_capabilities",
 }
 
 __all__ = [
+    "APPLY_OPERATION",
+    "ApplyRequest",
+    "ApplyResponse",
     "MAX_MESSAGE_BYTES",
+    "OPERATION",
     "PROTOCOL",
     "BridgeError",
     "BridgeOperation",
@@ -57,11 +74,19 @@ __all__ = [
     "PreflightResponse",
     "PreflightResult",
     "PreflightWireFact",
+    "RECEIPT_OPERATION",
+    "ReceiptRequest",
+    "ReceiptResponse",
     "SceneBinding",
     "SceneQueryResult",
     "SelectedNode",
+    "decode_change_receipt",
+    "parse_apply_request",
+    "parse_apply_response",
     "parse_preflight_request",
     "parse_preflight_response",
+    "parse_receipt_request",
+    "parse_receipt_response",
     "parse_request",
     "parse_response",
     "validate_capabilities",
@@ -69,7 +94,7 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
-    """Lazily resolve additive preflight symbols to avoid an import cycle."""
+    """Lazily resolve additive changeset symbols to avoid an import cycle."""
     if name in _LAZY_PREFLIGHT:
         from eee_agent.houdini_bridge import changesets as _mod
 

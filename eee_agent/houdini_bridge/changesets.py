@@ -30,6 +30,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from eee_agent.changesets.contracts import (
+    ChangeReceipt,
     ChangeSet,
     CheckpointPlan,
     ConditionResult,
@@ -42,6 +43,7 @@ from eee_agent.changesets.contracts import (
     ParmSnapshot,
     ParmValueEquals,
     PermissionMode,
+    ReceiptStatus,
     RiskSummary,
     SceneBindingEquals,
     SetParm,
@@ -53,6 +55,7 @@ from eee_agent.changesets.contracts import (
     _parm_value_json,
     _validate_parm_value,
 )
+from eee_agent.core.ids import IdKind, require_id
 from eee_agent.houdini_bridge.contracts import (
     MAX_MESSAGE_BYTES,
     PROTOCOL,
@@ -67,6 +70,8 @@ from eee_agent.runtime.models import canonical_json_dumps
 
 CHANGESET_V1 = "changeset.v1"
 OPERATION = "changeset.preflight"
+APPLY_OPERATION = "changeset.apply"
+RECEIPT_OPERATION = "changeset.receipt"
 
 _MAX_REQUEST_ID_LEN = 128
 _MIN_DEADLINE_MS = 1
@@ -94,6 +99,7 @@ _REQUEST_FIELDS = frozenset(
     }
 )
 _REQUEST_PAYLOAD_FIELDS = frozenset({"changeset", "changeset_digest", "workspace"})
+_RECEIPT_PAYLOAD_FIELDS = frozenset({"change_id", "changeset_digest"})
 _RESULT_FIELDS = frozenset(
     {
         "binding",
@@ -209,6 +215,23 @@ _RISK_FIELDS = frozenset(
 _CHECKPOINT_FIELDS = frozenset({"nodes", "parameters", "wires"})
 _PARM_SNAPSHOT_FIELDS = frozenset({"target", "parm_name"})
 _WIRE_SNAPSHOT_FIELDS = frozenset({"target", "input_index"})
+# ChangeReceipt wire fields (mirror the accepted repository decoder).
+_RECEIPT_FIELDS = frozenset(
+    {
+        "schema_version",
+        "change_id",
+        "status",
+        "instance_id",
+        "scene_epoch",
+        "before_revision",
+        "after_revision",
+        "applied_op_ids",
+        "postcondition_results",
+        "rollback_results",
+        "scene_may_have_changed",
+        "completed_at",
+    }
+)
 
 
 # --------------------------------------------------------------------------
@@ -575,6 +598,41 @@ def _decode_changeset(data: object) -> ChangeSet:
         checkpoint_plan=_decode_checkpoint(value["checkpoint_plan"]),
         created_at=_decode_dt(value["created_at"], "ChangeSet.created_at"),
     )
+
+
+def _decode_receipt(data: object) -> ChangeReceipt:
+    """Decode a bounded ``ChangeReceipt`` from strict JSON-derived dict data.
+
+    Self-contained (mirrors the accepted repository decoder) so the Bridge
+    layer never imports the persistence layer. The status tag is mapped to the
+    exact :class:`ReceiptStatus`; every other field is validated by the
+    frozen contract constructor.
+    """
+    value = _require_exact_dict(data, "ChangeReceipt")
+    _require_exact_keys(value, _RECEIPT_FIELDS, "ChangeReceipt")
+    return ChangeReceipt(
+        schema_version=value["schema_version"],
+        change_id=value["change_id"],
+        status=ReceiptStatus(value["status"]),
+        instance_id=value["instance_id"],
+        scene_epoch=value["scene_epoch"],
+        before_revision=value["before_revision"],
+        after_revision=value["after_revision"],
+        applied_op_ids=value["applied_op_ids"],
+        postcondition_results=[
+            _decode_condition_result(r) for r in value["postcondition_results"]
+        ],
+        rollback_results=[
+            _decode_condition_result(r) for r in value["rollback_results"]
+        ],
+        scene_may_have_changed=value["scene_may_have_changed"],
+        completed_at=_decode_dt(value["completed_at"], "ChangeReceipt.completed_at"),
+    )
+
+
+def decode_change_receipt(data: Mapping[str, object]) -> ChangeReceipt:
+    """Public alias for the bounded ChangeReceipt decoder (tests/clients)."""
+    return _decode_receipt(data)
 
 
 # --------------------------------------------------------------------------
@@ -1022,6 +1080,346 @@ class PreflightResponse:
 
 
 # --------------------------------------------------------------------------
+# changeset.apply / changeset.receipt DTOs (Task 16-D)
+#
+# ``changeset.apply`` carries the same canonical schema-v1 ChangeSet, exact
+# digest, and matching WorkspaceManifest (or null) as ``changeset.preflight``,
+# with the same identity/session/binding checks; its response returns a bounded
+# typed :class:`ChangeReceipt`. ``changeset.receipt`` carries only the exact
+# ``change_id`` plus the expected digest and returns the cached typed receipt or
+# a bounded not-found/conflict error. The Bridge never trusts a Runtime
+# PolicyDecision or approval record on the wire.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ApplyRequest:
+    """A parsed, validated ``changeset.apply`` request envelope.
+
+    Field set and validation are identical to :class:`PreflightRequest` (full
+    canonical ChangeSet, exact digest, manifest identity/binding consistency,
+    envelope epoch agreement) — apply reuses the accepted preflight validation.
+    Only the wire ``operation`` tag differs, enforced in :meth:`from_dict`.
+    """
+
+    request_id: str
+    deadline_ms: int
+    scene_epoch: int
+    changeset: ChangeSet
+    changeset_digest: str
+    workspace: WorkspaceManifest | None
+
+    def __post_init__(self) -> None:
+        # Delegate every field/digest/manifest/binding invariant to the accepted
+        # PreflightRequest construction (no duplicated strictness that could
+        # drift from the read-only path). The constructed object is discarded.
+        PreflightRequest(
+            request_id=self.request_id,
+            deadline_ms=self.deadline_ms,
+            scene_epoch=self.scene_epoch,
+            changeset=self.changeset,
+            changeset_digest=self.changeset_digest,
+            workspace=self.workspace,
+        )
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        request_id: str,
+        deadline_ms: int,
+        scene_epoch: int,
+        changeset: ChangeSet,
+        workspace: WorkspaceManifest | None = None,
+    ) -> ApplyRequest:
+        """Build a request, computing the canonical ChangeSet digest."""
+        return cls(
+            request_id=request_id,
+            deadline_ms=deadline_ms,
+            scene_epoch=scene_epoch,
+            changeset=changeset,
+            changeset_digest=changeset.digest,
+            workspace=workspace,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "protocol": PROTOCOL,
+            "kind": "request",
+            "request_id": self.request_id,
+            "operation": APPLY_OPERATION,
+            "deadline_ms": self.deadline_ms,
+            "scene_epoch": self.scene_epoch,
+            "payload": {
+                "changeset": self.changeset.to_dict(),
+                "changeset_digest": self.changeset_digest,
+                "workspace": (
+                    self.workspace.to_dict() if self.workspace is not None else None
+                ),
+            },
+        }
+
+    def to_json(self) -> str:
+        return canonical_json_dumps(self.to_dict())
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> ApplyRequest:
+        envelope = _require_exact_dict(data, "ApplyRequest envelope")
+        _require_exact_keys(envelope, _REQUEST_FIELDS, "ApplyRequest envelope")
+        if envelope["protocol"] != PROTOCOL:
+            raise ValueError("ApplyRequest protocol must be eee.bridge/1")
+        if envelope["kind"] != "request":
+            raise ValueError("ApplyRequest kind must be request")
+        if envelope["operation"] != APPLY_OPERATION:
+            raise ValueError("ApplyRequest operation must be changeset.apply")
+        payload = _require_exact_dict(envelope["payload"], "ApplyRequest payload")
+        _require_exact_keys(payload, _REQUEST_PAYLOAD_FIELDS, "ApplyRequest payload")
+        changeset = _decode_changeset(payload["changeset"])
+        workspace = (
+            None if payload["workspace"] is None else _decode_manifest(payload["workspace"])
+        )
+        return cls(
+            request_id=envelope["request_id"],
+            deadline_ms=envelope["deadline_ms"],
+            scene_epoch=envelope["scene_epoch"],
+            changeset=changeset,
+            changeset_digest=payload["changeset_digest"],
+            workspace=workspace,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ApplyResponse:
+    """A parsed, validated ``changeset.apply`` response envelope.
+
+    Carries exactly one of a typed :class:`ChangeReceipt` result or a
+    :class:`BridgeError`. A malformed receipt (bad status, digest shape,
+    duplicate keys, oversized payload) fails closed at parse time.
+    """
+
+    request_id: str
+    result: ChangeReceipt | None
+    error: BridgeError | None
+
+    def __post_init__(self) -> None:
+        _require_request_id(self.request_id, "ApplyResponse.request_id")
+        if self.result is not None and type(self.result) is not ChangeReceipt:
+            raise TypeError("ApplyResponse.result must be an exact ChangeReceipt or None")
+        if self.error is not None and type(self.error) is not BridgeError:
+            raise TypeError("ApplyResponse.error must be an exact BridgeError or None")
+        if (self.result is None) == (self.error is None):
+            raise ValueError("ApplyResponse must carry exactly one of result or error")
+
+    def to_dict(self) -> dict[str, object]:
+        if self.result is not None:
+            return {
+                "protocol": PROTOCOL,
+                "kind": "response",
+                "request_id": self.request_id,
+                "ok": True,
+                "result": self.result.to_dict(),
+            }
+        return {
+            "protocol": PROTOCOL,
+            "kind": "response",
+            "request_id": self.request_id,
+            "ok": False,
+            "error": self.error.to_dict(),  # type: ignore[union-attr]
+        }
+
+    def to_json(self) -> str:
+        return canonical_json_dumps(self.to_dict())
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> ApplyResponse:
+        envelope = _require_exact_dict(data, "ApplyResponse envelope")
+        if not _RESPONSE_REQUIRED_FIELDS.issubset(envelope.keys()):
+            raise ValueError("ApplyResponse envelope is missing required fields")
+        extra = set(envelope.keys()) - _RESPONSE_REQUIRED_FIELDS - {"result", "error"}
+        if extra:
+            raise ValueError("ApplyResponse envelope has unknown fields")
+        if envelope["protocol"] != PROTOCOL:
+            raise ValueError("ApplyResponse protocol must be eee.bridge/1")
+        if envelope["kind"] != "response":
+            raise ValueError("ApplyResponse kind must be response")
+        ok = envelope["ok"]
+        _require_exact_bool(ok, "ApplyResponse.ok")
+        if ok is True:
+            result = envelope.get("result")
+            error = envelope.get("error")
+            if result is None or error is not None:
+                raise ValueError("ApplyResponse ok=true requires result and no error")
+            return cls(
+                request_id=envelope["request_id"],
+                result=_decode_receipt(result),
+                error=None,
+            )
+        error = envelope.get("error")
+        result = envelope.get("result")
+        if error is None or result is not None:
+            raise ValueError("ApplyResponse ok=false requires error and no result")
+        return cls(
+            request_id=envelope["request_id"],
+            result=None,
+            error=BridgeError.from_dict(error),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiptRequest:
+    """A parsed, validated ``changeset.receipt`` request envelope.
+
+    Carries only the exact ``change_id`` and the expected canonical digest. A
+    receipt query never touches the scene; the ``scene_epoch`` envelope field is
+    kept for protocol-shape consistency but is not used to gate scene access.
+    """
+
+    request_id: str
+    deadline_ms: int
+    scene_epoch: int
+    change_id: str
+    changeset_digest: str
+
+    def __post_init__(self) -> None:
+        _require_request_id(self.request_id, "ReceiptRequest.request_id")
+        _require_exact_int(self.deadline_ms, "ReceiptRequest.deadline_ms")
+        if self.deadline_ms < _MIN_DEADLINE_MS or self.deadline_ms > _MAX_DEADLINE_MS:
+            raise ValueError("ReceiptRequest.deadline_ms must be in 1..30000")
+        _require_exact_int(self.scene_epoch, "ReceiptRequest.scene_epoch")
+        if self.scene_epoch < 1:
+            raise ValueError("ReceiptRequest.scene_epoch must be >= 1")
+        require_id(self.change_id, IdKind.CHANGE)
+        _require_sha256(self.changeset_digest, "ReceiptRequest.changeset_digest")
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        request_id: str,
+        deadline_ms: int,
+        scene_epoch: int,
+        change_id: str,
+        changeset_digest: str,
+    ) -> ReceiptRequest:
+        return cls(
+            request_id=request_id,
+            deadline_ms=deadline_ms,
+            scene_epoch=scene_epoch,
+            change_id=change_id,
+            changeset_digest=changeset_digest,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "protocol": PROTOCOL,
+            "kind": "request",
+            "request_id": self.request_id,
+            "operation": RECEIPT_OPERATION,
+            "deadline_ms": self.deadline_ms,
+            "scene_epoch": self.scene_epoch,
+            "payload": {
+                "change_id": self.change_id,
+                "changeset_digest": self.changeset_digest,
+            },
+        }
+
+    def to_json(self) -> str:
+        return canonical_json_dumps(self.to_dict())
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> ReceiptRequest:
+        envelope = _require_exact_dict(data, "ReceiptRequest envelope")
+        _require_exact_keys(envelope, _REQUEST_FIELDS, "ReceiptRequest envelope")
+        if envelope["protocol"] != PROTOCOL:
+            raise ValueError("ReceiptRequest protocol must be eee.bridge/1")
+        if envelope["kind"] != "request":
+            raise ValueError("ReceiptRequest kind must be request")
+        if envelope["operation"] != RECEIPT_OPERATION:
+            raise ValueError("ReceiptRequest operation must be changeset.receipt")
+        payload = _require_exact_dict(envelope["payload"], "ReceiptRequest payload")
+        _require_exact_keys(payload, _RECEIPT_PAYLOAD_FIELDS, "ReceiptRequest payload")
+        return cls(
+            request_id=envelope["request_id"],
+            deadline_ms=envelope["deadline_ms"],
+            scene_epoch=envelope["scene_epoch"],
+            change_id=payload["change_id"],
+            changeset_digest=payload["changeset_digest"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ReceiptResponse:
+    """A parsed, validated ``changeset.receipt`` response envelope."""
+
+    request_id: str
+    result: ChangeReceipt | None
+    error: BridgeError | None
+
+    def __post_init__(self) -> None:
+        _require_request_id(self.request_id, "ReceiptResponse.request_id")
+        if self.result is not None and type(self.result) is not ChangeReceipt:
+            raise TypeError("ReceiptResponse.result must be an exact ChangeReceipt or None")
+        if self.error is not None and type(self.error) is not BridgeError:
+            raise TypeError("ReceiptResponse.error must be an exact BridgeError or None")
+        if (self.result is None) == (self.error is None):
+            raise ValueError("ReceiptResponse must carry exactly one of result or error")
+
+    def to_dict(self) -> dict[str, object]:
+        if self.result is not None:
+            return {
+                "protocol": PROTOCOL,
+                "kind": "response",
+                "request_id": self.request_id,
+                "ok": True,
+                "result": self.result.to_dict(),
+            }
+        return {
+            "protocol": PROTOCOL,
+            "kind": "response",
+            "request_id": self.request_id,
+            "ok": False,
+            "error": self.error.to_dict(),  # type: ignore[union-attr]
+        }
+
+    def to_json(self) -> str:
+        return canonical_json_dumps(self.to_dict())
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> ReceiptResponse:
+        envelope = _require_exact_dict(data, "ReceiptResponse envelope")
+        if not _RESPONSE_REQUIRED_FIELDS.issubset(envelope.keys()):
+            raise ValueError("ReceiptResponse envelope is missing required fields")
+        extra = set(envelope.keys()) - _RESPONSE_REQUIRED_FIELDS - {"result", "error"}
+        if extra:
+            raise ValueError("ReceiptResponse envelope has unknown fields")
+        if envelope["protocol"] != PROTOCOL:
+            raise ValueError("ReceiptResponse protocol must be eee.bridge/1")
+        if envelope["kind"] != "response":
+            raise ValueError("ReceiptResponse kind must be response")
+        ok = envelope["ok"]
+        _require_exact_bool(ok, "ReceiptResponse.ok")
+        if ok is True:
+            result = envelope.get("result")
+            error = envelope.get("error")
+            if result is None or error is not None:
+                raise ValueError("ReceiptResponse ok=true requires result and no error")
+            return cls(
+                request_id=envelope["request_id"],
+                result=_decode_receipt(result),
+                error=None,
+            )
+        error = envelope.get("error")
+        result = envelope.get("result")
+        if error is None or result is not None:
+            raise ValueError("ReceiptResponse ok=false requires error and no result")
+        return cls(
+            request_id=envelope["request_id"],
+            result=None,
+            error=BridgeError.from_dict(error),
+        )
+
+
+# --------------------------------------------------------------------------
 # JSON text entrypoints
 # --------------------------------------------------------------------------
 
@@ -1034,3 +1432,23 @@ def parse_preflight_request(raw: str | bytes) -> PreflightRequest:
 def parse_preflight_response(raw: str | bytes) -> PreflightResponse:
     """Parse a ``changeset.preflight`` response from strict JSON text."""
     return PreflightResponse.from_dict(_load_strict_json(raw, "Preflight response"))
+
+
+def parse_apply_request(raw: str | bytes) -> ApplyRequest:
+    """Parse a ``changeset.apply`` request from strict JSON text."""
+    return ApplyRequest.from_dict(_load_strict_json(raw, "Apply request"))
+
+
+def parse_apply_response(raw: str | bytes) -> ApplyResponse:
+    """Parse a ``changeset.apply`` response from strict JSON text."""
+    return ApplyResponse.from_dict(_load_strict_json(raw, "Apply response"))
+
+
+def parse_receipt_request(raw: str | bytes) -> ReceiptRequest:
+    """Parse a ``changeset.receipt`` request from strict JSON text."""
+    return ReceiptRequest.from_dict(_load_strict_json(raw, "Receipt request"))
+
+
+def parse_receipt_response(raw: str | bytes) -> ReceiptResponse:
+    """Parse a ``changeset.receipt`` response from strict JSON text."""
+    return ReceiptResponse.from_dict(_load_strict_json(raw, "Receipt response"))

@@ -190,6 +190,14 @@ class _FakeNode:
     def inputConnections(self) -> list[_FakeConn]:
         return list(self.connections)
 
+    def inputs(self) -> list:
+        # Source node per input index (None for unwired), mirroring hou.Node.inputs().
+        indexed = {c.inputIndex(): c.outputNode() for c in self.connections}
+        if not indexed:
+            return []
+        size = max(indexed) + 1
+        return [indexed.get(i) for i in range(size)]
+
     def __getattr__(self, attr: str) -> object:
         spy = self.__dict__.get("spy")
 
@@ -1338,9 +1346,12 @@ def test_preflight_adapter_module_imports_are_clean() -> None:
 def test_preflight_adapter_is_zero_write_by_construction() -> None:
     import inspect
 
-    from houdini_side import changeset_executor as mod
+    from houdini_side.changeset_executor import ChangeSetPreflightAdapter
 
-    source = inspect.getsource(mod)
+    # Task 16-D adds the transactional ChangeSetExecutor (a writer) to the same
+    # module. The zero-write guarantee applies to the read-only PREFLIGHT
+    # ADAPTER class itself, which is the surface this test protects.
+    source = inspect.getsource(ChangeSetPreflightAdapter)
     # Mutation surfaces that must NEVER appear in the read-only preflight path.
     # (.eval( is intentionally excluded: hou.Parm.eval() is a bounded READ.)
     for forbidden in (
@@ -1359,7 +1370,7 @@ def test_preflight_adapter_is_zero_write_by_construction() -> None:
         "subprocess",
         " exec(",
     ):
-        assert forbidden not in source, f"forbidden write surface in executor: {forbidden!r}"
+        assert forbidden not in source, f"forbidden write surface in preflight adapter: {forbidden!r}"
 
 
 def test_preflight_adapter_no_houdini_read_in_main_thread_only() -> None:
