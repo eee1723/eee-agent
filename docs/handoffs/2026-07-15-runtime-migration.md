@@ -52,8 +52,8 @@ Generated: 2026-07-15 (Asia/Shanghai)
   full offline suite: 1388 passed; real hython smoke: 20 checks passed. The
   lifecycle fix makes publication failure close and await the adopted listener,
   remove both identity files, and preserve the original publication error.
-- The latest local tip is `bfc00f3`; the branch is ready to push after this
-  acceptance update. Task 16 remains unstarted.
+- The latest pushed tip is `c98824d` (the Task 15-D acceptance/documentation
+  commit on top of `bfc00f3`). Task 16 remains unstarted.
 
 Do not merge this branch to `main` until the accepted implementation and
 documentation commits are pushed
@@ -70,6 +70,9 @@ Read these files in order on the new computer:
 4. `docs/handoffs/2026-07-15-runtime-migration.md`
 5. `docs/handoffs/2026-07-14-runtime-migration.md` for Tasks 1-9 history
 6. `docs/handoffs/2026-07-13-foundation-migration.md` for Foundation history
+7. `docs/superpowers/specs/2026-07-15-secure-houdini-bridge-readonly-design.md`
+8. `docs/superpowers/plans/2026-07-15-secure-houdini-bridge-readonly.md`
+9. `docs/superpowers/plans/2026-07-15-runtime-next-milestones.md`
 
 The approved design has not changed. Continue one plan task at a time. Claude
 Code CLI with explicit model `glm-5.2[1m]` performs implementation; Codex owns
@@ -85,6 +88,8 @@ the plan, diff review, adversarial diagnostics, and independent acceptance.
 | 12 WebSocket server | Complete, Codex accepted | `724a8fb` |
 | 13 CLI/restart E2E/docs/final verification | Complete, Codex accepted | `c8e6af1` |
 | 14 Runtime v1 external acceptance and delivery | In progress: pushed, restore/smokes pending | See next-milestones plan |
+| 15-A/B/C/D Secure read-only Houdini Bridge | Complete, Codex accepted | `c98824d` (implementation through `bfc00f3`) |
+| 16 Typed ChangeSet/policy/approval/write gate | Planned, not started | New Codex plan required |
 
 ## Task 10: Accepted RuntimeService
 
@@ -404,12 +409,12 @@ shutdown cleanup, and unchanged scene fingerprint.
    rerun the clean baseline verification below.
 3. Perform the separate manual GLM-5.2 and Houdini read-only smoke procedures
    from the Runtime plan, recording external-service failures separately.
-4. Decide whether to merge `feature/runtime` into `main`; do not merge during
+4. Codex must write and review the Task 16 design/implementation plan before
+   Claude receives any Task 16 execution prompt. Task 16 owns typed ChangeSet,
+   policy, approval, and transactional write behavior; the current Bridge
+   remains strictly read-only.
+5. Decide whether to merge `feature/runtime` into `main`; do not merge during
    the migration without an explicit integration decision.
-5. Task 15-A/B/C/D are accepted. Task 16 (typed ChangeSet, policy, approval,
-   and transactional write execution) is the next implementation milestone;
-   it must remain a separately planned, review-gated task. Keep the current
-   Bridge strictly read-only.
 
 ## New Computer Restore Procedure
 
@@ -424,7 +429,7 @@ git switch --track origin/feature/runtime
 uv sync --frozen --extra eval --python 3.11
 uv lock --check
 uv run --extra eval pytest -q
-uv run python -m compileall -q eee_agent tests
+uv run python -m compileall -q eee_agent houdini_side tests
 git status --short --branch
 ```
 
@@ -433,7 +438,7 @@ Expected baseline before new development:
 - Branch is `feature/runtime` and tracks `origin/feature/runtime`.
 - Worktree is clean.
 - `uv lock --check` exits 0 with 69 packages.
-- Full suite reports at least `1111 passed` on the current environment. The
+- Full suite reports at least `1388 passed` on the current environment. The
   optional WSL environment probe may be skipped or may run on another machine;
   either result is acceptable if there are no failures and no new skips.
 - Compileall exits 0.
@@ -454,6 +459,7 @@ The following are intentionally ignored and are not transferred by Git:
 - `.worktrees/`
 - Runtime `app.sqlite` and `checkpoints.sqlite`
 - `runtime.token`, `runtime.json`, and `runtime.lock`
+- Bridge `bridge.token` and `bridge.discovery.json`
 - Runtime logs and machine-local state
 
 Transfer credentials only through a password manager or another encrypted
@@ -467,24 +473,28 @@ Use this prompt in the first conversation on the new computer:
 ```text
 Resume the persistent Runtime milestone from origin/feature/runtime.
 
-Tasks 1-13 are complete and Codex-accepted. Task 14 is planned and is the next
-acceptance gate; it is not an implementation license. The accepted
-implementation tips are 724a8fb (Task 12), 3b69532 (Task 13), and c8e6af1
-(Task 13 follow-up).
+Tasks 1-13 are complete and Codex-accepted. Task 14 remains a separate
+external-acceptance/restore gate. Task 15-A/B/C/D is complete and Codex-
+accepted; implementation tips are 4c22d45, 379a5c8, c717e60, fcdee32, and
+bfc00f3, with the latest pushed documentation/status tip c98824d. Task 16 is
+planned but not started.
 Read, in order:
 
 1. docs/superpowers/specs/2026-07-14-runtime-design.md
 2. docs/superpowers/plans/2026-07-14-runtime.md
 3. docs/handoffs/2026-07-15-runtime-migration.md
 4. docs/handoffs/2026-07-14-runtime-migration.md for Tasks 1-9 history
+5. docs/superpowers/specs/2026-07-15-secure-houdini-bridge-readonly-design.md
+6. docs/superpowers/plans/2026-07-15-secure-houdini-bridge-readonly.md
+7. docs/superpowers/plans/2026-07-15-runtime-next-milestones.md
 
 Run `uv sync --frozen --extra eval --python 3.11`, `uv lock --check`, the full
-pytest suite, compileall, and `git status` before any new work.
+pytest suite, compileall including `houdini_side`, and `git status` before any
+new work.
 
-Do not modify production code or start Task 16/17 without a current Codex
-instruction. Task 15 read-only implementation is authorized only through the
-new executable plan and a single Claude prompt; manual GLM/Houdini smoke still
-follows the Task 14 checklist.
+Do not start Task 16 or Task 17 without a current Codex plan and acceptance
+gate. Task 15 read-only implementation is complete; only verification or
+documentation corrections may be made without a new task authorization.
 Claude Code is responsible only for the concrete implementation task supplied
 by Codex; Codex owns plan/status documents, diff review, adversarial checks,
 acceptance, and push/merge decisions. Use model `glm-5.2[1m]` when Codex assigns

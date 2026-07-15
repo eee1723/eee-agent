@@ -32,7 +32,7 @@
 
 - Push the five local commits currently ahead of `origin/feature/runtime` on `feature/runtime`; this sub-step is complete at `9293174`. Never force-push and never merge to `main` in this gate.
 - On the target computer, clone/fetch `origin/feature/runtime`, rebuild Python 3.11 dependencies with `uv sync --frozen --extra eval --python 3.11`, and do not transfer `.venv`, SQLite files, tokens, discovery files, logs, or `.env`.
-- Verify `uv lock --check`, `uv run --extra eval pytest -q`, `uv run python -m compileall -q eee_agent tests`, `git diff --check`, and a clean worktree. The expected current baseline is at least 1111 passed with no failures; machine-dependent environment probes may be skipped only if no new skip is introduced.
+- Verify `uv lock --check`, `uv run --extra eval pytest -q`, `uv run python -m compileall -q eee_agent houdini_side tests`, `git diff --check`, and a clean worktree. The expected current baseline is at least 1388 passed with no failures; machine-dependent environment probes may be skipped only if no new skip is introduced.
 
 ### 14.2 GLM-5.2 read-only continuity smoke
 
