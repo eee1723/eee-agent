@@ -537,3 +537,98 @@ async def test_no_retry_broadcast_or_background_task() -> None:
         f for f in frames if json.loads(f).get("kind") == "request"
     ]
     assert len(request_frames) == 1
+
+
+# ==========================================================================
+# Task 15-D: construct the client from the bridge.token / discovery handoff
+#
+# The client must build its in-memory identity from the state directory's
+# discovery (host/port + fingerprint) and ``bridge.token`` file, verify the
+# fingerprint before connecting, and never fall back to env/CLI/Runtime tokens.
+# ==========================================================================
+
+from pathlib import Path
+
+from eee_agent.houdini_bridge.auth import (
+    BRIDGE_TOKEN_FILENAME,
+    BridgeIdentityError,
+    BridgeTokenError,
+    write_bridge_identity_files,
+)
+
+
+def _publish_identity(state_dir: Path) -> "object":
+    from eee_agent.houdini_bridge.auth import create_bridge_identity
+
+    identity = create_bridge_identity()
+    write_bridge_identity_files(identity, state_dir, host="127.0.0.1", port=49152)
+    return identity
+
+
+def test_from_state_dir_loads_identity_and_connects() -> None:
+    import tempfile
+
+    async def body(state_dir: Path) -> None:
+        identity = _publish_identity(state_dir)
+        fake = FakeTransport(inbox=_ack_frame())
+        client = BridgeClient.from_state_dir(state_dir, transport_factory=lambda: fake)
+        await client.open()
+        # The hello frame carries the token loaded from the file (not an env/CLI value).
+        frames = _parse_frames(bytes(fake.outbox))
+        hello = json.loads(frames[0])
+        assert hello["token"] == identity.token
+        await client.close()
+
+    with tempfile.TemporaryDirectory() as d:
+        asyncio.run(body(Path(d)))
+
+
+def test_from_state_dir_missing_files_raises(tmp_path: Path) -> None:
+    with pytest.raises(BridgeTokenError):
+        BridgeClient.from_state_dir(tmp_path)
+
+
+def test_from_state_dir_rejects_fingerprint_mismatch(tmp_path: Path) -> None:
+    from eee_agent.houdini_bridge.auth import create_bridge_identity
+
+    identity = _publish_identity(tmp_path)
+    # Tamper the token file so its fingerprint no longer matches discovery.
+    other = create_bridge_identity()
+    (tmp_path / BRIDGE_TOKEN_FILENAME).write_bytes(other.token.encode("utf-8") + b"\n")
+    with pytest.raises(BridgeIdentityError) as exc:
+        BridgeClient.from_state_dir(tmp_path)
+    assert identity.token not in str(exc.value)
+    assert other.token not in str(exc.value)
+
+
+def test_from_state_dir_ignores_env_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    identity = _publish_identity(tmp_path)
+    # An env var must never be used as a fallback for the Bridge token.
+    monkeypatch.setenv("EEE_BRIDGE_TOKEN", "env-fallback-must-not-be-used")
+    monkeypatch.setenv("BRIDGE_TOKEN", "also-not-used")
+
+    async def body() -> None:
+        fake = FakeTransport(inbox=_ack_frame())
+        client = BridgeClient.from_state_dir(tmp_path, transport_factory=lambda: fake)
+        await client.open()
+        frames = _parse_frames(bytes(fake.outbox))
+        hello = json.loads(frames[0])
+        # Loaded strictly from the file, not the environment.
+        assert hello["token"] == identity.token
+        assert hello["token"] != "env-fallback-must-not-be-used"
+        await client.close()
+
+    asyncio.run(body())
+
+
+def test_from_state_dir_reads_host_port_from_discovery(tmp_path: Path) -> None:
+    from eee_agent.houdini_bridge.auth import create_bridge_identity
+
+    identity = create_bridge_identity()
+    write_bridge_identity_files(identity, tmp_path, host="127.0.0.1", port=51234)
+    client = BridgeClient.from_state_dir(tmp_path)
+    # The client binds to the loopback host/port advertised in discovery.
+    assert client.host == "127.0.0.1"
+    assert client.port == 51234

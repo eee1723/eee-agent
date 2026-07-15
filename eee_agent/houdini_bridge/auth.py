@@ -28,6 +28,27 @@ _MIN_PORT = 1
 _MAX_PORT = 65535
 _FINGERPRINT_HEX_CHARS = 16  # >= 12 hex characters of the SHA-256 digest
 _DISCOVERY_MODE = 0o644
+_TOKEN_MODE = 0o600
+
+# The full Bridge token lives ONLY in ``bridge.token``; discovery remains
+# fingerprint-only. The two filenames are deliberately distinct from the Runtime
+# handoff (``runtime.token`` / ``runtime.json``) so the credentials never cross.
+BRIDGE_TOKEN_FILENAME = "bridge.token"
+BRIDGE_DISCOVERY_FILENAME = "bridge.discovery.json"
+
+
+class BridgeTokenError(Exception):
+    """A bridge identity file is missing, empty, or malformed.
+
+    The message never contains the token itself.
+    """
+
+
+class BridgeIdentityError(Exception):
+    """A bridge identity could not be verified (e.g. fingerprint mismatch).
+
+    The message never contains the token itself.
+    """
 
 
 def _require_loopback(host: object) -> str:
@@ -105,12 +126,13 @@ def discovery_payload(
     }
 
 
-def _atomic_write(path: Path, data: bytes) -> None:
+def _atomic_write(path: Path, data: bytes, *, mode: int = _DISCOVERY_MODE) -> None:
     """Write ``data`` to ``path`` atomically via a same-dir temp + os.replace.
 
     Creates missing parent directories. On failure the temp file is removed and
     the final file is never partially written, so no token-bearing data leaks
-    to an orphaned file.
+    to an orphaned file. POSIX permissions (``mode``) are set on the temp file
+    before the replace.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(
@@ -123,7 +145,7 @@ def _atomic_write(path: Path, data: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         if os.name == "posix":
-            os.chmod(tmp_path, _DISCOVERY_MODE)
+            os.chmod(tmp_path, mode)
         os.replace(tmp_path, path)
     except BaseException:
         try:
@@ -155,3 +177,149 @@ def write_bridge_discovery(
         allow_nan=False,
     )
     _atomic_write(Path(path), text.encode("utf-8"))
+
+
+# --------------------------------------------------------------------------
+# Task 15-D: bridge.token handoff (full token via a separate same-dir file)
+# --------------------------------------------------------------------------
+
+
+def _fingerprint_for(token: str) -> str:
+    """First :data:`_FINGERPRINT_HEX_CHARS` hex chars of the token's SHA-256."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:_FINGERPRINT_HEX_CHARS]
+
+
+def write_bridge_token(path: Path | str, identity: BridgeIdentity) -> None:
+    """Atomically publish the full Bridge token to ``bridge.token``.
+
+    The file contains exactly the UTF-8 token text plus one final newline — no
+    JSON, metadata, or diagnostic text. On POSIX the file is mode ``0600``
+    (owner-only); on Windows it inherits the per-user state-directory ACL. A
+    failed write leaves no final file (atomic temp + ``os.replace``), and any
+    stale file at ``path`` is replaced.
+    """
+    data = identity.token.encode("utf-8") + b"\n"
+    _atomic_write(Path(path), data, mode=_TOKEN_MODE)
+
+
+def read_bridge_token(path: Path | str) -> str:
+    """Read and validate the Bridge token file at ``path``.
+
+    Returns the full token. Raises :class:`BridgeTokenError` (whose message
+    never contains the token) if the file is missing, empty, malformed (no
+    single trailing newline / extra content), or not valid UTF-8.
+    """
+    p = Path(path)
+    try:
+        data = p.read_bytes()
+    except FileNotFoundError as exc:
+        raise BridgeTokenError("bridge token file is missing") from exc
+    except OSError as exc:
+        raise BridgeTokenError("bridge token file is unreadable") from exc
+    if not data:
+        raise BridgeTokenError("bridge token file is empty")
+    if not data.endswith(b"\n"):
+        raise BridgeTokenError("bridge token file is malformed")
+    body = data[:-1]
+    try:
+        token = body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise BridgeTokenError("bridge token file is not valid UTF-8") from exc
+    if not token or "\n" in token:
+        raise BridgeTokenError("bridge token file is malformed")
+    return token
+
+
+def read_bridge_discovery(path: Path | str) -> dict[str, object]:
+    """Read and parse the Bridge discovery file at ``path``.
+
+    Raises :class:`BridgeTokenError` (no token in the message) if the file is
+    missing, unreadable, or not strict JSON. The discovery payload carries only
+    the fingerprint — never the full token.
+    """
+    p = Path(path)
+    try:
+        text = p.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:
+        raise BridgeTokenError("bridge discovery file is missing") from exc
+    except OSError as exc:
+        raise BridgeTokenError("bridge discovery file is unreadable") from exc
+    try:
+        payload = json.loads(text)
+    except ValueError as exc:
+        raise BridgeTokenError("bridge discovery file is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise BridgeTokenError("bridge discovery file is not a JSON object")
+    return payload
+
+
+def write_bridge_identity_files(
+    identity: BridgeIdentity,
+    state_dir: Path | str,
+    *,
+    host: str,
+    port: int,
+) -> None:
+    """Publish the token file then the discovery file (all-or-nothing).
+
+    The token file is written first; discovery follows only after the token
+    succeeds. If either atomic publication fails, both files are removed so no
+    partial identity (token without discovery, or a half-written file) is left
+    behind and no listener can be mistaken for a usable bridge. The original
+    exception propagates.
+    """
+    state = Path(state_dir)
+    token_path = state / BRIDGE_TOKEN_FILENAME
+    discovery_path = state / BRIDGE_DISCOVERY_FILENAME
+    try:
+        write_bridge_token(token_path, identity)
+        write_bridge_discovery(discovery_path, identity, host=host, port=port)
+    except BaseException:
+        for p in (token_path, discovery_path):
+            try:
+                p.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+        raise
+
+
+def remove_bridge_identity_files(state_dir: Path | str) -> None:
+    """Remove the bridge token and discovery files from ``state_dir``.
+
+    Idempotent: missing files are a no-op. Only the two identity files are
+    touched; any other file in the directory is left alone.
+    """
+    state = Path(state_dir)
+    for name in (BRIDGE_TOKEN_FILENAME, BRIDGE_DISCOVERY_FILENAME):
+        try:
+            (state / name).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+
+def load_bridge_identity(state_dir: Path | str) -> BridgeIdentity:
+    """Construct a Bridge identity from the discovery + ``bridge.token`` files.
+
+    Reads the discovery (fingerprint only) and the full token, then verifies
+    that the token's computed fingerprint matches the discovery fingerprint.
+    Raises :class:`BridgeIdentityError` on a mismatch (no token in the message)
+    and :class:`BridgeTokenError` on a missing/malformed file. The token never
+    comes from an env var, CLI arg, Runtime token, or SQLite row.
+    """
+    state = Path(state_dir)
+    discovery = read_bridge_discovery(state / BRIDGE_DISCOVERY_FILENAME)
+    advertised = discovery.get("token_fingerprint")
+    if not isinstance(advertised, str) or not advertised:
+        raise BridgeIdentityError("bridge discovery has no token fingerprint")
+    nonce = discovery.get("process_nonce")
+    if not isinstance(nonce, str) or not nonce:
+        raise BridgeIdentityError("bridge discovery has no process nonce")
+    token = read_bridge_token(state / BRIDGE_TOKEN_FILENAME)
+    actual = _fingerprint_for(token)
+    if not hmac.compare_digest(actual, advertised):
+        raise BridgeIdentityError("bridge token fingerprint does not match discovery")
+    return BridgeIdentity(token=token, fingerprint=actual, process_nonce=nonce)

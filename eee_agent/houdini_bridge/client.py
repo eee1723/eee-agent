@@ -19,9 +19,17 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from eee_agent.houdini_bridge.auth import BridgeIdentity
+from eee_agent.houdini_bridge.auth import (
+    BRIDGE_DISCOVERY_FILENAME,
+    BridgeIdentity,
+    BridgeIdentityError,
+    BridgeTokenError,
+    load_bridge_identity,
+    read_bridge_discovery,
+)
 from eee_agent.houdini_bridge.contracts import (
     MAX_MESSAGE_BYTES,
     PROTOCOL,
@@ -208,6 +216,45 @@ class BridgeClient:
         self._opened = False
         self._helloed = False
         self._closed = False
+
+    @property
+    def host(self) -> str:
+        return self._host
+
+    @property
+    def port(self) -> int:
+        return self._port
+
+    @classmethod
+    def from_state_dir(
+        cls,
+        state_dir: Path | str,
+        *,
+        transport_factory: "BridgeTransportFactory | None" = None,
+    ) -> "BridgeClient":
+        """Build a client from the discovery + ``bridge.token`` handoff files.
+
+        Reads the host/port from discovery and constructs the in-memory identity
+        from the token file, verifying the fingerprint BEFORE any connection is
+        opened. The token is never taken from an env var, CLI arg, Runtime
+        token, or SQLite row. Raises :class:`BridgeTokenError` /
+        :class:`BridgeIdentityError` if the handoff files are missing,
+        malformed, or fail fingerprint verification.
+        """
+        discovery = read_bridge_discovery(Path(state_dir) / BRIDGE_DISCOVERY_FILENAME)
+        host = discovery.get("host")
+        port = discovery.get("port")
+        if type(host) is not str or host != _LOOPBACK_HOST:
+            raise BridgeTokenError("bridge discovery host must be 127.0.0.1")
+        if type(port) is not int or port < _MIN_PORT or port > _MAX_PORT:
+            raise BridgeTokenError("bridge discovery port is invalid")
+        identity = load_bridge_identity(state_dir)
+        return cls(
+            host=host,
+            port=port,
+            identity=identity,
+            transport_factory=transport_factory,
+        )
 
     # -- lifecycle --------------------------------------------------------
 

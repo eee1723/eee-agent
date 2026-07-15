@@ -28,12 +28,31 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from collections.abc import Sequence
+from pathlib import Path
 
+from eee_agent.houdini_bridge.auth import (
+    BridgeIdentity,
+    remove_bridge_identity_files,
+    validate_bridge_token,
+    write_bridge_identity_files,
+)
 from eee_agent.houdini_bridge.contracts import (
+    MAX_MESSAGE_BYTES,
+    PROTOCOL,
+    BridgeError,
+    BridgeResponse,
     SceneBinding,
     SceneQueryResult,
     SelectedNode,
+    parse_request,
+)
+from eee_agent.houdini_bridge.queue import (
+    MainThreadReadQueue,
+    QueueItemCancelled,
+    QueueItemExpired,
+    QueueRejected,
 )
 
 _HIP_UNSAVED_SENTINEL = "untitled"
@@ -318,3 +337,324 @@ class HoudiniSceneAdapter:
             allow_nan=False,
         )
         return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# ==========================================================================
+# Task 15-D: loopback read-only bridge server
+#
+# The connection handler is a pure ``async def`` over asyncio reader/writer
+# objects. It deliberately imports neither ``asyncio`` nor ``threading`` and
+# never binds a socket itself: the owning process (the Houdini main thread, or
+# a test) calls ``asyncio.start_server(server.handle_connection, host, port)``
+# and drives ``queue.pump_one()`` from its main-thread event callback. The
+# network loop performs transport I/O only; every HOM read happens inside the
+# queue operation, on the pump thread. Only ``scene.query`` is served; no HOM
+# object is ever returned and the HIP is never mutated.
+# ==========================================================================
+
+
+_HEADER_LEN = 4
+# Sentinel request_id for envelopes where the inbound frame could not be parsed
+# (the real request_id is unknowable). A well-formed client always sends a valid
+# request_id; a mismatch surfaces as bridge.invalid_request client-side.
+_MALFORMED_REQUEST_ID = "_bridge_malformed"
+
+
+class _ConnectionClosed(Exception):
+    """The client closed the connection (EOF / socket error)."""
+
+
+class _FrameError(Exception):
+    """A frame length is invalid (zero / oversize) — reject before the payload."""
+
+
+class _DuplicateKeyError(ValueError):
+    """Raised by the JSON object_pairs_hook on any duplicate object key."""
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    seen: set[str] = set()
+    for key, _value in pairs:
+        if key in seen:
+            raise _DuplicateKeyError("duplicate object key")
+        seen.add(key)
+    return dict(pairs)
+
+
+def _loads_object(data: bytes) -> dict[str, object] | None:
+    """Strictly decode a frame to a dict, or ``None`` if it is not valid."""
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    try:
+        obj = json.loads(text, object_pairs_hook=_reject_duplicate_keys)
+    except (_DuplicateKeyError, ValueError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _canonical_dumps(obj: object) -> str:
+    return json.dumps(
+        obj,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+class BridgeServer:
+    """Read-only, loopback, token-authenticated bridge server.
+
+    Lifecycle is split: identity publication and shutdown are synchronous
+    methods owned by this object; the TCP listener is owned by the host process
+    (which calls ``asyncio.start_server(server.handle_connection, ...)``). The
+    handler authenticates the first hello frame, parses requests through the
+    frozen ``scene.query``-only :func:`parse_request`, submits the operation to
+    a :class:`MainThreadReadQueue`, awaits its result, and serializes a frozen
+    :class:`BridgeResponse`. It never dispatches arbitrary names, never returns a
+    HOM object, and never mutates the scene.
+    """
+
+    def __init__(
+        self,
+        *,
+        adapter: HoudiniSceneAdapter,
+        identity: BridgeIdentity,
+        state_dir: Path | str,
+        queue: MainThreadReadQueue | None = None,
+    ) -> None:
+        if not isinstance(adapter, HoudiniSceneAdapter):
+            raise TypeError("adapter must be a HoudiniSceneAdapter")
+        if not isinstance(identity, BridgeIdentity):
+            raise TypeError("identity must be a BridgeIdentity")
+        self._adapter = adapter
+        self._identity = identity
+        self._state_dir = Path(state_dir)
+        self._queue = queue if queue is not None else MainThreadReadQueue()
+        self._closed = False
+        self._writers: list[object] = []
+
+    # -- identity publication ------------------------------------------------
+
+    def publish_identity(self, *, host: str, port: int) -> None:
+        """Atomically publish ``bridge.token`` then discovery to ``state_dir``.
+
+        Raises (and leaves no partial identity file) if either publication
+        fails. Must be called before the listener is advertised.
+        """
+        if self._closed:
+            raise RuntimeError("BridgeServer is closed")
+        write_bridge_identity_files(
+            self._identity, self._state_dir, host=host, port=port
+        )
+
+    # -- shutdown ------------------------------------------------------------
+
+    def close(self) -> None:
+        """Stop serving, resolve queued work, release the adapter, remove files.
+
+        Idempotent. Does not save, clear, mutate, or export the HIP. The owning
+        process closes the TCP listener separately (``server.close()`` cannot,
+        because it does not own it).
+        """
+        if self._closed:
+            return
+        self._closed = True
+        # Resolve any handler awaiting a queue future so it can finish.
+        self._queue.shutdown()
+        # Nudge tracked connection writers so their handlers can wind down.
+        for writer in list(self._writers):
+            try:
+                writer.close()  # type: ignore[call-arg]
+            except Exception:  # noqa: BLE001 — closing must never raise
+                pass
+        self._writers = []
+        # Release the scene-epoch callback (non-mutating to the scene).
+        self._adapter.close()
+        # Remove the identity handoff files.
+        remove_bridge_identity_files(self._state_dir)
+
+    # -- connection handler --------------------------------------------------
+
+    async def handle_connection(self, reader: object, writer: object) -> None:
+        """Serve one loopback connection: hello handshake then request loop."""
+        if self._closed:
+            self._safe_close(writer)
+            return
+        self._writers.append(writer)
+        try:
+            if not await self._handshake(reader, writer):
+                return  # auth/protocol failure: ack already sent, then close
+            while not self._closed:
+                try:
+                    frame = await self._recv_frame(reader)
+                except _ConnectionClosed:
+                    return
+                except _FrameError:
+                    await self._send(
+                        writer,
+                        self._error_envelope(
+                            _MALFORMED_REQUEST_ID,
+                            code="bridge.invalid_request",
+                            category="protocol",
+                            message_for_user="The bridge request frame is invalid.",
+                        ),
+                    )
+                    return
+                response = await self._serve(frame)
+                await self._send(writer, response)
+        finally:
+            self._safe_close(writer)
+            if writer in self._writers:
+                self._writers.remove(writer)
+
+    async def _handshake(self, reader: object, writer: object) -> bool:
+        """Read + validate the hello frame; send the ack. Returns auth success."""
+        try:
+            hello_bytes = await self._recv_frame(reader)
+        except (_ConnectionClosed, _FrameError):
+            return False
+        ok = self._validate_hello(hello_bytes)
+        ack = {"protocol": PROTOCOL, "kind": "hello", "ok": ok}
+        await self._send(writer, _canonical_dumps(ack).encode("utf-8"))
+        return ok
+
+    def _validate_hello(self, hello_bytes: bytes) -> bool:
+        obj = _loads_object(hello_bytes)
+        if obj is None:
+            return False
+        if obj.get("protocol") != PROTOCOL:
+            return False
+        if obj.get("kind") != "hello":
+            return False
+        return validate_bridge_token(self._identity, obj.get("token"))
+
+    async def _serve(self, frame_bytes: bytes) -> bytes:
+        """Parse + queue one request frame and return the response envelope bytes."""
+        try:
+            request = parse_request(frame_bytes)
+        except (TypeError, ValueError):
+            return self._error_envelope(
+                _MALFORMED_REQUEST_ID,
+                code="bridge.invalid_request",
+                category="protocol",
+                message_for_user="The bridge request is not valid.",
+            )
+        request_id = request.request_id
+        payload = request.payload
+        include_selection = bool(payload.get("include_selection", False))
+        include_geometry_stats = bool(payload.get("include_geometry_stats", False))
+        node_paths = list(payload.get("node_paths", ()))
+        expected_scene_epoch = request.scene_epoch
+
+        def operation() -> SceneQueryResult:
+            return self._adapter.scene_query(
+                include_selection=include_selection,
+                node_paths=node_paths,
+                include_geometry_stats=include_geometry_stats,
+                expected_scene_epoch=expected_scene_epoch,
+            )
+
+        deadline_monotonic = time.monotonic() + request.deadline_ms / 1000.0
+        try:
+            future = self._queue.submit(
+                request_id, operation, deadline_monotonic=deadline_monotonic
+            )
+            result = await future  # type: ignore[func-returns-value]
+        except HoudiniAdapterError as exc:
+            return self._error_envelope(
+                request_id,
+                code=exc.code,
+                category=exc.category,
+                message_for_user=exc.message_for_user,
+                retryable=exc.retryable,
+                technical_detail_ref=exc.technical_detail_ref,
+            )
+        except QueueItemExpired:
+            return self._error_envelope(
+                request_id,
+                code="bridge.deadline_exceeded",
+                category="deadline",
+                message_for_user="The bridge request exceeded its deadline.",
+                retryable=True,
+            )
+        except QueueItemCancelled:
+            return self._error_envelope(
+                request_id,
+                code="bridge.cancelled",
+                category="cancelled",
+                message_for_user="The bridge request was cancelled.",
+            )
+        except QueueRejected:
+            return self._error_envelope(
+                request_id,
+                code="bridge.not_available",
+                category="not_available",
+                message_for_user="The bridge is no longer available.",
+                retryable=True,
+            )
+        except Exception:  # noqa: BLE001 — never leak a traceback to the client
+            return self._error_envelope(
+                request_id,
+                code="bridge.internal_failure",
+                category="internal",
+                message_for_user="The bridge encountered an internal failure.",
+            )
+        response = BridgeResponse(request_id=request_id, result=result, error=None)
+        return response.to_json().encode("utf-8")
+
+    # -- framed transport (reader/writer only; no asyncio import) ------------
+
+    async def _recv_frame(self, reader: object) -> bytes:
+        """Read one length-prefixed frame, rejecting bad lengths before payload."""
+        try:
+            header = await reader.readexactly(_HEADER_LEN)  # type: ignore[union-attr]
+        except (EOFError, OSError):
+            raise _ConnectionClosed()
+        length = int.from_bytes(header, "big")
+        if length <= 0 or length > MAX_MESSAGE_BYTES:
+            raise _FrameError("invalid frame length")
+        try:
+            payload = await reader.readexactly(length)  # type: ignore[union-attr]
+        except (EOFError, OSError):
+            raise _ConnectionClosed()
+        return payload
+
+    async def _send(self, writer: object, payload_bytes: bytes) -> None:
+        header = len(payload_bytes).to_bytes(_HEADER_LEN, "big")
+        writer.write(header + payload_bytes)  # type: ignore[union-attr]
+        try:
+            await writer.drain()  # type: ignore[union-attr]
+        except OSError:
+            pass
+
+    def _safe_close(self, writer: object) -> None:
+        try:
+            writer.close()  # type: ignore[call-arg]
+        except Exception:  # noqa: BLE001 — closing must never raise
+            pass
+
+    def _error_envelope(
+        self,
+        request_id: str,
+        *,
+        code: str,
+        category: str,
+        message_for_user: str,
+        retryable: bool = False,
+        technical_detail_ref: str | None = None,
+    ) -> bytes:
+        response = BridgeResponse(
+            request_id=request_id,
+            result=None,
+            error=BridgeError(
+                code=code,
+                category=category,
+                message_for_user=message_for_user,
+                retryable=retryable,
+                technical_detail_ref=technical_detail_ref,
+            ),
+        )
+        return response.to_json().encode("utf-8")
