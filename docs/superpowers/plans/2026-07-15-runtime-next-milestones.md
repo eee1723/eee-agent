@@ -60,11 +60,13 @@
 
 **Dependency:** Task 14 accepted, or an explicit decision to proceed with manual smoke pending.
 
-**Current state:** The read-only design is approved and recorded in
-`docs/superpowers/specs/2026-07-15-secure-houdini-bridge-readonly-design.md`.
-The executable task breakdown is
-`docs/superpowers/plans/2026-07-15-secure-houdini-bridge-readonly.md`.
-No Claude implementation prompt has been issued yet.
+**Current state:** Task 15-A (strict DTO and error contracts) is Codex-accepted
+at `4c22d45`. It delivered 97 focused contract tests and the Task 15-A
+regression slice passed 261 tests; the fresh full offline suite passed 1208
+tests. Task 15-B (Bridge identity and authenticated client) is next. The
+read-only design and executable breakdown are recorded in
+`docs/superpowers/specs/2026-07-15-secure-houdini-bridge-readonly-design.md`
+and `docs/superpowers/plans/2026-07-15-secure-houdini-bridge-readonly.md`.
 
 **Purpose:** Replace the legacy unrestricted bridge path with a typed, loopback-only, main-thread-aware read-only boundary. This task is specification-first because the Runtime spec explicitly deferred it; write effects remain in Task 16.
 

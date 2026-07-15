@@ -30,8 +30,12 @@ Generated: 2026-07-15 (Asia/Shanghai)
   its executable plan is
   `docs/superpowers/plans/2026-07-15-secure-houdini-bridge-readonly.md`.
   No implementation has started and no Claude prompt has been issued.
-- The last pushed Runtime delivery tip is `47b006b`; subsequent Task 15
-  design/plan commits are Codex-owned local documentation until pushed.
+- Task 15-A strict DTO/error contracts are Codex-accepted at `4c22d45`.
+  Focused contract tests: 97 passed; Task 15-A regression slice: 261 passed;
+  fresh full offline suite: 1208 passed. No transport, queue, Houdini-side
+  adapter, UI, or scene-write code has started.
+- The latest local tip is `4c22d45`; it is ready to push after this status
+  update.
 
 Do not merge this branch to `main` until the three accepted commits are pushed
 and the final integration decision is made. Manual GLM/Houdini acceptance is
@@ -284,6 +288,26 @@ Codex must still issue a bounded prompt before any implementation.
 The authoritative checklist and the Task 15–19 roadmap are in
 `docs/superpowers/plans/2026-07-15-runtime-next-milestones.md`.
 
+## Task 15-A: Accepted strict DTO and error contracts (`4c22d45`)
+
+Independent verification confirmed:
+
+```text
+Contract suite:              97 passed
+Task 15-A regression slice:  261 passed
+Full offline suite:          1208 passed
+uv lock --check:             exit 0
+compileall:                  exit 0
+git diff --check:            exit 0
+```
+
+The commit changes exactly `eee_agent/houdini_bridge/__init__.py`,
+`eee_agent/houdini_bridge/contracts.py`, and
+`tests/runtime/test_houdini_bridge_contracts.py`. It imports neither `hou` nor
+`rpyc`, reuses the Runtime canonical JSON freezer, and exposes only frozen
+read-only DTOs. Task 15-B is the next implementation task; no Claude prompt
+for it has been issued yet.
+
 ## Remaining Delivery Sequence
 
 1. Push completed: `feature/runtime` is at `9293174` on GitHub.
@@ -293,8 +317,9 @@ The authoritative checklist and the Task 15–19 roadmap are in
    from the Runtime plan, recording external-service failures separately.
 4. Decide whether to merge `feature/runtime` into `main`; do not merge during
    the migration without an explicit integration decision.
-5. Only after Task 14 is accepted, issue a separate Codex-approved Task 15
-   prompt for the Secure HoudiniBridge design/contract slice.
+5. Task 15-A is already accepted under the explicit external-smoke exception;
+   issue a separate Codex-approved Task 15-B prompt only after reviewing this
+   handoff and keeping the scope to Bridge identity/client behavior.
 
 ## New Computer Restore Procedure
 
