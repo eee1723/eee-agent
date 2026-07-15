@@ -39,7 +39,10 @@ Not included:
 The Runtime process owns session/run/event persistence and may request a read
 from the Bridge. The Houdini process owns all `hou` access and the scene epoch.
 The bridge adapter is the only transport boundary. Neither Runtime nor the
-agent graph imports `hou` or receives a live HOM object.
+agent graph imports `hou` or receives a live HOM object. Task 15 uses a
+standard-library length-prefixed JSON stream on loopback with a first-frame
+Bridge-token handshake; the existing unauthenticated rpyc server remains
+legacy-only and is not reused by the secure bridge.
 
 The existing unrestricted `hrpyc` path remains a migration-only legacy path. It
 must not be selected by Runtime or any new panel code. Existing CLI behavior is

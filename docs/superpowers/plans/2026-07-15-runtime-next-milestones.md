@@ -54,21 +54,27 @@
 
 - Append dated evidence and any external-service failure to the handoff; do not call a failed external smoke a code failure without a reproducible local symptom.
 - If all checks pass, mark Task 14 `Complete, Codex accepted`, then decide separately whether to merge `feature/runtime` into `main`.
-- If a check fails, create exactly one follow-up defect task with: RED command, exact failure, authorized files, regression test, and acceptance commands. Do not begin Task 15 until that fix is accepted.
+- If a check fails, create exactly one follow-up defect task with: RED command, exact failure, authorized files, regression test, and acceptance commands. Do not begin Task 15 implementation until that fix is accepted or Codex explicitly records the external-smoke exception and authorizes the read-only foundation slice.
 
 ## Task 15: Secure HoudiniBridge contract and transport
 
 **Dependency:** Task 14 accepted, or an explicit decision to proceed with manual smoke pending.
 
-**Purpose:** Replace the legacy unrestricted bridge path with a typed, loopback-only, main-thread-aware read/write boundary. This task is specification-first because the Runtime spec explicitly deferred it.
+**Current state:** The read-only design is approved and recorded in
+`docs/superpowers/specs/2026-07-15-secure-houdini-bridge-readonly-design.md`.
+The executable task breakdown is
+`docs/superpowers/plans/2026-07-15-secure-houdini-bridge-readonly.md`.
+No Claude implementation prompt has been issued yet.
+
+**Purpose:** Replace the legacy unrestricted bridge path with a typed, loopback-only, main-thread-aware read-only boundary. This task is specification-first because the Runtime spec explicitly deferred it; write effects remain in Task 16.
 
 **First deliverable:** Codex-approved design addendum covering DTO schemas, bridge token separation, request IDs, capability names, scene epoch, queue semantics, timeout/cancellation, error taxonomy, and rollback behavior. No implementation starts before that addendum is reviewed.
 
 **Implementation slices (each a separate Claude prompt/commit):**
 
-1. Restricted DTOs and compatibility parser: typed `scene.query` (including the current Houdini selection), `workspace.inspect`, `change_set.preview`, `validate`, `capture`, and `cancel`; reject unknown fields, stale scene epoch, wrong token, and oversized payloads.
+1. Restricted DTOs and compatibility parser: typed `scene.query` (including the current Houdini selection); reject unknown fields, stale scene epoch, wrong token, and oversized payloads.
 2. Houdini main-thread queue: bounded request queue, deterministic request completion, cancellation boundaries, and no direct background-thread `hou` calls.
-3. SceneBinding and WorkspaceManifest: scene epoch increments on load/clear, owned-root identity is mirrored in userData, and external nodes are read-only by policy.
+3. SceneBinding: scene epoch increments on load/clear, HIP identity is bounded, and all returned node facts are read-only.
 4. Bridge lifecycle and recovery: separate Bridge token, authenticated loopback transport, bounded shutdown, stale-request cleanup, and process-restart diagnostics.
 
 **Acceptance gate:** pure Python contract tests, hython/Houdini integration tests, unauthorized/wrong-epoch tests, cancellation and queue-order tests, and proof that legacy unrestricted entry points are not used by Runtime by default.

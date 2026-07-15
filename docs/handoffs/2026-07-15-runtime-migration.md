@@ -25,9 +25,13 @@ Generated: 2026-07-15 (Asia/Shanghai)
 - Task 14 is in progress. The accepted branch has been pushed; clean restore
   and manual Runtime/Houdini acceptance remain. The detailed gate is in
   `docs/superpowers/plans/2026-07-15-runtime-next-milestones.md`.
-- The source worktree is clean and `feature/runtime` is synchronized with
-  `origin/feature/runtime` at `9293174`; all six Runtime delivery commits are
-  now pushed.
+- Task 15 read-only Bridge design is approved and recorded in
+  `docs/superpowers/specs/2026-07-15-secure-houdini-bridge-readonly-design.md`;
+  its executable plan is
+  `docs/superpowers/plans/2026-07-15-secure-houdini-bridge-readonly.md`.
+  No implementation has started and no Claude prompt has been issued.
+- The last pushed Runtime delivery tip is `47b006b`; subsequent Task 15
+  design/plan commits are Codex-owned local documentation until pushed.
 
 Do not merge this branch to `main` until the three accepted commits are pushed
 and the final integration decision is made. Manual GLM/Houdini acceptance is
@@ -273,9 +277,9 @@ manual acceptance activities and have not been run by the test suite.
 Task 14 is intentionally a delivery/acceptance gate rather than speculative
 production code. It covers pushing the accepted branch, clean restore on the
 next computer, the manual GLM-5.2 read-only continuity smoke, the manual
-Houdini read-only smoke, and dated evidence. Claude Code must not start Task 15
-or invent a fix from a manual observation; Codex first records a reproducible
-RED symptom and issues a bounded follow-up prompt if implementation is needed.
+Houdini read-only smoke, and dated evidence. The user has explicitly authorized
+the Task 15 read-only foundation while those external smokes remain pending;
+Codex must still issue a bounded prompt before any implementation.
 
 The authoritative checklist and the Task 15–19 roadmap are in
 `docs/superpowers/plans/2026-07-15-runtime-next-milestones.md`.
@@ -362,8 +366,10 @@ Read, in order:
 Run `uv sync --frozen --extra eval --python 3.11`, `uv lock --check`, the full
 pytest suite, compileall, and `git status` before any new work.
 
-Do not modify production code, start Task 15, or run a manual GLM/Houdini smoke
-without following the Task 14 checklist and a current Codex instruction.
+Do not modify production code or start Task 16/17 without a current Codex
+instruction. Task 15 read-only implementation is authorized only through the
+new executable plan and a single Claude prompt; manual GLM/Houdini smoke still
+follows the Task 14 checklist.
 Claude Code is responsible only for the concrete implementation task supplied
 by Codex; Codex owns plan/status documents, diff review, adversarial checks,
 acceptance, and push/merge decisions. Use model `glm-5.2[1m]` when Codex assigns
