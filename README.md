@@ -18,9 +18,10 @@ Houdini 21 process
         ▲ stdio JSON-lines
         │
 Agent process (this package, .venv, Python 3.11 — uv-managed)
- └─ deepagents + 25 Houdini tools ─ rpyc ─▶ Houdini
+ └─ deepagents + 27 tools ─ rpyc ─▶ Houdini  (25 Houdini tools + 2 read-only KB tools)
         └─ provider registry (DeepSeek V4 via official Anthropic endpoint)
         └─ reliability middleware: read-back trim · loop guard · tool-error trace · compact tool
+        └─ Houdini docs knowledge graph (offline SQLite/FTS5 cache, read-only query tools)
         └─ normalized provider events → legacy stdio JSON-lines
         └─ optional tracing → Phoenix (http://localhost:6006)  [deps not in Foundation lock]
 ```
@@ -42,8 +43,11 @@ eee_agent/
   cli.py               selftest | prompt | stdio | versions   (stdio = multi-mode JSON-lines)
   harness.py           disable Deep Agents' implicit general-purpose/task (Foundation)
   bridge/              rpyc client + plain-Python serialization (no proxies leak)
-  tools/               25 @tool functions
+  tools/               27 @tool functions
     scene.py  nodes.py  vex.py  compose.py  inspect.py  procedural.py (Phase C)
+    knowledge.py        read-only KB query tools (search_houdini_knowledge / get_houdini_knowledge)
+  knowledge/            offline docs knowledge graph: parsers · graph · store · service · build
+                       (SQLite/FTS5 cache; read-only query; no RPC/GUI at query time)
   core/                Foundation contracts: ids · errors · artifacts · events · versioning
   providers/           Foundation: contracts · registry · secrets · deepseek_v4 · anthropic
                        · openai · factory · events · normalize
@@ -116,6 +120,57 @@ copy .env.example .env   # fill DEEPSEEK_API_KEY  (or switch EEE_LLM_PROVIDER)
    Foundation**; `openinference` is not in `uv.lock` (later milestone). See `CLAUDE.md`
    gotcha #7.
 
+## Houdini documentation knowledge graph (offline, read-only)
+
+The agent can query a **local, offline** knowledge graph built from the docs that
+ship with the Houdini install (SOP nodes, VEX functions, `hou.*`
+classes/functions/methods + the 4 project skills). It is a single versioned
+**SQLite + FTS5** cache — no Neo4j, no embeddings, no vector DB, no new runtime
+deps, and the query path never touches the rpyc bridge.
+
+**Build it explicitly** (needs only `<HFS>/bin/hython.exe`, not the bridge or GUI;
+does NOT auto-build on first query):
+
+```powershell
+# to the default %LOCALAPPDATA% location (EEE_KB_PATH overrides it):
+uv run python -m eee_agent.knowledge.build --hfs 'D:\houdini'
+# to an explicit path:
+uv run python -m eee_agent.knowledge.build --hfs 'D:\houdini' --out <path>.sqlite3
+# synthetic corpus, no HFS — used by CI/smoke:
+uv run python -m eee_agent.knowledge.build --selftest
+```
+
+- **Default cache:** `%LOCALAPPDATA%\EEEAgent\cache\knowledge\houdini\21.0.440\knowledge.sqlite3`
+  — machine-local, rebuildable, **never committed** (a repo-local
+  `.knowledge-cache/` override is gitignored).
+- **Env overrides:** `EEE_KB_ENABLED` (strict bool, default `true`; only gates the
+  query tools), `EEE_KB_PATH` (absolute, or relative to the repo root — never
+  Houdini's cwd), `EEE_HFS` (source HFS for build/stale-check).
+- **Query tools** (read-only, never raise; disabled returns `kb_disabled`):
+  - `search_houdini_knowledge` — exact/alias symbol resolution + filtered
+    free-text + one-hop relations; returns summaries, never full text.
+  - `get_houdini_knowledge` — bounded body/section read (default 4 KB, cap 8 KB).
+- **Authority:** the cache documents **what the official Houdini docs record**. It
+  does NOT confirm a node is creatable here or its real parms — before creating a
+  node the agent still calls `describe_node_type(type)`; **live introspection is
+  final**, and a mismatch reports the cache as possibly stale.
+- **Stale / rebuild:** a read-only fingerprint check compares the current HFS
+  source archives to the manifest and returns `kb_stale` on change; rebuild to
+  refresh (atomic swap, never breaks the previous cache on failure).
+- **Tests:** default suite is HFS-independent. The real-corpus contract
+  (`tests/knowledge/test_hfs_contract.py`) skips unless `EEE_RUN_HOUDINI_KB_TESTS=true`:
+  ```powershell
+  $env:EEE_RUN_HOUDINI_KB_TESTS='true'; $env:EEE_HFS='D:\houdini'
+  uv run --extra eval pytest tests/knowledge/test_hfs_contract.py -m houdini_kb -v
+  Remove-Item Env:EEE_RUN_HOUDINI_KB_TESTS
+  ```
+  Golden retrieval evaluator (against any built cache):
+  ```powershell
+  uv run --extra eval python eval/knowledge/run_eval.py --kb <path>.sqlite3
+  ```
+- **No Runtime integration on this branch** — see
+  `docs/handoffs/2026-07-14-houdini-knowledge-graph.md` for the merge checklist.
+
 ## Status
 
 | Area | State |
@@ -127,6 +182,7 @@ copy .env.example .env   # fill DEEPSEEK_API_KEY  (or switch EEE_LLM_PROVIDER)
 | Runtime UI | ✅ PySide6 panel (dark, tool cards / todos / metrics / send-stop) |
 | Observability | ✅ Phoenix one-click launcher + tool-error spans (runtime deps return in a later milestone) |
 | **Foundation milestone** | ✅ done — uv-locked deps, core contracts, provider registry (DeepSeek via official Anthropic endpoint), normalized events, explicit harness (no implicit `task`), `cli versions`. 369 tests pass. See `docs/handoffs/2026-07-13-foundation-migration.md` |
+| **Houdini docs knowledge graph** | ✅ done (independent branch) — offline SQLite/FTS5 cache + 2 read-only tools; 21.0.440 corpus contract + golden retrieval pass; no Runtime integration yet. See `docs/handoffs/2026-07-14-houdini-knowledge-graph.md` |
 | **Live end-to-end agent run on current machine** | ⏳ pending — bridge must be started in Houdini, then `selftest` + a `prompt` |
 | Runtime milestone (Session/Run, SQLite, WebSocket) | ⏳ next — plan not yet written (spec §18.2) |
 | B2 — per-component subagents | ⏳ deferred (largest change; after model swap) |

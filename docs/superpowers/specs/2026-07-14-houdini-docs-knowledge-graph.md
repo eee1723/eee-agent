@@ -1,6 +1,6 @@
 # Houdini 文档知识图谱（按需查询）设计
 
-- 状态：已批准，实施计划已制定
+- 状态：已实现（独立分支，待 Runtime 集成）
 - 日期：2026-07-14
 - 开发分支：`feature/houdini-knowledge-graph`
 - 开发基线：`feature/foundation`（不依赖 `feature/runtime`）

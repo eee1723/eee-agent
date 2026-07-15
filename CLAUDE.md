@@ -121,13 +121,68 @@ trimming, on-demand compaction — but the strongest single lever remains the MO
 Claude is the recommended swap for reliability (one-line via
 `EEE_LLM_PROVIDER=anthropic`).
 
+## Houdini documentation knowledge graph (read-only, offline)
+An independent `feature/houdini-knowledge-graph` milestone adds an **offline,
+read-only** knowledge graph over the docs that ship in the local Houdini install
+(SOP nodes, VEX functions, `hou.*` classes/functions/methods + the 4 project
+skills). Built once into a single versioned **SQLite + FTS5** cache; no Neo4j,
+no embeddings, no vector DB, no new runtime deps.
+
+- **Build it explicitly** (does NOT auto-build on first query; does NOT need the
+  RPC bridge or GUI, only `<HFS>/bin/hython.exe`):
+  ```bash
+  uv run python -m eee_agent.knowledge.build --hfs 'D:\houdini' --out <path>.sqlite3
+  uv run python -m eee_agent.knowledge.build --selftest   # synthetic corpus, no HFS
+  ```
+- **Default cache location:**
+  `%LOCALAPPDATA%\EEEAgent\cache\knowledge\houdini\21.0.440\knowledge.sqlite3`
+  (shared, rebuildable, machine-local — **never committed, never inside the
+  package**). Override via env: `EEE_KB_ENABLED` (strict bool, default `true`,
+  only gates the query tools), `EEE_KB_PATH` (absolute, or relative to repo
+  root — never Houdini's cwd), `EEE_HFS` (source HFS for build/stale-check).
+  A repo-local `.knowledge-cache/` override is gitignored.
+- **Two read-only Agent tools** (`eee_agent/tools/knowledge.py`, registered after
+  the 25 Houdini tools → 27 project tools, no implicit `task`):
+  - `search_houdini_knowledge(symbol|query, kinds/context/tag/superclass,
+    predicate/direction, include_historical, limit)` — exact/alias symbol
+    resolution + filtered FTS + one-hop relations; never returns full text.
+  - `get_houdini_knowledge(entity_id, section, max_chars)` — bounded body/section
+    read (default 4 KB, hard cap 8 KB); `entity_id` is a cache PK, never a path.
+  Both construct `KnowledgeService` lazily, convert DTOs via `to_dict()`, and
+  **never raise** (expected/unexpected failures → stable `{ok:false, code,
+  error}`). `get_houdini_knowledge` is deliberately NOT in `READBACK_TOOLS`
+  (different entities' bodies aren't interchangeable).
+- **Authority boundary (critical):** the cache documents **what the official
+  Houdini docs record** — it does NOT prove a node is creatable here or reveal
+  its real parms. Before creating a node the agent MUST still call
+  `describe_node_type(type)`; **live introspection is the final authority**, and
+  if it disagrees with the cache the cache is reported as possibly stale.
+- **Stale / rebuild:** the query path is read-only (`mode=ro`, `query_only=ON`);
+  a fingerprint stale-checker compares the three current HFS source archives to
+  the stored manifest and returns `KB_STALE` on mismatch (never invents
+  staleness — schema/integrity stay owned by the service). To refresh, just
+  rebuild; the build atomically `os.replace`-swaps the cache and never breaks the
+  previous one on failure.
+- **Tests are HFS-independent by default.** The real-corpus contract
+  (`tests/knowledge/test_hfs_contract.py`, marker `houdini_kb`) skips unless
+  `EEE_RUN_HOUDINI_KB_TESTS=true`; run it with `EEE_HFS` set. The golden
+  evaluator (`eval/knowledge/run_eval.py`, 46 cases) runs against any built
+  cache: `uv run --extra eval python eval/knowledge/run_eval.py --kb <path>`.
+- **No Runtime integration on this branch.** Wiring (`read_only_tools`
+  allowlist, RuntimePaths shared cache, startup KB status, Run snapshot
+  manifest, restricted Research Capability, combined contract tests) is a later,
+  separately-reviewed merge — see
+  `docs/handoffs/2026-07-14-houdini-knowledge-graph.md`.
+
 ## Layout
 `eee_agent/` — **core/** (Foundation: ids, errors, artifacts, events, versioning) ·
 **providers/** (Foundation: contracts, registry, secrets, deepseek_v4, anthropic,
 openai, factory, events, normalize) · **harness.py** (Foundation: disable implicit
 general-purpose subagent) · config, model, app, cli · `bridge/` (rpyc client +
-plain-Python serialization, no proxies leak) · `tools/` (25 @tool functions:
-scene/nodes/vex/compose/inspect/procedural) · context_store, context_trim, loop_guard,
+plain-Python serialization, no proxies leak) · `tools/` (27 @tool functions:
+scene/nodes/vex/compose/inspect/procedural + the two read-only `knowledge` KB
+tools) · **knowledge/** (offline docs graph: parse_*/graph/store/service/build +
+SQLite/FTS5 cache — see section above) · context_store, context_trim, loop_guard,
 tool_error_trace, workflow_middleware, tracing, system_prompt · `skills/`
 (parametric-building, vex-patterns, sop-cookbook, procedural-components) ·
 `memory/AGENTS.md` (agent conventions, in-repo) · `houdini_side/` (start_rpc,
