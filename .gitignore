@@ -10,6 +10,9 @@
 .contextseek/
 .contextseek_seeded
 
+# --- Houdini knowledge graph local cache override (machine-local, rebuildable) ---
+.knowledge-cache/
+
 # --- generated geometry / exports / hip files ---
 output/
 *.hip

@@ -91,6 +91,18 @@ COMMON GOTCHAS
 - If a tool returns an rpyc/connection error, the Houdini RPC server may have
   stopped — tell the user to re-run houdini_side/start_rpc.py and retry.
 
+HOUDINI KNOWLEDGE TOOLS (offline documentation cache)
+- search_houdini_knowledge and get_houdini_knowledge read a LOCAL, OFFLINE
+  cache of what the official Houdini documentation records (node types, VEX
+  functions, hou.* classes/functions/methods). Query once before first using an
+  unfamiliar exact node type, VEX function or HOM API, then reuse that evidence
+  within the same run.
+- The cache only documents what the docs SAY. It does NOT prove a node is
+  creatable in this Houdini, nor reveal its real parameters. Before creating a
+  node you MUST still call describe_node_type(type) — live Houdini introspection
+  is the final authority. If a live result disagrees with the cache, trust the
+  live result and report the cache as possibly stale.
+
 Keep your reasoning tight. After each tool result, state in one line what you
 observed and what you'll do next. Finish by summarizing what was built and where
 it was exported.

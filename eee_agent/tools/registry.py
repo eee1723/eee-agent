@@ -1,7 +1,7 @@
 """Aggregate the Houdini tool set for create_deep_agent."""
 from __future__ import annotations
 
-from eee_agent.tools import compose, inspect, nodes, procedural, scene, vex
+from eee_agent.tools import compose, inspect, knowledge, nodes, procedural, scene, vex
 
 ALL_TOOLS = [
     # scene
@@ -35,6 +35,9 @@ ALL_TOOLS = [
     procedural.assemble_output,
     procedural.work_status,
     procedural.anchor_graph,
+    # knowledge graph (read-only, offline documentation cache)
+    knowledge.search_houdini_knowledge,
+    knowledge.get_houdini_knowledge,
 ]
 
 

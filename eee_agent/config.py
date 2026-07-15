@@ -98,3 +98,58 @@ def resolve_path(path: str) -> str:
     if os.path.isabs(path):
         return path
     return os.path.join(_REPO_ROOT, path)
+
+
+# --- Knowledge graph config ------------------------------------------------
+
+# Shared, rebuildable cache for the offline Houdini documentation knowledge
+# graph (design §8.2). Lives under %LOCALAPPDATA%, never inside the package or
+# the repo, and is never committed. The Houdini build is baked into the path so
+# different installs on the same machine do not collide.
+_KB_CACHE_SUBPATH = os.path.join(
+    "EEEAgent", "cache", "knowledge", "houdini", "21.0.440", "knowledge.sqlite3"
+)
+
+
+@dataclass(frozen=True)
+class KnowledgeConfig:
+    enabled: bool
+    path: str
+    hfs: str | None
+
+
+def _default_kb_cache_path() -> str:
+    """The default shared cache path under %LOCALAPPDATA% (design §8.2).
+
+    When ``LOCALAPPDATA`` is unavailable the user home is used so the path stays
+    absolute and never silently resolves against Houdini's cwd.
+    """
+    base = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, _KB_CACHE_SUBPATH)
+
+
+def knowledge_config() -> KnowledgeConfig:
+    """Build the knowledge-tool configuration from the environment.
+
+    - ``EEE_KB_ENABLED`` (default ``true``) is parsed with the same strict
+      :func:`_env_bool` semantics as the other toggles; an illegal value raises
+      at this boundary instead of silently disabling the tools.
+    - ``EEE_KB_PATH`` overrides the cache location. A relative path resolves
+      against :func:`repo_root`, never Houdini's cwd. An absolute path is kept
+      verbatim. Unset -> the shared %LOCALAPPDATA% default.
+    - ``EEE_HFS`` overrides the build/query source HFS (``None`` when unset).
+
+    No database is opened here and no cache is built; this only resolves paths
+    and the enabled flag.
+    """
+    enabled = _env_bool("EEE_KB_ENABLED", True)
+    raw_path = os.getenv("EEE_KB_PATH")
+    if raw_path and raw_path.strip():
+        path = raw_path.strip()
+        if not os.path.isabs(path):
+            path = os.path.join(_REPO_ROOT, path)
+    else:
+        path = _default_kb_cache_path()
+    raw_hfs = os.getenv("EEE_HFS")
+    hfs = raw_hfs.strip() if raw_hfs and raw_hfs.strip() else None
+    return KnowledgeConfig(enabled=enabled, path=path, hfs=hfs)
