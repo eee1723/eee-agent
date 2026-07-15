@@ -843,6 +843,68 @@ def test_changeset_rejects_duplicate_affected_nodes() -> None:
         )
 
 
+# F1 regression: affected_nodes / read_dependencies must be unique by stable
+# node identity (node_id when present, otherwise path), rejecting the same
+# identity paired with conflicting path/type/workspace facts.
+
+
+def test_changeset_rejects_same_node_id_with_different_path_in_affected() -> None:
+    first = _noderef(node_id="n_child", path="/obj/ws/geo1")
+    second = _noderef(node_id="n_child", path="/obj/ws/renamed")
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(affected_nodes=(first, second))
+
+
+def test_changeset_rejects_same_node_id_with_different_type_in_affected() -> None:
+    first = _noderef(node_id="n_child", path="/obj/ws/geo1", expected_type="geo")
+    second = _noderef(node_id="n_child", path="/obj/ws/geo1", expected_type="xform")
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(affected_nodes=(first, second))
+
+
+def test_changeset_rejects_same_path_with_different_node_id_in_affected() -> None:
+    first = _noderef(node_id="n_a", path="/obj/ws/geo1")
+    second = _noderef(node_id="n_b", path="/obj/ws/geo1")
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(affected_nodes=(first, second))
+
+
+def test_changeset_rejects_same_node_id_with_different_workspace_in_affected() -> None:
+    first = _noderef(node_id="n_child", path="/obj/ws/geo1", expected_workspace_id=WS)
+    second = _noderef(node_id="n_child", path="/obj/ws/geo1", expected_workspace_id=WS2)
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(affected_nodes=(first, second))
+
+
+def test_changeset_rejects_same_node_id_with_different_path_in_read_dependencies() -> None:
+    first = _noderef(node_id="n_dep", path="/obj/ws/d1")
+    second = _noderef(node_id="n_dep", path="/obj/ws/d2")
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(read_dependencies=(first, second))
+
+
+def test_changeset_rejects_same_path_with_different_node_id_in_read_dependencies() -> None:
+    first = _noderef(node_id="n_da", path="/obj/ws/dep")
+    second = _noderef(node_id="n_db", path="/obj/ws/dep")
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(read_dependencies=(first, second))
+
+
+def test_changeset_accepts_distinct_owned_identities_in_affected() -> None:
+    # distinct node_ids at distinct paths are a valid affected set
+    cs = _changeset(
+        operations=(_setparm(),),
+        affected_nodes=(
+            _noderef(node_id="n_child", path="/obj/ws/geo1"),
+            _noderef(node_id="n_other", path="/obj/ws/other"),
+        ),
+        risk_summary=_risk(
+            effect_names=("parm.set",), affected_paths=("/obj/ws/geo1",)
+        ),
+    )
+    assert len(cs.affected_nodes) == 2
+
+
 def test_changeset_enforces_node_reference_limit() -> None:
     affected = tuple(
         _noderef(node_id=f"n_{i}", path=f"/obj/n{i}") for i in range(4097)

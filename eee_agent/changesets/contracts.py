@@ -182,13 +182,35 @@ def _node_identity(ref: NodeRef) -> str:
     return ref.node_id if ref.node_id is not None else ref.path
 
 
-def _unique_canonical(items: Sequence[object], label: str) -> None:
-    seen: set[str] = set()
-    for item in items:
-        key = canonical_json_dumps(item.to_dict())  # type: ignore[attr-defined]
-        if key in seen:
-            raise ValueError(f"{label} contains duplicate entries")
-        seen.add(key)
+def _unique_node_refs(items: Sequence[NodeRef], label: str) -> None:
+    """Reject duplicate or contradictory node references.
+
+    Identity is the stable ``node_id`` when present, otherwise the ``path``.
+    Two references that share an identity but disagree on path/type/workspace
+    are contradictory, as are two references at the same path with different
+    node ids. Exact duplicates are also rejected.
+    """
+    by_id: dict[str, str] = {}
+    by_path: dict[str, str] = {}
+    for ref in items:
+        canonical = canonical_json_dumps(ref.to_dict())
+        if ref.node_id is not None:
+            existing = by_id.get(ref.node_id)
+            if existing is not None:
+                if existing != canonical:
+                    raise ValueError(
+                        f"{label}: duplicate node id {ref.node_id!r} with conflicting facts"
+                    )
+                raise ValueError(f"{label}: duplicate node id {ref.node_id!r}")
+            by_id[ref.node_id] = canonical
+        existing_path = by_path.get(ref.path)
+        if existing_path is not None:
+            if existing_path != canonical:
+                raise ValueError(
+                    f"{label}: duplicate node path {ref.path!r} with conflicting facts"
+                )
+            raise ValueError(f"{label}: duplicate node path {ref.path!r}")
+        by_path[ref.path] = canonical
 
 
 def _normalize_identifiers(
@@ -1056,8 +1078,8 @@ class ChangeSet:
         read_deps = _freeze_node_refs(self.read_dependencies, "ChangeSet.read_dependencies")
         if len(affected) + len(read_deps) > _MAX_NODE_REFS:
             raise ValueError("ChangeSet affected/read-dependency references exceed the limit")
-        _unique_canonical(affected, "ChangeSet.affected_nodes")
-        _unique_canonical(read_deps, "ChangeSet.read_dependencies")
+        _unique_node_refs(affected, "ChangeSet.affected_nodes")
+        _unique_node_refs(read_deps, "ChangeSet.read_dependencies")
         preconditions = _freeze_conditions(self.preconditions, "ChangeSet.preconditions", _PRECONDITION_TYPES)
         postconditions = _freeze_conditions(
             self.expected_postconditions, "ChangeSet.expected_postconditions", _POSTCONDITION_TYPES
