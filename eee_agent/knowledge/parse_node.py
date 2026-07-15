@@ -198,16 +198,33 @@ def parse_node_document(source_path: str, text: str) -> ParsedDocument:
         is_current = True
         status = OperatorTypeStatus.DOCUMENTED_UNVERIFIED
 
-    # Candidate order: versioned filename-derived, unversioned, then #internal.
-    filename_candidates: list[str] = []
-    if version is not None:
-        filename_candidates.append(_operator(namespace, name, version))
-    filename_candidates.append(_operator(namespace, name, None))
+    # The operator candidate version is separate from document identity. The
+    # filename namespace/version win; otherwise fall back to the documented
+    # #namespace/#version. canonical_name and the namespace attribute both use
+    # this single effective namespace.
+    effective_namespace = (
+        namespace
+        if namespace is not None
+        else (metadata.get("namespace", "") or None)
+    )
+    effective_version = (
+        version
+        if version is not None
+        else (metadata.get("version", "") or None)
+    )
+
+    # Candidate order: namespace::name::version, namespace::name, then #internal.
+    candidate_forms: list[str] = []
+    if effective_version is not None:
+        candidate_forms.append(_operator(effective_namespace, name, effective_version))
+    candidate_forms.append(_operator(effective_namespace, name, None))
     internal = metadata.get("internal", "")
-    operator_candidates = tuple(_dedupe(filename_candidates + ([internal] if internal else [])))
+    operator_candidates = tuple(
+        _dedupe(candidate_forms + ([internal] if internal else []))
+    )
 
     context = metadata.get("context", "")
-    namespace_attr = namespace if namespace is not None else metadata.get("namespace", "")
+    namespace_attr = effective_namespace if effective_namespace is not None else ""
     title = parse_title(text)
     summary = parse_summary(text)
     entity_id = make_entity_id(
@@ -233,7 +250,7 @@ def parse_node_document(source_path: str, text: str) -> ParsedDocument:
         entity_id=entity_id,
         kind=EntityKind.NODE_DOCUMENT,
         subtype=context,
-        canonical_name=_operator(namespace, name, None),
+        canonical_name=_operator(effective_namespace, name, None),
         title=title,
         summary=summary,
         authority=Authority.OFFICIAL_HOUDINI_DOCS,
@@ -245,7 +262,7 @@ def parse_node_document(source_path: str, text: str) -> ParsedDocument:
         sections=parse_sections(text),
     )
 
-    aliases = _build_aliases(entity_id, stem, title, filename_candidates, internal)
+    aliases = _build_aliases(entity_id, stem, title, candidate_forms, internal)
     edges = _build_edges(entity_id, logical_path, parse_references(text))
 
     return ParsedDocument(

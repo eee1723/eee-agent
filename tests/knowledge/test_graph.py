@@ -385,3 +385,28 @@ def test_assemble_graph_calls_validate() -> None:
     e = _entity(EntityKind.VEX_FUNCTION, "vex_function:x", "x", "functions/x.txt")
     with pytest.raises(GraphError):
         assemble_graph((_doc([e, e]),), inventory=frozenset())
+
+
+# --- documented node versions (parser-driven) -----------------------------
+
+def test_current_page_with_documented_version_picks_versioned_operator() -> None:
+    # The page is current (filename has no suffix) but documents #version 2.0.
+    # When the inventory contains both the versioned and the unversioned type,
+    # reconciliation must select the versioned one because it leads the
+    # candidate order.
+    docs = (
+        parse_node_document(
+            "sop/boolean.txt",
+            "#type: node\n#context: sop\n#version: 2.0\n"
+            "= Boolean =\n\"\"\"Boolean op.\"\"\"",
+        ),
+    )
+    bundle = assemble_graph(
+        docs, inventory=frozenset({"boolean::2.0", "boolean"})
+    )
+    entity = bundle.entities[0]
+    assert entity.attributes["operator_type"] == "boolean::2.0"
+    assert (
+        entity.attributes["operator_type_status"]
+        == OperatorTypeStatus.VERIFIED_AT_BUILD
+    )

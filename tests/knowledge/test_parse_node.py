@@ -286,3 +286,83 @@ def test_parser_does_not_read_filesystem() -> None:
         "#type: node\n#context: sop\n= Ghost =\n\"\"\"No file needed.\"\"\"",
     )
     assert parsed.entities[0].source_path == "sop/does-not-exist-on-disk.txt"
+
+
+# --- documented version (#version) on a current page ----------------------
+# Document identity is still decided only by the filename suffix. The operator
+# candidate version is derived separately: the filename version (if any) wins,
+# otherwise the documented #version is honored.
+
+def test_current_page_honors_documented_version_candidate() -> None:
+    # The filename has no historical suffix, so the page stays current even
+    # though #version is documented. The operator candidate gains the versioned
+    # form, ordered before the unversioned form.
+    entity = parse_node_document(
+        "sop/boolean.txt",
+        "#type: node\n#context: sop\n#version: 2.0\n"
+        "= Boolean =\n\"\"\"Boolean op.\"\"\"",
+    ).entities[0]
+    assert entity.attributes["operator_type_candidates"] == (
+        "boolean::2.0", "boolean",
+    )
+    assert entity.is_current is True
+    assert entity.attributes["document_version"] == "current"
+    assert (
+        entity.attributes["operator_type_status"]
+        == OperatorTypeStatus.DOCUMENTED_UNVERIFIED
+    )
+
+
+def test_metadata_only_namespace_and_version() -> None:
+    # No filename namespace/version; the effective namespace comes from
+    # #namespace and the effective version from #version.
+    entity = parse_node_document(
+        "sop/tool.txt",
+        "#type: node\n#context: sop\n#namespace: acme\n#version: 2.0\n"
+        "= Tool =\n\"\"\"A namespaced tool.\"\"\"",
+    ).entities[0]
+    assert entity.attributes["operator_type_candidates"] == (
+        "acme::tool::2.0", "acme::tool",
+    )
+    assert entity.attributes["namespace"] == "acme"
+    assert entity.canonical_name == "acme::tool"
+
+
+def test_namespaced_current_page_prioritizes_versioned_candidate() -> None:
+    # Filename supplies the namespace; #version supplies the version. The
+    # versioned candidate leads, then the unversioned, then #internal.
+    entity = parse_node_document(
+        "sop/apex--buildfkgraph.txt",
+        "#type: node\n#context: sop\n#namespace: apex\n#version: 1.0\n"
+        "#internal: graph\n= APEX Build FK Graph =\n\n"
+        "\"\"\"Builds a graph.\"\"\"",
+    ).entities[0]
+    assert entity.attributes["operator_type_candidates"] == (
+        "apex::buildfkgraph::1.0", "apex::buildfkgraph", "graph",
+    )
+    assert entity.is_current is True
+    assert entity.attributes["document_version"] == "current"
+    assert entity.attributes["namespace"] == "apex"
+    assert entity.canonical_name == "apex::buildfkgraph"
+
+
+def test_documented_version_does_not_change_document_identity() -> None:
+    # A historical filename suffix still wins for document identity. #version
+    # alone cannot turn a current filename historical and cannot override a
+    # filename version; it only contributes operator candidates when the
+    # filename has no version of its own.
+    current_with_version = parse_node_document(
+        "sop/agentlookat.txt",
+        "#type: node\n#context: sop\n#version: 2.0\n"
+        "= Agent Look At =\n\"\"\"Current with a version note.\"\"\"",
+    ).entities[0]
+    assert current_with_version.is_current is True
+    assert current_with_version.attributes["document_version"] == "current"
+    historical = parse_node_document(
+        "sop/agentlookat-2.0.txt", AGENTLOOKAT_VERSIONED
+    ).entities[0]
+    assert historical.is_current is False
+    assert historical.attributes["document_version"] == "2.0"
+    assert historical.attributes["operator_type_candidates"] == (
+        "agentlookat::2.0", "agentlookat",
+    )
