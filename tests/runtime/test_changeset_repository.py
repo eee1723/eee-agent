@@ -824,6 +824,58 @@ def test_update_approval_rejects_rejected_then_reapprove(db_path: Path) -> None:
     _run(scenario())
 
 
+def test_update_approval_rejects_mismatched_approval_id(db_path: Path) -> None:
+    """update_approval must not swap the immutable approval_id identity.
+
+    Regression: a caller supplied a valid Approved ApprovalRecord for the same
+    change_id but a different approval_id. The UPDATE omitted the approval_id
+    column, so the column kept the original id while payload_json/digest were
+    overwritten with the impostor id — leaving the row internally inconsistent.
+    The update must be rejected and the original row left intact.
+    """
+
+    async def scenario() -> None:
+        db, repo = await fresh_repo(db_path)
+        try:
+            await _seed_proposed_with_pending_approval(repo)
+            digest = (await repo.get_changeset(CHG)).changeset.digest
+            impostor = _approval(
+                approval_id=f"apr_{'6' * 32}",  # differs from the persisted APR
+                changeset_digest=digest,
+                decision=ApprovalDecision.APPROVED,
+                decided_by="local_user",
+                decided_at=LATER,
+                approved_instance_id="hou_instance_1",
+                approved_scene_epoch=1,
+            )
+            with pytest.raises(AgentException) as exc:
+                await repo.update_approval(
+                    impostor,
+                    expected_decision=ApprovalDecision.PENDING,
+                    expected_changeset_digest=digest,
+                )
+            assert _err_code(exc.value) == "approval.identity_mismatch"
+            # Original row untouched: identity, decision, and payload all intact.
+            got = await repo.get_approval(CHG)
+            assert got.approval_id == APR
+            assert got.decision is ApprovalDecision.PENDING
+            assert got.to_dict() == _approval(changeset_digest=digest).to_dict()
+            raw = await db.fetchone(
+                "SELECT approval_id, decision, payload_json FROM approvals "
+                "WHERE change_id = ?",
+                (CHG,),
+            )
+            # Column identity and payload identity must agree (the invariant the
+            # bug broke: the column stayed APR while the payload became apr_666).
+            assert raw["approval_id"] == APR
+            assert raw["decision"] == "Pending"
+            assert got.approval_id == raw["approval_id"]
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
 # --------------------------------------------------------------------------
 # consume approval: expiry, single-use, concurrency
 # --------------------------------------------------------------------------

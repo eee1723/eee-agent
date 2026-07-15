@@ -622,6 +622,13 @@ def _record_corrupt() -> AgentException:
     )
 
 
+def _approval_identity_mismatch() -> AgentException:
+    return _err(
+        "approval.identity_mismatch",
+        "The approval does not match the persisted approval identity.",
+    )
+
+
 def _approval_digest_mismatch() -> AgentException:
     return _err(
         "approval.digest_mismatch",
@@ -984,12 +991,18 @@ class ChangeSetRepository:
         digest = _storage_digest(approval)
         async with self._database.write_transaction() as conn:
             cursor = await conn.execute(
-                "SELECT decision FROM approvals WHERE change_id = ?",
+                "SELECT approval_id, decision FROM approvals WHERE change_id = ?",
                 (approval.change_id,),
             )
             row = await cursor.fetchone()
             if row is None:
                 raise _approval_not_found()
+            # approval_id is the immutable row identity: an update that would
+            # replace it is rejected outright, before any state mutation, so the
+            # column and payload_json can never disagree about whose approval
+            # this is.
+            if approval.approval_id != row["approval_id"]:
+                raise _approval_identity_mismatch()
             current_decision = ApprovalDecision(row["decision"])
             if current_decision is not expected_decision:
                 raise _cas_conflict()
