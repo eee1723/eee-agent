@@ -6,10 +6,18 @@ answering exact-symbol, filtered-FTS, neighbor and section queries with hard
 output budgets. Expected failures map to stable :class:`KnowledgeErrorCode`
 values; unexpected exceptions become ``INTERNAL_ERROR`` without leaking
 tracebacks, SQL or absolute paths.
+
+Provenance is trusted only after validation: manifest metadata that is not a
+64-hex sha, a safe build scalar or an integer schema version is rejected as
+``KB_CORRUPT`` and never reaches a DTO or error message. Argument errors on a
+readable cache carry safe provenance (read without invoking the stale checker),
+and an internal failure after validation preserves the already-validated
+provenance.
 """
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from pathlib import Path
 from typing import Callable, Mapping
@@ -43,6 +51,24 @@ _SIGNATURES_MAX = 5
 _GET_CHARS_DEFAULT = 4000
 _GET_CHARS_MAX = 8000
 
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:")
+
+
+def _is_safe_scalar(value: object) -> bool:
+    """A provenance scalar with no control char, drive/UNC prefix or separator."""
+    if not isinstance(value, str) or not value:
+        return False
+    if any(ord(ch) <= 0x1F or ord(ch) == 0x7F for ch in value):
+        return False
+    if _DRIVE_PREFIX_RE.match(value):
+        return False
+    if value.startswith("\\\\") or value.startswith("//"):
+        return False
+    if "/" in value or "\\" in value:
+        return False
+    return True
+
 
 class ServiceError(Exception):
     """An expected service failure carrying a stable code and provenance."""
@@ -71,10 +97,13 @@ class KnowledgeService:
         self._path = Path(path)
         self._stale_checker = stale_checker
         self._stale_result: bool | None = None
+        # Most-recent validated provenance, for INTERNAL_ERROR preservation.
+        self._current_provenance = KbProvenance()
 
     # --- public API --------------------------------------------------------
 
     def status(self) -> KnowledgeStatus:
+        self._current_provenance = KbProvenance()
         try:
             store, provenance = self._check_and_open()
             store.close()
@@ -89,10 +118,11 @@ class KnowledgeService:
         except Exception:
             return KnowledgeStatus(
                 available=False, code=KnowledgeErrorCode.INTERNAL_ERROR,
-                provenance=KbProvenance(), message="internal error",
+                provenance=self._current_provenance, message="internal error",
             )
 
     def search(self, request: SearchRequest) -> SearchResponse:
+        self._current_provenance = KbProvenance()
         try:
             self._validate_search(request)
             store, provenance = self._check_and_open()
@@ -107,13 +137,14 @@ class KnowledgeService:
         except Exception:
             return SearchResponse(
                 ok=False, code=KnowledgeErrorCode.INTERNAL_ERROR,
-                provenance=KbProvenance(), error="internal error",
+                provenance=self._current_provenance, error="internal error",
             )
 
     def get(self, request: GetRequest) -> GetResponse:
+        self._current_provenance = KbProvenance()
         try:
             if not request.entity_id or not request.entity_id.strip():
-                raise ServiceError(KnowledgeErrorCode.INVALID_ARGUMENT, "entity_id is required")
+                raise self._argument_error("entity_id is required")
             store, provenance = self._check_and_open()
             try:
                 return self._do_get(store, request, provenance)
@@ -126,7 +157,7 @@ class KnowledgeService:
         except Exception:
             return GetResponse(
                 ok=False, code=KnowledgeErrorCode.INTERNAL_ERROR,
-                provenance=KbProvenance(), error="internal error",
+                provenance=self._current_provenance, error="internal error",
             )
 
     def neighbors(
@@ -136,16 +167,12 @@ class KnowledgeService:
         direction: str,
         limit: int,
     ) -> NeighborResponse:
+        self._current_provenance = KbProvenance()
         try:
             if direction not in ("outgoing", "incoming"):
-                raise ServiceError(
-                    KnowledgeErrorCode.INVALID_ARGUMENT,
-                    "direction must be outgoing or incoming",
-                )
+                raise self._argument_error("direction must be outgoing or incoming")
             if not entity_id or not entity_id.strip():
-                raise ServiceError(
-                    KnowledgeErrorCode.INVALID_ARGUMENT, "entity_id is required"
-                )
+                raise self._argument_error("entity_id is required")
             store, provenance = self._check_and_open()
             try:
                 entity = store.entity(entity_id)
@@ -153,7 +180,10 @@ class KnowledgeService:
                     raise ServiceError(
                         KnowledgeErrorCode.UNKNOWN_ENTITY, "entity not found", provenance
                     )
-                summaries = self._neighbor_summaries(store, entity_id, predicate, direction)
+                effective_limit = min(max(limit, 0), _NEIGHBORS_MAX)
+                summaries = self._neighbor_summaries(
+                    store, entity_id, predicate, direction, effective_limit
+                )
                 return NeighborResponse(
                     ok=True, code=None, entity_id=entity_id, direction=direction,
                     predicate=predicate, neighbors=summaries, provenance=provenance,
@@ -168,9 +198,69 @@ class KnowledgeService:
         except Exception:
             return NeighborResponse(
                 ok=False, code=KnowledgeErrorCode.INTERNAL_ERROR, entity_id=entity_id,
-                direction=direction, predicate=predicate, provenance=KbProvenance(),
-                error="internal error",
+                direction=direction, predicate=predicate,
+                provenance=self._current_provenance, error="internal error",
             )
+
+    # --- argument errors / provenance helpers ------------------------------
+
+    def _argument_error(self, message: str) -> ServiceError:
+        """An INVALID_ARGUMENT carrying safe provenance (no stale check)."""
+        return ServiceError(
+            KnowledgeErrorCode.INVALID_ARGUMENT, message, self._safe_provenance()
+        )
+
+    def _safe_provenance(self) -> KbProvenance:
+        """Read safe provenance read-only. Empty if the cache is unreadable.
+
+        Does not invoke the stale checker and does not perform the full query
+        operation; used only to attach provenance to argument-error responses.
+        """
+        if not self._path.is_file():
+            return KbProvenance()
+        try:
+            store = KnowledgeStore.open(self._path)
+        except (sqlite3.OperationalError, sqlite3.DatabaseError):
+            return KbProvenance()
+        try:
+            try:
+                metadata = store.metadata()
+            except (sqlite3.DatabaseError, ValueError):
+                return KbProvenance()
+            return self._validated_provenance(metadata)
+        except ServiceError:
+            return KbProvenance()
+        finally:
+            store.close()
+
+    def _validated_provenance(self, metadata: Mapping[str, object]) -> KbProvenance:
+        """Return provenance built only from validated, safe metadata fields.
+
+        Raises ``KB_CORRUPT`` (without provenance, so nothing leaks) when
+        ``manifest_sha256`` is not 64 lowercase hex, ``houdini_build`` is not a
+        safe scalar, or ``kb_schema_version`` is not an integer.
+        """
+        sha = metadata.get("manifest_sha256")
+        build = metadata.get("houdini_build")
+        version = metadata.get("kb_schema_version")
+        if not (isinstance(sha, str) and _SHA256_RE.fullmatch(sha)):
+            raise ServiceError(
+                KnowledgeErrorCode.KB_CORRUPT,
+                "knowledge cache manifest metadata is malformed",
+            )
+        if not _is_safe_scalar(build):
+            raise ServiceError(
+                KnowledgeErrorCode.KB_CORRUPT,
+                "knowledge cache manifest metadata is malformed",
+            )
+        if not isinstance(version, int) or isinstance(version, bool):
+            raise ServiceError(
+                KnowledgeErrorCode.KB_CORRUPT,
+                "knowledge cache manifest metadata is malformed",
+            )
+        return KbProvenance(
+            manifest_sha256=sha, houdini_build=build, kb_schema_version=version
+        )
 
     # --- cache open / status checks ---------------------------------------
 
@@ -197,12 +287,10 @@ class KnowledgeService:
                 raise ServiceError(
                     KnowledgeErrorCode.KB_CORRUPT, "knowledge cache is unreadable"
                 ) from exc
-            provenance = KbProvenance(
-                manifest_sha256=metadata.get("manifest_sha256"),
-                houdini_build=metadata.get("houdini_build"),
-                kb_schema_version=metadata.get("kb_schema_version"),
-            )
-            if metadata.get("kb_schema_version") != KB_SCHEMA_VERSION:
+            provenance = self._validated_provenance(metadata)
+            # Provenance is now validated: preserve it for any later INTERNAL_ERROR.
+            self._current_provenance = provenance
+            if provenance.kb_schema_version != KB_SCHEMA_VERSION:
                 raise ServiceError(
                     KnowledgeErrorCode.KB_SCHEMA_MISMATCH,
                     "knowledge cache schema version mismatch",
@@ -237,20 +325,11 @@ class KnowledgeService:
         has_symbol = bool(request.symbol and request.symbol.strip())
         has_query = bool(request.query and request.query.strip())
         if not has_symbol and not has_query:
-            raise ServiceError(
-                KnowledgeErrorCode.INVALID_ARGUMENT,
-                "search requires a symbol or a query",
-            )
+            raise self._argument_error("search requires a symbol or a query")
         if request.direction not in ("outgoing", "incoming"):
-            raise ServiceError(
-                KnowledgeErrorCode.INVALID_ARGUMENT,
-                "direction must be outgoing or incoming",
-            )
+            raise self._argument_error("direction must be outgoing or incoming")
         if request.predicate is not None and not has_symbol:
-            raise ServiceError(
-                KnowledgeErrorCode.INVALID_ARGUMENT,
-                "predicate requires a unique symbol",
-            )
+            raise self._argument_error("predicate requires a unique symbol")
 
     # --- search ------------------------------------------------------------
 
@@ -364,10 +443,12 @@ class KnowledgeService:
         signatures = entity.attributes.get("signatures") or ()
         if not isinstance(signatures, (tuple, list)):
             signatures = (signatures,)
+        # Search-result neighbor expansion keeps the fixed hard cap of 8.
         neighbors: tuple[NeighborSummary, ...] = ()
         if request.predicate is not None:
             neighbors = self._neighbor_summaries(
-                store, entity.entity_id, request.predicate, request.direction
+                store, entity.entity_id, request.predicate, request.direction,
+                _NEIGHBORS_MAX,
             )
         return SearchResult(
             entity_id=entity.entity_id,
@@ -405,11 +486,13 @@ class KnowledgeService:
         entity_id: str,
         predicate: str | None,
         direction: str,
+        limit: int,
     ) -> tuple[NeighborSummary, ...]:
         if direction == "incoming":
-            rows = store.neighbors_incoming(entity_id, predicate, _NEIGHBORS_MAX)
+            rows = store.neighbors_incoming(entity_id, predicate, limit)
         else:
-            rows = store.neighbors_outgoing(entity_id, predicate, _NEIGHBORS_MAX)
+            rows = store.neighbors_outgoing(entity_id, predicate, limit)
+        cap = max(limit, 0)
         return tuple(
             NeighborSummary(
                 entity_id=row.entity_id,
@@ -418,7 +501,7 @@ class KnowledgeService:
                 target_anchor=row.target_anchor,
                 resolved=row.resolved,
             )
-            for row in rows[:_NEIGHBORS_MAX]
+            for row in rows[:cap]
         )
 
     # --- get ---------------------------------------------------------------

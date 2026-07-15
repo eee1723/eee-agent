@@ -17,9 +17,18 @@ from eee_agent.knowledge.api import (
     KnowledgeErrorCode,
     SearchRequest,
 )
+from eee_agent.knowledge.graph import assemble_graph
 from eee_agent.knowledge.lock import lock_path_for
+from eee_agent.knowledge.models import (
+    Authority,
+    EdgeDraft,
+    EntityDraft,
+    EntityKind,
+    ParsedDocument,
+)
 from eee_agent.knowledge.service import KnowledgeService
-from tests.knowledge.test_store import build_fixture_cache
+from eee_agent.knowledge.writer import write_cache
+from tests.knowledge.test_store import _manifest, build_fixture_cache
 
 BOOLEAN_ID = "node_document:sop/boolean.txt@current"
 INTERSECT_ID = "vex_function:intersect"
@@ -322,6 +331,165 @@ def test_internal_error_is_sanitized(cache_path: Path) -> None:
     assert response.code == KnowledgeErrorCode.INTERNAL_ERROR
     blob = json.dumps(response.to_dict())
     assert "D:" not in blob
-    assert "houdini" not in blob
+    assert "nodes.zip" not in blob
     assert "SELECT" not in blob
     assert "Traceback" not in blob
+
+
+# =========================================================================
+# Audit repair: provenance trust, argument-error provenance, internal-error
+# provenance preservation, and neighbor limit honoring.
+# =========================================================================
+
+def _hub_cache(tmp_path: Path) -> Path:
+    """A cache whose ``vex_function:hub`` has 10 outgoing reference edges."""
+    hub = EntityDraft(
+        entity_id="vex_function:hub", kind=EntityKind.VEX_FUNCTION, subtype="sop",
+        canonical_name="hub", title="hub", summary="hub entity",
+        authority=Authority.OFFICIAL_HOUDINI_DOCS, source_path="functions/hub.txt",
+        source_anchor=None, is_current=True,
+        attributes={"context": "sop", "signatures": (), "returns": ""},
+        body="", sections=(),
+    )
+    edges = tuple(
+        EdgeDraft(
+            source_id="vex_function:hub", predicate="references", target_id=None,
+            target_raw=f"Vex:fn{i}", target_anchor=None, resolved=False,
+            source_location=f"functions/hub.txt:{i + 1}",
+        )
+        for i in range(10)
+    )
+    bundle = assemble_graph((ParsedDocument((hub,), (), edges),), inventory=frozenset())
+    path = tmp_path / "hub.sqlite3"
+    write_cache(path, bundle, _manifest(bundle))
+    return path
+
+
+# --- Defect 1: provenance must be sanitized and trusted only if valid ----
+
+def _set_metadata(cache_path: Path, key: str, json_value: str) -> None:
+    conn = sqlite3.connect(cache_path)
+    conn.execute("UPDATE kb_metadata SET value_json=? WHERE key=?", (json_value, key))
+    conn.commit()
+    conn.close()
+
+
+def test_malformed_manifest_sha256_rejected_as_corrupt(cache_path: Path) -> None:
+    _set_metadata(cache_path, "manifest_sha256", json.dumps("D:\\houdini\\secret"))
+    response = _service(cache_path).search(SearchRequest(symbol="boolean"))
+    assert response.ok is False
+    assert response.code == KnowledgeErrorCode.KB_CORRUPT
+    blob = json.dumps(response.to_dict())
+    assert "D:" not in blob
+    assert "houdini" not in blob
+    assert "secret" not in blob
+    assert response.provenance.manifest_sha256 is None
+
+
+def test_malformed_houdini_build_rejected_as_corrupt(cache_path: Path) -> None:
+    _set_metadata(cache_path, "houdini_build", json.dumps("D:\\houdini\\build"))
+    response = _service(cache_path).search(SearchRequest(symbol="boolean"))
+    assert response.ok is False
+    assert response.code == KnowledgeErrorCode.KB_CORRUPT
+    assert "houdini" not in json.dumps(response.to_dict())
+
+
+def test_non_integer_schema_version_rejected_as_corrupt(cache_path: Path) -> None:
+    _set_metadata(cache_path, "kb_schema_version", json.dumps("not-an-int"))
+    response = _service(cache_path).search(SearchRequest(symbol="boolean"))
+    assert response.ok is False
+    assert response.code == KnowledgeErrorCode.KB_CORRUPT
+
+
+def test_valid_provenance_passes_through_sanitized(cache_path: Path) -> None:
+    response = _service(cache_path).search(SearchRequest(symbol="boolean"))
+    assert response.ok is True
+    sha = response.provenance.manifest_sha256
+    assert sha and len(sha) == 64 and all(c in "0123456789abcdef" for c in sha)
+    assert response.provenance.houdini_build == "21.0.440"
+    assert response.provenance.kb_schema_version == 1
+
+
+# --- Defect 2: readable-cache argument errors include safe provenance ----
+
+def test_invalid_direction_includes_safe_provenance(cache_path: Path) -> None:
+    response = _service(cache_path).search(
+        SearchRequest(symbol="boolean", predicate="references", direction="sideways")
+    )
+    assert response.code == KnowledgeErrorCode.INVALID_ARGUMENT
+    assert response.provenance.manifest_sha256
+    assert response.provenance.houdini_build == "21.0.440"
+    assert response.provenance.kb_schema_version == 1
+
+
+def test_empty_search_includes_safe_provenance(cache_path: Path) -> None:
+    response = _service(cache_path).search(SearchRequest())
+    assert response.code == KnowledgeErrorCode.INVALID_ARGUMENT
+    assert response.provenance.manifest_sha256
+
+
+def test_invalid_get_entity_id_includes_safe_provenance(cache_path: Path) -> None:
+    response = _service(cache_path).get(GetRequest(entity_id="   "))
+    assert response.code == KnowledgeErrorCode.INVALID_ARGUMENT
+    assert response.provenance.manifest_sha256
+
+
+def test_invalid_neighbors_direction_includes_safe_provenance(cache_path: Path) -> None:
+    response = _service(cache_path).neighbors(BOOLEAN_ID, None, "sideways", 5)
+    assert response.code == KnowledgeErrorCode.INVALID_ARGUMENT
+    assert response.provenance.manifest_sha256
+
+
+def test_invalid_neighbors_entity_id_includes_safe_provenance(cache_path: Path) -> None:
+    response = _service(cache_path).neighbors("   ", None, "outgoing", 5)
+    assert response.code == KnowledgeErrorCode.INVALID_ARGUMENT
+    assert response.provenance.manifest_sha256
+
+
+def test_argument_error_does_not_invoke_stale_checker(cache_path: Path) -> None:
+    calls: list = []
+
+    def checker(metadata):
+        calls.append(metadata)
+        return False
+
+    svc = KnowledgeService(cache_path, stale_checker=checker)
+    svc.search(SearchRequest(symbol="boolean", predicate="references", direction="sideways"))
+    assert calls == []
+
+
+# --- Defect 3: preserve safe provenance after an internal failure --------
+
+def test_internal_error_preserves_validated_provenance(cache_path: Path) -> None:
+    def exploding_checker(metadata):
+        raise RuntimeError(
+            "leak D:\\houdini\\help\\nodes.zip; SELECT * FROM x; "
+            "Traceback (most recent call last)"
+        )
+
+    response = KnowledgeService(cache_path, stale_checker=exploding_checker).search(
+        SearchRequest(symbol="boolean")
+    )
+    assert response.ok is False
+    assert response.code == KnowledgeErrorCode.INTERNAL_ERROR
+    # already-validated safe provenance is preserved ...
+    assert response.provenance.manifest_sha256
+    assert response.provenance.houdini_build == "21.0.440"
+    # ... while the sensitive exception text is not leaked
+    blob = json.dumps(response.to_dict())
+    assert "D:" not in blob
+    assert "nodes.zip" not in blob
+    assert "SELECT" not in blob
+    assert "Traceback" not in blob
+
+
+# --- Defect 4: honor neighbors(limit) while retaining the hard cap -------
+
+def test_neighbors_honors_limit_with_hard_cap(tmp_path: Path) -> None:
+    cache = _hub_cache(tmp_path)
+    svc = _service(cache)
+    assert len(svc.neighbors("vex_function:hub", None, "outgoing", 0).neighbors) == 0
+    assert len(svc.neighbors("vex_function:hub", None, "outgoing", 1).neighbors) <= 1
+    assert len(svc.neighbors("vex_function:hub", None, "outgoing", 8).neighbors) <= 8
+    big = svc.neighbors("vex_function:hub", None, "outgoing", 50)
+    assert len(big.neighbors) == 8  # 10 edges, hard cap of 8
