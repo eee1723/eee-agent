@@ -10,6 +10,7 @@ Tests follow the repo convention: each drives an async scenario via
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -19,7 +20,7 @@ import pytest
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
-from eee_agent.core import AgentError, ErrorCategory
+from eee_agent.core import AgentError, AgentException, ErrorCategory
 from eee_agent.runtime.auth import create_identity
 from eee_agent.runtime.events import ReplayResult
 from eee_agent.runtime.models import (
@@ -88,6 +89,8 @@ class FakeService:
         self.stop_result: RunRecord = _run_rec(status=RunStatus.STOP_REQUESTED)
         self.snapshot_result: Any = None
         self.replay_result: Any = None
+        self.replay_side_effect: Any = None
+        self.snapshot_side_effect: Any = None
 
     def _record(self, name: str, **kwargs: Any) -> None:
         self.calls.append((name, kwargs))
@@ -135,11 +138,31 @@ class FakeService:
         self._record(
             "replay", session_id=session_id, after_seq=after_seq, limit=limit
         )
-        return self.replay_result
+        if self.replay_side_effect is not None:
+            exc = self.replay_side_effect
+            self.replay_side_effect = None
+            raise exc
+        rr = self.replay_result
+        if callable(rr):
+            result = rr(after_seq)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        return rr
 
     async def snapshot(self, session_id: str):
         self._record("snapshot", session_id=session_id)
-        return self.snapshot_result
+        if self.snapshot_side_effect is not None:
+            exc = self.snapshot_side_effect
+            self.snapshot_side_effect = None
+            raise exc
+        snap = self.snapshot_result
+        if callable(snap):
+            result = snap()
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+        return snap
 
     def subscribe(self, callback) -> Any:
         self._callbacks.add(callback)
@@ -652,33 +675,242 @@ def test_subscribe_no_gap_replay_then_live(service, identity) -> None:
     _run(scenario())
 
 
-def test_subscribe_with_gap_sends_snapshot_first(service, identity) -> None:
+def test_gap_subscribe_sends_snapshot_then_only_events_after_boundary(
+    service, identity
+) -> None:
+    # Retention gap: first replay reports snapshot_required=True with event(6);
+    # snapshot.snapshot_seq=6. event(6) is covered by the snapshot and must NOT
+    # be re-sent. The server must re-replay with after_seq=N and send only
+    # seq>N events, then buffered live events.
     from eee_agent.runtime.service import SessionSnapshot
-    service.replay_result = ReplayResult(
-        events=(_event(6),), replay_floor_seq=5, last_seq=6, snapshot_required=True,
-    )
     service.snapshot_result = SessionSnapshot(
         session=_session(last_seq=6), runs=(), active_run=None,
         snapshot_seq=6, has_earlier_runs=False, earliest_included_run_id=None,
         version_report={"eee_agent": "x"},
     )
 
+    def replay_for(after_seq: int):
+        if after_seq <= 1:
+            return ReplayResult(
+                events=(_event(6),), replay_floor_seq=5, last_seq=6,
+                snapshot_required=True,
+            )
+        # second replay with after_seq=6 (the snapshot boundary)
+        return ReplayResult(
+            events=(), replay_floor_seq=5, last_seq=6, snapshot_required=False,
+        )
+
+    service.replay_result = replay_for
+
     async def scenario():
         async with _server(service, identity) as s:
             async with connect(_uri(s), additional_headers=_headers(identity), compression=None) as ws:
                 await ws.send(encode_envelope(_cmd("r1", "session.subscribe", {"session_id": SID, "last_seq": 1})))
-                resp = json.loads(await ws.recv())
+                resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
                 assert resp["ok"] is True
-                snap = json.loads(await ws.recv())
+                assert resp["result"]["last_seq"] == 6
+                snap = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
                 assert snap["type"] == "session.snapshot"
                 assert snap["seq"] is None
                 assert snap["payload"]["snapshot_seq"] == 6
-                e6 = json.loads(await ws.recv())
-                assert e6["seq"] == 6
+                # event(6) must NOT be delivered (it is in the snapshot).
                 service.emit(_event(7))
                 e7 = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
                 assert e7["seq"] == 7
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(ws.recv(), timeout=0.3)
+                # The second replay must have been called with after_seq=6.
+                replay_calls = [c["after_seq"] for n, c in service.calls if n == "replay"]
+                assert replay_calls == [1, 6]
     _run(scenario())
+
+
+def test_gap_subscribe_concurrent_event_sent_once(service, identity) -> None:
+    # An event committed during the snapshot query (N+1) must be buffered and
+    # delivered exactly once, not lost or duplicated.
+    from eee_agent.runtime.service import SessionSnapshot
+    service.snapshot_result = SessionSnapshot(
+        session=_session(last_seq=6), runs=(), active_run=None,
+        snapshot_seq=6, has_earlier_runs=False, earliest_included_run_id=None,
+        version_report={"eee_agent": "x"},
+    )
+
+    def replay_for(after_seq: int):
+        if after_seq <= 1:
+            return ReplayResult(
+                events=(_event(6),), replay_floor_seq=5, last_seq=6,
+                snapshot_required=True,
+            )
+        return ReplayResult(
+            events=(), replay_floor_seq=5, last_seq=6, snapshot_required=False,
+        )
+
+    service.replay_result = replay_for
+    original_snapshot = service.snapshot
+
+    async def snapshot_with_emit(sid):
+        result = await original_snapshot(sid)
+        service.emit(_event(7))  # commit N+1 during snapshot query
+        return result
+
+    service.snapshot = snapshot_with_emit
+
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(_uri(s), additional_headers=_headers(identity), compression=None) as ws:
+                await ws.send(encode_envelope(_cmd("r1", "session.subscribe", {"session_id": SID, "last_seq": 1})))
+                resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                assert resp["result"]["last_seq"] == 6
+                await asyncio.wait_for(ws.recv(), timeout=2)  # snapshot
+                e7 = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                assert e7["seq"] == 7
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(ws.recv(), timeout=0.3)
+    _run(scenario())
+
+
+def test_subscribe_replay_agent_exception_cleans_up(service, identity) -> None:
+    service.replay_result = ReplayResult(
+        events=(), replay_floor_seq=0, last_seq=0, snapshot_required=False,
+    )
+    service.replay_side_effect = AgentException(AgentError(
+        code="runtime.session_not_found", category=ErrorCategory.VALIDATION,
+        message_for_user="The Runtime session does not exist.",
+    ))
+
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(_uri(s), additional_headers=_headers(identity), compression=None) as ws:
+                resp = await _request(ws, "r1", "session.subscribe", {"session_id": SID, "last_seq": 0})
+                assert resp["error"]["code"] == "runtime.session_not_found"
+                assert resp["error"]["category"] == "validation"
+                # Same-connection re-subscribe must re-replay (not a duplicate no-op):
+                # the half-initialized subscription was removed.
+                resp = await _request(ws, "r2", "session.subscribe", {"session_id": SID, "last_seq": 0})
+                assert resp["ok"] is True
+    _run(scenario())
+    replay_calls = [n for n, _ in service.calls if n == "replay"]
+    assert len(replay_calls) == 2  # failed + re-subscribe
+
+
+def test_subscribe_replay_internal_exception_cleans_up(service, identity) -> None:
+    service.replay_result = ReplayResult(
+        events=(), replay_floor_seq=0, last_seq=0, snapshot_required=False,
+    )
+    service.replay_side_effect = RuntimeError("boom")
+
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(_uri(s), additional_headers=_headers(identity), compression=None) as ws:
+                resp = await _request(ws, "r1", "session.subscribe", {"session_id": SID, "last_seq": 0})
+                assert resp["error"]["code"] == "internal.runtime_failure"
+                assert "boom" not in json.dumps(resp)
+                resp = await _request(ws, "r2", "session.subscribe", {"session_id": SID, "last_seq": 0})
+                assert resp["ok"] is True
+    _run(scenario())
+    assert len([n for n, _ in service.calls if n == "replay"]) == 2
+
+
+def test_subscribe_snapshot_exception_cleans_up(service, identity) -> None:
+    service.replay_result = ReplayResult(
+        events=(_event(6),), replay_floor_seq=5, last_seq=6, snapshot_required=True,
+    )
+    service.snapshot_side_effect = RuntimeError("snap boom")
+
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(_uri(s), additional_headers=_headers(identity), compression=None) as ws:
+                resp = await _request(ws, "r1", "session.subscribe", {"session_id": SID, "last_seq": 1})
+                assert resp["error"]["code"] == "internal.runtime_failure"
+                assert "snap boom" not in json.dumps(resp)
+                # Re-subscribe (no gap this time) must work.
+                service.snapshot_side_effect = None
+                service.replay_result = ReplayResult(
+                    events=(), replay_floor_seq=0, last_seq=0, snapshot_required=False,
+                )
+                resp = await _request(ws, "r2", "session.subscribe", {"session_id": SID, "last_seq": 0})
+                assert resp["ok"] is True
+    _run(scenario())
+    assert len([n for n, _ in service.calls if n == "snapshot"]) == 1
+    assert len([n for n, _ in service.calls if n == "replay"]) == 2
+
+
+def test_subscribe_disconnect_during_init_cleans_up(service, identity) -> None:
+    async def slow_replay(after_seq: int):
+        # Slow (but bounded) replay so the client can disconnect while the
+        # handler is still initializing. Bounded so the server can always close.
+        await asyncio.sleep(0.3)
+        return ReplayResult(events=(), replay_floor_seq=0, last_seq=0, snapshot_required=False)
+
+    service.replay_result = slow_replay
+
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(_uri(s), additional_headers=_headers(identity), compression=None) as ws:
+                await ws.send(encode_envelope(_cmd("r1", "session.subscribe", {"session_id": SID, "last_seq": 0})))
+                # Wait until the handler has registered the callback (in init).
+                for _ in range(25):
+                    if service._callbacks:
+                        break
+                    await asyncio.sleep(0.02)
+                assert service._callbacks
+            # Client disconnects during/after init.
+            # Wait for the handler to finish the slow replay and clean up.
+            for _ in range(40):
+                if not service._callbacks:
+                    break
+                await asyncio.sleep(0.02)
+        assert not service._callbacks
+    _run(scenario())
+
+
+def test_incompatible_protocol_responds_then_closes_1008(service, identity) -> None:
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(_uri(s), additional_headers=_headers(identity), compression=None) as ws:
+                raw = json.dumps({
+                    "protocol": "eee.runtime/2", "kind": "command",
+                    "request_id": "r1", "type": "runtime.ping", "payload": {},
+                })
+                await ws.send(raw)
+                resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                assert resp["error"]["code"] == "protocol.incompatible_version"
+                blob = json.dumps(resp)
+                assert identity.token not in blob
+                assert "eee.runtime/2" not in blob
+                with pytest.raises(ConnectionClosed) as exc:
+                    await asyncio.wait_for(ws.recv(), timeout=2)
+                assert exc.value.rcvd.code == 1008
+                reason = exc.value.rcvd.reason or ""
+                assert identity.token not in reason
+                # cannot ping after close
+                try:
+                    await ws.send(json.dumps(_cmd("r2", "runtime.ping", {})))
+                    await asyncio.wait_for(ws.recv(), timeout=1)
+                    raise AssertionError("should not be able to ping after close")
+                except (ConnectionClosed, asyncio.TimeoutError):
+                    pass
+    _run(scenario())
+
+
+def test_initial_replay_queuefull_closes_1008(service, identity) -> None:
+    events = tuple(_event(i) for i in range(1, 300))
+    service.replay_result = ReplayResult(
+        events=events, replay_floor_seq=0, last_seq=299, snapshot_required=False,
+    )
+
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(_uri(s), additional_headers=_headers(identity), compression=None) as ws:
+                await ws.send(encode_envelope(_cmd("r1", "session.subscribe", {"session_id": SID, "last_seq": 0})))
+                with pytest.raises(ConnectionClosed) as exc:
+                    while True:
+                        await asyncio.wait_for(ws.recv(), timeout=3)
+                assert exc.value.rcvd.code == 1008
+                assert "runtime.slow_consumer" in (exc.value.rcvd.reason or "")
+        assert not service._callbacks
+    _run(scenario())
+    assert not any(n == "stop_run" for n, _ in service.calls)
 
 
 def test_subscribe_live_events_buffered_during_init(service, identity) -> None:

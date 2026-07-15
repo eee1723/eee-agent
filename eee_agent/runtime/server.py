@@ -33,8 +33,19 @@ from eee_agent.runtime.protocol import (
 _QUEUE_MAX = 256
 _SLOW_CODE = 1008
 _SLOW_REASON = "runtime.slow_consumer"
+_INCOMPATIBLE_REASON = "protocol.incompatible_version"
 _SUBSCRIBE_LIMIT = 1000
 _SHUTDOWN = object()
+
+
+class _CloseAction:
+    """A sender instruction to close the connection after pending sends."""
+
+    __slots__ = ("code", "reason")
+
+    def __init__(self, code: int, reason: str) -> None:
+        self.code = code
+        self.reason = reason
 
 _INTERNAL_FAILURE_ERROR = AgentError(
     code="internal.runtime_failure",
@@ -177,7 +188,7 @@ class _Subscription:
 class _ClientContext:
     __slots__ = (
         "connection", "queue", "subscriptions", "sender_task",
-        "slow_consumer", "closed",
+        "slow_consumer", "closing", "closed",
     )
 
     def __init__(self, connection) -> None:
@@ -186,6 +197,7 @@ class _ClientContext:
         self.subscriptions: dict[str, _Subscription] = {}
         self.sender_task: asyncio.Task | None = None
         self.slow_consumer = False
+        self.closing = False
         self.closed = False
 
 
@@ -265,7 +277,7 @@ class RuntimeWebSocketServer:
         try:
             async for raw in connection:
                 await self._handle_message(ctx, raw)
-                if ctx.slow_consumer:
+                if ctx.closing or ctx.slow_consumer:
                     break
         except Exception:
             pass
@@ -282,12 +294,21 @@ class RuntimeWebSocketServer:
                 except Exception:
                     pass
         ctx.subscriptions.clear()
+        task = ctx.sender_task
+        if task is None or task.done():
+            return
         try:
             ctx.queue.put_nowait(_SHUTDOWN)
         except asyncio.QueueFull:
             pass
-        task = ctx.sender_task
-        if task is not None and not task.done():
+        # Let the sender flush any pending close frame / envelopes before
+        # cancelling, so a slow-consumer or incompatible-version close (1008)
+        # is actually sent rather than degraded to 1000/no frame.
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=5)
+        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            pass
+        if not task.done():
             task.cancel()
             try:
                 await task
@@ -308,6 +329,12 @@ class RuntimeWebSocketServer:
             while True:
                 item = await ctx.queue.get()
                 if item is _SHUTDOWN:
+                    return
+                if isinstance(item, _CloseAction):
+                    try:
+                        await ctx.connection.close(item.code, item.reason)
+                    except Exception:
+                        pass
                     return
                 try:
                     await ctx.connection.send(encode_envelope(item))
@@ -332,7 +359,15 @@ class RuntimeWebSocketServer:
         try:
             command = parse_command(raw)
         except AgentException as exc:
-            self._put(ctx, error_response(_extract_request_id(raw), exc.error))
+            rid = _extract_request_id(raw)
+            self._put(ctx, error_response(rid, exc.error))
+            if exc.error.code == "protocol.incompatible_version":
+                # Send the structured error, then close with a policy-error code.
+                # Both go through the single sender task.
+                ctx.closing = True
+                self._put(
+                    ctx, _CloseAction(_SLOW_CODE, _INCOMPATIBLE_REASON)
+                )
             return
         except Exception:
             self._put(
@@ -480,38 +515,70 @@ class RuntimeWebSocketServer:
                 self._put(ctx, _event_envelope_from_record(record))
                 sub.last_delivered = record.seq
 
+        # Register the callback BEFORE any snapshot/replay so live events
+        # committed during initialization are buffered (never lost).
         sub.unsub = self._service.subscribe(on_event)
-
-        replay = await self._service.replay(
-            session_id, after_seq=last_seq, limit=_SUBSCRIBE_LIMIT
-        )
-        if replay.snapshot_required:
-            snap = await self._service.snapshot(session_id)
-            boundary = snap.snapshot_seq
-        else:
-            boundary = replay.last_seq
-
-        # Response first, then snapshot (if gap), then replay events.
-        self._put(
-            ctx,
-            success_response(req, {"session_id": session_id, "last_seq": boundary}),
-        )
-        if replay.snapshot_required:
+        init_ok = False
+        try:
+            boundary = last_seq
+            snapshot_to_send = None
+            # First replay detects whether a retention gap exists.
+            replay = await self._service.replay(
+                session_id, after_seq=boundary, limit=_SUBSCRIBE_LIMIT
+            )
+            if replay.snapshot_required:
+                # Gap: re-establish the boundary from a fresh snapshot, then
+                # re-replay with after_seq=N. The first replay's events (which
+                # overlap the snapshot) are discarded; only seq>N events are
+                # sent. Re-snapshot if the second replay still reports a gap.
+                while replay.snapshot_required:
+                    snap = await self._service.snapshot(session_id)
+                    boundary = snap.snapshot_seq
+                    snapshot_to_send = snap
+                    replay = await self._service.replay(
+                        session_id, after_seq=boundary, limit=_SUBSCRIBE_LIMIT
+                    )
+            else:
+                boundary = replay.last_seq
+            # replay.snapshot_required is now False; replay.events are seq > boundary.
+            if ctx.slow_consumer:
+                return  # init aborted; finally cleans up
+            # Response first, then snapshot (if gap), then replay events.
             self._put(
                 ctx,
-                _control_event("session.snapshot", session_id, _snapshot_to_dict(snap)),
+                success_response(req, {"session_id": session_id, "last_seq": boundary}),
             )
-        for ev in replay.events:
-            self._put(ctx, _event_envelope_from_record(ev))
-        sub.last_delivered = boundary
-
-        # Flush live events committed during init (deduped by seq > boundary).
-        for record in sorted(sub.buffer, key=lambda r: r.seq):
-            if record.seq > sub.last_delivered:
-                self._put(ctx, _event_envelope_from_record(record))
-                sub.last_delivered = record.seq
-        sub.buffer.clear()
-        sub.live = True
+            if snapshot_to_send is not None:
+                self._put(
+                    ctx,
+                    _control_event(
+                        "session.snapshot", session_id, _snapshot_to_dict(snapshot_to_send)
+                    ),
+                )
+            for ev in replay.events:
+                self._put(ctx, _event_envelope_from_record(ev))
+            sub.last_delivered = boundary
+            # Flush live events committed during init (deduped by seq > boundary).
+            for record in sorted(sub.buffer, key=lambda r: r.seq):
+                if record.seq > sub.last_delivered:
+                    self._put(ctx, _event_envelope_from_record(record))
+                    sub.last_delivered = record.seq
+            sub.buffer.clear()
+            if ctx.slow_consumer:
+                return  # init aborted; finally cleans up
+            sub.live = True
+            init_ok = True
+        finally:
+            if not init_ok:
+                # Atomic cleanup: a half-initialized subscription is removed and
+                # its callback unsubscribed so a later subscribe re-replays.
+                ctx.subscriptions.pop(session_id, None)
+                if sub.unsub is not None:
+                    try:
+                        sub.unsub()
+                    except Exception:
+                        pass
+                sub.buffer.clear()
 
     def _broadcast_session_deleted(self, session_id: str) -> None:
         # Non-persisted control event to current subscribers; remove their
