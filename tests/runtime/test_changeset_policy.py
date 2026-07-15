@@ -1051,3 +1051,126 @@ def test_affected_node_wrong_path_denied_across_modes(permission: PermissionMode
     decision = evaluate_policy(cs, workspace=workspace)
     assert decision.allowed is False
     assert "policy.affected_target_omitted" in decision.denial_codes
+
+
+# --------------------------------------------------------------------------
+# F7: duplicate created node ids / derived paths and manifest id reuse.
+# --------------------------------------------------------------------------
+
+
+def test_owned_denies_create_reusing_manifest_node_id() -> None:
+    # n_child is already owned by the manifest; stable ids are not reusable.
+    create = CreateNode(
+        op_id="op_create",
+        parent=_noderef(node_id="n_root", path="/obj/ws", expected_type="geo"),
+        node_id="n_child",
+        node_type="geo",
+        node_name="newchild",
+        workspace_id=WS,
+        capability="modeling",
+        role="member",
+    )
+    cs = _changeset(
+        (create,),
+        affected=(_noderef(node_id="n_child", path="/obj/ws/newchild"),),
+        affected_paths=("/obj/ws/newchild",),
+    )
+    decision = evaluate_policy(cs, workspace=_manifest())
+    assert decision.allowed is False
+    assert "policy.node_id_reused" in decision.denial_codes
+
+
+def test_owned_allows_create_with_new_node_id() -> None:
+    create = CreateNode(
+        op_id="op_create",
+        parent=_noderef(node_id="n_root", path="/obj/ws", expected_type="geo"),
+        node_id="n_new",
+        node_type="geo",
+        node_name="new",
+        workspace_id=WS,
+        capability="modeling",
+        role="member",
+    )
+    cs = _changeset(
+        (create,),
+        affected=(_noderef(node_id="n_new", path="/obj/ws/new"),),
+        affected_paths=("/obj/ws/new",),
+    )
+    decision = evaluate_policy(cs, workspace=_manifest())
+    assert decision.allowed is True
+    assert decision.denial_codes == ()
+
+
+def test_conflicting_parent_reusing_created_id_is_external() -> None:
+    # create n_a at /obj/ws/a, then create n_b whose parent claims n_a at a
+    # conflicting path. That parent must count as external, not internal via
+    # the reused created id.
+    create_a = CreateNode(
+        op_id="c_a",
+        parent=_noderef(node_id="n_root", path="/obj/ws", expected_type="geo"),
+        node_id="n_a",
+        node_type="geo",
+        node_name="a",
+        workspace_id=WS,
+        capability="modeling",
+        role="member",
+    )
+    create_b = CreateNode(
+        op_id="c_b",
+        parent=NodeRef(node_id="n_a", path="/obj/ws/WRONG", expected_type="geo", expected_workspace_id=WS),
+        node_id="n_b",
+        node_type="geo",
+        node_name="b",
+        workspace_id=WS,
+        capability="modeling",
+        role="member",
+    )
+    cs = _changeset(
+        (create_a, create_b),
+        affected=(
+            NodeRef(node_id="n_a", path="/obj/ws/a", expected_type="geo", expected_workspace_id=WS),
+            NodeRef(node_id="n_b", path="/obj/ws/WRONG/b", expected_type="geo", expected_workspace_id=WS),
+        ),
+        affected_paths=("/obj/ws/a", "/obj/ws/WRONG/b"),
+        touches_external=False,  # the conflicting parent is external -> under-reported
+    )
+    decision = evaluate_policy(cs, workspace=_manifest())
+    assert decision.allowed is False
+    assert "policy.effect_contradiction" in decision.denial_codes
+
+
+def test_parent_matching_created_node_is_internal() -> None:
+    # create n_a, then create n_b under n_a with the parent matching the
+    # created n_a exactly -> the parent is internal, no external touch.
+    create_a = CreateNode(
+        op_id="c_a",
+        parent=_noderef(node_id="n_root", path="/obj/ws", expected_type="geo"),
+        node_id="n_a",
+        node_type="geo",
+        node_name="a",
+        workspace_id=WS,
+        capability="modeling",
+        role="member",
+    )
+    create_b = CreateNode(
+        op_id="c_b",
+        parent=NodeRef(node_id="n_a", path="/obj/ws/a", expected_type="geo", expected_workspace_id=WS),
+        node_id="n_b",
+        node_type="geo",
+        node_name="b",
+        workspace_id=WS,
+        capability="modeling",
+        role="member",
+    )
+    cs = _changeset(
+        (create_a, create_b),
+        affected=(
+            NodeRef(node_id="n_a", path="/obj/ws/a", expected_type="geo", expected_workspace_id=WS),
+            NodeRef(node_id="n_b", path="/obj/ws/a/b", expected_type="geo", expected_workspace_id=WS),
+        ),
+        affected_paths=("/obj/ws/a", "/obj/ws/a/b"),
+        touches_external=False,
+    )
+    decision = evaluate_policy(cs, workspace=_manifest())
+    assert decision.allowed is True
+    assert decision.denial_codes == ()

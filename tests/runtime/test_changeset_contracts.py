@@ -830,6 +830,43 @@ def test_changeset_rejects_empty_or_too_many_operations() -> None:
         _changeset(operations=too_many)
 
 
+# F7-1: distinct operation IDs must not make a created node id or derived
+# create path repeatable within a ChangeSet.
+
+
+def test_changeset_rejects_duplicate_created_node_id() -> None:
+    create_a = _create(op_id="op_a", node_id="n_new", node_name="geo_new")
+    create_b = _create(op_id="op_b", node_id="n_new", node_name="other")
+    with pytest.raises((TypeError, ValueError), match="created"):
+        _changeset(operations=(create_a, create_b))
+
+
+def test_changeset_rejects_duplicate_created_derived_path() -> None:
+    # distinct node ids but the same derived path (same parent + node name)
+    create_a = _create(op_id="op_a", node_id="n_a", node_name="dup")
+    create_b = _create(op_id="op_b", node_id="n_b", node_name="dup")
+    with pytest.raises((TypeError, ValueError), match="created"):
+        _changeset(operations=(create_a, create_b))
+
+
+def test_changeset_accepts_distinct_created_node_ids_and_paths() -> None:
+    create_a = _create(op_id="op_a", node_id="n_a", node_name="a")
+    create_b = _create(op_id="op_b", node_id="n_b", node_name="b")
+    cs = _changeset(
+        operations=(create_a, create_b),
+        affected_nodes=(
+            _noderef(node_id="n_a", path="/obj/ws/a"),
+            _noderef(node_id="n_b", path="/obj/ws/b"),
+        ),
+        risk_summary=_risk(
+            effect_names=("node.create",),
+            affected_paths=("/obj/ws/a", "/obj/ws/b"),
+            operation_count=2,
+        ),
+    )
+    assert len(cs.operations) == 2
+
+
 def test_changeset_rejects_duplicate_affected_nodes() -> None:
     target = _noderef()
     with pytest.raises((TypeError, ValueError)):

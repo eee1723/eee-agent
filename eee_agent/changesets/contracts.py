@@ -182,6 +182,11 @@ def _node_identity(ref: NodeRef) -> str:
     return ref.node_id if ref.node_id is not None else ref.path
 
 
+def _derive_create_path(parent_path: str, node_name: str) -> str:
+    """Canonical derived path of a newly created node: parent path + name."""
+    return f"{parent_path.rstrip('/')}/{node_name}"
+
+
 def _unique_node_refs(items: Sequence[NodeRef], label: str) -> None:
     """Reject duplicate or contradictory node references.
 
@@ -1031,6 +1036,26 @@ def _freeze_operations(value: object) -> tuple[object, ...]:
     return items
 
 
+def _check_unique_created_nodes(items: Sequence[object]) -> None:
+    """Reject repeated created node ids or derived create paths.
+
+    Distinct operation ids must not make a ``node.create`` effect repeat the
+    same stable node id or the same derived path within one ChangeSet.
+    """
+    seen_ids: set[str] = set()
+    seen_paths: set[str] = set()
+    for op in items:
+        if not isinstance(op, CreateNode):
+            continue
+        if op.node_id in seen_ids:
+            raise ValueError("ChangeSet.operations: duplicate created node id")
+        seen_ids.add(op.node_id)
+        derived = _derive_create_path(op.parent.path, op.node_name)
+        if derived in seen_paths:
+            raise ValueError("ChangeSet.operations: duplicate created node path")
+        seen_paths.add(derived)
+
+
 def _freeze_node_refs(value: object, label: str) -> tuple[NodeRef, ...]:
     return _freeze_typed_sequence(value, label, (NodeRef,))  # type: ignore[return-value]
 
@@ -1074,6 +1099,7 @@ class ChangeSet:
             _normalize_identifiers(self.scoped_node_ids, "ChangeSet.scoped_node_ids", _MAX_SCOPE_IDS),
         )
         operations = _freeze_operations(self.operations)
+        _check_unique_created_nodes(operations)
         affected = _freeze_node_refs(self.affected_nodes, "ChangeSet.affected_nodes")
         read_deps = _freeze_node_refs(self.read_dependencies, "ChangeSet.read_dependencies")
         if len(affected) + len(read_deps) > _MAX_NODE_REFS:

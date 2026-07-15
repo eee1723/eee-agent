@@ -38,6 +38,7 @@ from eee_agent.changesets.contracts import (
     PolicyDecision,
     SetParm,
     WorkspaceManifest,
+    _derive_create_path,
 )
 
 # Stable sorted namespaced denial codes.
@@ -51,6 +52,7 @@ _AMBIGUOUS_TARGET = "policy.ambiguous_target"
 _AFFECTED_TARGET_OMITTED = "policy.affected_target_omitted"
 _EFFECT_CONTRADICTION = "policy.effect_contradiction"
 _BACKUP_UNAVAILABLE = "policy.backup_unavailable"
+_NODE_ID_REUSED = "policy.node_id_reused"
 
 
 def _normalize_path_set(value: object, label: str) -> frozenset[str]:
@@ -68,10 +70,6 @@ def _node_identity(ref: NodeRef) -> str:
     return ref.node_id if ref.node_id is not None else ref.path
 
 
-def _derive_create_path(parent_path: str, node_name: str) -> str:
-    return f"{parent_path.rstrip('/')}/{node_name}"
-
-
 def _matches_manifest(ref: NodeRef, owned: OwnedNodeRef, workspace_id: str) -> bool:
     """Exact path/type/workspace match against a manifest owned-node fact."""
     return (
@@ -84,18 +82,20 @@ def _matches_manifest(ref: NodeRef, owned: OwnedNodeRef, workspace_id: str) -> b
 def _is_external_reference(
     ref: NodeRef,
     workspace: WorkspaceManifest | None,
-    created_ids: frozenset[str],
+    created_refs: frozenset[NodeRef],
     owned_by_id: dict[str, OwnedNodeRef],
     owned_by_path: dict[str, OwnedNodeRef],
 ) -> bool:
     """Whether a referenced node is external to the workspace.
 
-    A node created by this changeset is internal. With a manifest, a reference
-    is internal only on an exact path/type/workspace match against an owned
-    fact — an id-only match is insufficient. Without a manifest, ownership is
-    unprovable, so the reference fails closed as external.
+    A reference is internal only when it exactly matches a node created by this
+    changeset (full id/path/type/workspace agreement) — a reused created id with
+    conflicting facts does not qualify. With a manifest, a reference is internal
+    only on an exact match against an owned fact (an id-only match is
+    insufficient). Without a manifest, ownership is unprovable, so the reference
+    fails closed as external.
     """
-    if ref.node_id is not None and ref.node_id in created_ids:
+    if ref in created_refs:
         return False
     if workspace is not None:
         owned = owned_by_id.get(ref.node_id) if ref.node_id is not None else owned_by_path.get(ref.path)
@@ -161,6 +161,17 @@ def evaluate_policy(
         if target.path in ambiguous:
             denial_codes.add(_AMBIGUOUS_TARGET)
 
+    # Synthesize the full facts of every node created by this changeset.
+    created_refs = frozenset(
+        NodeRef(
+            node_id=op.node_id,
+            path=_derive_create_path(op.parent.path, op.node_name),
+            expected_type=op.node_type,
+            expected_workspace_id=op.workspace_id,
+        )
+        for op in create_ops
+    )
+
     # F3/F6 (all modes): every changed target must be enumerated in affected_nodes
     # with agreeing bounded facts (identity + path + expected type + workspace),
     # not just a shared node id.
@@ -171,26 +182,19 @@ def evaluate_policy(
     for source in wire_sources:
         if source not in affected_set:
             denial_codes.add(_AFFECTED_TARGET_OMITTED)
-    for op in create_ops:
-        expected = NodeRef(
-            node_id=op.node_id,
-            path=_derive_create_path(op.parent.path, op.node_name),
-            expected_type=op.node_type,
-            expected_workspace_id=op.workspace_id,
-        )
-        if expected not in affected_set:
+    for created in created_refs:
+        if created not in affected_set:
             denial_codes.add(_AFFECTED_TARGET_OMITTED)
 
     # F4: affected_paths must exactly equal the paths derived from the operations.
     derived_paths = {target.path for target in changed_targets}
     derived_paths |= {source.path for source in wire_sources}
-    derived_paths |= {_derive_create_path(op.parent.path, op.node_name) for op in create_ops}
+    derived_paths |= {created.path for created in created_refs}
     if set(risk.affected_paths) != derived_paths:
         denial_codes.add(_EFFECT_CONTRADICTION)
 
     # F4/F5: touches_external_nodes must match the derived external-touch fact,
     # computed over changed targets, wire sources, and create parents.
-    created_ids = frozenset(op.node_id for op in create_ops)
     if workspace is not None:
         owned_by_id = {node.node_id: node for node in workspace.nodes}
         owned_by_path = {node.path: node for node in workspace.nodes}
@@ -203,7 +207,7 @@ def evaluate_policy(
         *(op.parent for op in create_ops),
     ]
     derived_touches_external = any(
-        _is_external_reference(ref, workspace, created_ids, owned_by_id, owned_by_path)
+        _is_external_reference(ref, workspace, created_refs, owned_by_id, owned_by_path)
         for ref in referenced
     )
     if risk.touches_external_nodes != derived_touches_external:
@@ -274,6 +278,8 @@ def _evaluate_owned(
             denial_codes.add(_OWNERSHIP_MISMATCH)
 
     for op in create_ops:
+        if op.node_id in owned_by_id:
+            denial_codes.add(_NODE_ID_REUSED)
         if op.workspace_id != workspace.workspace_id:
             denial_codes.add(_OWNERSHIP_MISMATCH)
 
