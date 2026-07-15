@@ -68,8 +68,10 @@ tests, a 257-test focused regression slice, and a fresh full offline suite of
 Codex-accepted at `c717e60` (implementation `3d4687f` plus the cross-thread
 Future-resolution fix); its final focused regression passed 311 tests and the
 fresh full offline suite passed 1329 tests. Task 15-D (token handoff, real
-transport, and integration acceptance) is next. The read-only design and
-executable breakdown are recorded in
+transport, and integration acceptance) is Codex-accepted at `bfc00f3` on top
+of implementation `fcdee32`; its final focused regression passed 370 tests,
+the full offline suite passed 1388 tests, and the real Houdini smoke passed 20
+checks. The read-only design and executable breakdown are recorded in
 `docs/superpowers/specs/2026-07-15-secure-houdini-bridge-readonly-design.md`
 and `docs/superpowers/plans/2026-07-15-secure-houdini-bridge-readonly.md`.
 
@@ -92,6 +94,14 @@ integration tests; unauthorized/wrong-epoch tests; cancellation and
 queue-order tests; and proof that legacy unrestricted entry points are not used
 by Runtime by default. The full token must never appear in discovery, logs,
 SQLite, events, command lines, or environment variables.
+
+**Task 15-D status:** Accepted after independently verifying the listener
+startup failure path. `BridgeServer.serve()` now owns the adopted listener for
+the lifecycle, closes and awaits it when token/discovery publication fails,
+preserves the original publication exception, and removes both identity files.
+`BridgeServer.stop()` is idempotent and closes the listener, queue, writers,
+adapter callback, and identity files in a bounded order. No UI, ChangeSet,
+approval, or scene-write behavior is included.
 
 ## Task 16: Policy, typed ChangeSet, approval, and transactional execution
 

@@ -29,11 +29,10 @@ Generated: 2026-07-15 (Asia/Shanghai)
   `docs/superpowers/specs/2026-07-15-secure-houdini-bridge-readonly-design.md`;
   its executable plan is
   `docs/superpowers/plans/2026-07-15-secure-houdini-bridge-readonly.md`.
-  Task 15-A, 15-B, and 15-C implementation slices have now been reviewed;
-  Task 15-D is the next unstarted slice. The user approved the Task 15-D
-  token-handoff correction: the full Bridge token must travel only through a
-  separate atomic `bridge.token` file, while discovery remains
-  fingerprint-only.
+  Task 15-A, 15-B, 15-C, and 15-D implementation slices have now been
+  reviewed and accepted. Task 15-D includes the user-approved token-handoff
+  correction: the full Bridge token travels only through a separate atomic
+  `bridge.token` file, while discovery remains fingerprint-only.
 - Task 15-A strict DTO/error contracts are Codex-accepted at `4c22d45`.
   Focused contract tests: 97 passed; Task 15-A regression slice: 261 passed;
   fresh full offline suite: 1208 passed.
@@ -48,11 +47,16 @@ Generated: 2026-07-15 (Asia/Shanghai)
   regression: 311 passed; fresh full offline suite: 1329 passed. The queue
   resolves Futures through the owning loop's `call_soon_threadsafe`; the
   adapter remains lazy-import/read-only and has no transport listener.
-- The latest pushed planning tip is `54408dd`; this handoff update records the
-  approved token-file design before implementation. Task 15-D is next and has
-  not started.
+- Task 15-D real transport/token handoff is Codex-accepted at `bfc00f3` on top
+  of implementation `fcdee32`. Final transport regression: 370 focused tests;
+  full offline suite: 1388 passed; real hython smoke: 20 checks passed. The
+  lifecycle fix makes publication failure close and await the adopted listener,
+  remove both identity files, and preserve the original publication error.
+- The latest local tip is `bfc00f3`; the branch is ready to push after this
+  acceptance update. Task 16 remains unstarted.
 
-Do not merge this branch to `main` until the three accepted commits are pushed
+Do not merge this branch to `main` until the accepted implementation and
+documentation commits are pushed
 and the final integration decision is made. Manual GLM/Houdini acceptance is
 separate from the offline test gate and remains pending.
 
@@ -364,25 +368,48 @@ The implementation commit `3d4687f` plus fix `c717e60` changes only the queue,
 Houdini adapter, and their tests. The queue has no worker/task and resolves
 cross-thread Futures through the owning event loop. The adapter lazy-imports
 `hou`, performs only bounded reads, tracks load/clear epochs, and creates no
-transport listener. Task 15-D now begins with token-file RED tests, then the
-offline loopback server, and only after that the real hython smoke. No UI,
-ChangeSet, approval, or scene-write path has started.
+transport listener. Task 15-D was then implemented in `fcdee32` and its
+listener-lifecycle defect was fixed in `bfc00f3`; no UI, ChangeSet, approval,
+or scene-write path has started.
+
+## Task 15-D: Accepted authenticated read-only transport (`bfc00f3`)
+
+Independent verification confirmed:
+
+```text
+Transport suite:          31 passed
+Task 15 focused slice:    370 passed
+Full offline suite:       1388 passed
+Real hython smoke:        20 checks passed, exit 0
+uv lock --check:           exit 0
+compileall:                exit 0
+git diff --check:           exit 0
+```
+
+The implementation commit `fcdee32` adds the atomic `bridge.token` handoff,
+fingerprint-verified client loading, and the real loopback BridgeServer. The
+follow-up `bfc00f3` adds `serve()/stop()` ownership for the adopted listener:
+publication failure closes and awaits the listener, cleans token/discovery,
+and preserves the original exception; normal stop is idempotent and drains
+the queue, writers, adapter callback, and identity files. The real smoke used
+`D:\\houdini\\bin\\hython.exe` and verified token auth, scene query,
+selection parity, stale epoch, FIFO, deadline cleanup, wrong-token rejection,
+shutdown cleanup, and unchanged scene fingerprint.
 
 ## Remaining Delivery Sequence
 
-1. Push completed through the Task 15-C acceptance and planning updates at
-   `54408dd`; the next implementation commit must remain limited to the
-   Task 15-D authorized file list.
+1. Push the accepted Task 15-D implementation and this handoff update; keep
+   `feature/runtime` separate from `main` until the integration decision.
 2. On the next computer, restore the branch from `origin/feature/runtime` and
    rerun the clean baseline verification below.
 3. Perform the separate manual GLM-5.2 and Houdini read-only smoke procedures
    from the Runtime plan, recording external-service failures separately.
 4. Decide whether to merge `feature/runtime` into `main`; do not merge during
    the migration without an explicit integration decision.
-5. Task 15-A/B/C are accepted. Issue the separate Task 15-D Claude prompt only
-   after reviewing this handoff; require `bridge.token` atomic handoff,
-   fingerprint verification, failure cleanup, offline loopback coverage, and
-   then the real Houdini smoke. Keep the scope read-only.
+5. Task 15-A/B/C/D are accepted. Task 16 (typed ChangeSet, policy, approval,
+   and transactional write execution) is the next implementation milestone;
+   it must remain a separately planned, review-gated task. Keep the current
+   Bridge strictly read-only.
 
 ## New Computer Restore Procedure
 

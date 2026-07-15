@@ -215,11 +215,11 @@ git add eee_agent/houdini_bridge/queue.py houdini_side/secure_bridge.py tests/ru
 git commit -m "feat: add main-thread read-only Houdini bridge queue"
 ```
 
-## Task 15-D: Real transport, token handoff, and integration acceptance
+## Task 15-D: Real transport, token handoff, and integration acceptance (accepted)
 
 **Files:** Modify `eee_agent/houdini_bridge/auth.py`, `eee_agent/houdini_bridge/client.py`, and `houdini_side/secure_bridge.py`; extend the focused auth/client tests; create `tests/runtime/test_houdini_bridge_transport.py` and `tests/runtime/houdini_bridge_smoke.py`; modify only the Task 15 section of `README.md` and `CLAUDE.md` if installation instructions are required.
 
-- [ ] **Step 1: Write RED token-handoff and offline loopback tests**
+- [x] **Step 1: Write RED token-handoff and offline loopback tests**
 
 Add RED coverage for the approved local identity handoff before adding a
 listener. The tests must cover atomic write/read of `bridge.token`, exact
@@ -238,7 +238,7 @@ uv run --extra eval pytest tests/runtime/test_houdini_bridge_transport.py -q
 
 Expected RED: the token-file API and server entrypoint do not yet exist.
 
-- [ ] **Step 2: Implement the token handoff and framed loopback server**
+- [x] **Step 2: Implement the token handoff and framed loopback server**
 
 Add explicit auth helpers for the `bridge.token` file. The client must be able
 to load the token together with discovery, verify the advertised fingerprint,
@@ -256,14 +256,14 @@ files; `close()` is idempotent and does not save/clear/mutate the HIP.
 
 The server must reject wrong protocol/kind/token, duplicate keys, invalid frames, stale epochs, unknown operations, oversized frames, and requests after shutdown.
 
-- [ ] **Step 3: Verify offline transport GREEN**
+- [x] **Step 3: Verify offline transport GREEN**
 
 ```powershell
 uv run --extra eval pytest tests/runtime/test_houdini_bridge_transport.py -q
 uv run --extra eval pytest tests/runtime/test_houdini_bridge_queue.py tests/runtime/test_houdini_bridge_contracts.py tests/runtime/test_houdini_bridge_auth.py tests/runtime/test_houdini_bridge_client.py tests/runtime/test_houdini_bridge_transport.py tests/runtime/test_auth.py tests/runtime/test_protocol.py -q
 ```
 
-- [ ] **Step 4: Write the explicit smoke helper**
+- [x] **Step 4: Write the explicit smoke helper**
 
 The helper must read `bridge.token` from the same state directory as the
 discovery record, verify the discovery fingerprint, connect using the framed
@@ -274,7 +274,7 @@ never print the token or place it in a command line, environment variable,
 log, or exception; it must never create/delete/connect/set parameters/save/
 export or call the legacy `eee_agent.bridge` client.
 
-- [ ] **Step 5: Run offline RED/GREEN regression before Houdini**
+- [x] **Step 5: Run offline RED/GREEN regression before Houdini**
 
 ```powershell
 uv run --extra eval pytest tests/runtime/test_houdini_bridge_contracts.py tests/runtime/test_houdini_bridge_auth.py tests/runtime/test_houdini_bridge_client.py tests/runtime/test_houdini_bridge_queue.py tests/runtime/test_houdini_bridge_transport.py -q
@@ -282,7 +282,7 @@ uv run --extra eval pytest tests/runtime/test_houdini_bridge_contracts.py tests/
 
 Expected: all Task 15 tests pass before starting Houdini.
 
-- [ ] **Step 6: Run the real hython smoke**
+- [x] **Step 6: Run the real hython smoke**
 
 Start Houdini 21.0.440, load the bridge script from the repository, and run:
 
@@ -292,7 +292,7 @@ Start Houdini 21.0.440, load the bridge script from the repository, and run:
 
 The smoke must prove loopback binding, token authentication, selection parity, node/type facts, geometry bounds, load/clear epoch increment, Save/Save As epoch stability, stale-epoch rejection, FIFO ordering, cancellation, and clean shutdown. Record the before/after scene fingerprint and assert no mutation.
 
-- [ ] **Step 7: Run full acceptance**
+- [x] **Step 7: Run full acceptance**
 
 ```powershell
 uv lock --check
@@ -304,12 +304,23 @@ git status --short --branch
 
 Expected: zero failures, no new skips/xfailed tests, lock/compile/diff checks exit 0, and only authorized Task 15 files changed.
 
-- [ ] **Step 8: Commit Task 15-D**
+- [x] **Step 8: Commit Task 15-D**
 
 ```powershell
 git add eee_agent/houdini_bridge/auth.py eee_agent/houdini_bridge/client.py houdini_side/secure_bridge.py tests/runtime/test_houdini_bridge_auth.py tests/runtime/test_houdini_bridge_client.py tests/runtime/test_houdini_bridge_transport.py tests/runtime/houdini_bridge_smoke.py README.md CLAUDE.md
 git commit -m "feat: expose authenticated read-only Houdini scene query"
 ```
+
+## Task 15-D acceptance record
+
+Codex independently accepted implementation `fcdee32` plus lifecycle fix
+`bfc00f3`. Evidence: token/auth/client/transport slice 122 passed; the full
+Task 15 focused slice passed 370; the complete offline suite passed 1388;
+`uv lock --check`, compileall, and `git diff --check` passed; and the real
+`D:\\houdini\\bin\\hython.exe` smoke passed 20 checks with no scene mutation.
+The lifecycle fix specifically proves a publication failure leaves
+`listener.is_serving() == False`, removes both identity files, and preserves
+the original publication exception even when cleanup raises.
 
 ## Promotion gate
 
