@@ -42,6 +42,7 @@ from eee_agent.changesets.repository import (
 from eee_agent.core import AgentException
 from eee_agent.houdini_bridge.contracts import SceneBinding
 from eee_agent.runtime.database import RuntimeDatabase
+from eee_agent.runtime.events import EventStore
 
 # --------------------------------------------------------------------------
 # constants + DTO factories (compact, self-contained)
@@ -870,6 +871,74 @@ def test_update_approval_rejects_mismatched_approval_id(db_path: Path) -> None:
             assert raw["approval_id"] == APR
             assert raw["decision"] == "Pending"
             assert got.approval_id == raw["approval_id"]
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_read_paths_detect_tampered_approval_identity_column(db_path: Path) -> None:
+    """Read paths must fail closed when an identity column is swapped under them.
+
+    Regression: a direct ``UPDATE approvals SET approval_id = ...`` to another
+    valid ``apr_*`` value leaves ``payload_json`` and its storage ``digest``
+    untouched, so the payload still decodes and its digest still verifies — yet
+    the denormalized row column and the decoded DTO disagree about whose
+    approval this is. Every approval read path (``get_approval`` and the
+    combined ``decide`` primitive, which reads via ``_fetch_approval_record``)
+    must detect the inconsistency and raise ``runtime.record_corrupt`` before
+    any state transition or event append.
+    """
+
+    async def scenario() -> None:
+        db, repo = await fresh_repo(db_path)
+        try:
+            await _seed_proposed_with_pending_approval(repo)
+            digest = (await repo.get_changeset(CHG)).changeset.digest
+
+            # Tamper ONLY the denormalized approval_id column: payload_json and
+            # its digest are left intact, so a digest check alone cannot catch
+            # this. The impostor is a distinct but valid apr_* identity.
+            impostor_id = f"apr_{'6' * 32}"
+            async with db.write_transaction() as conn:
+                await conn.execute(
+                    "UPDATE approvals SET approval_id = ? WHERE change_id = ?",
+                    (impostor_id, CHG),
+                )
+            raw = await db.fetchone(
+                "SELECT approval_id, digest FROM approvals WHERE change_id = ?",
+                (CHG,),
+            )
+            assert raw is not None
+            assert raw["approval_id"] == impostor_id  # column swapped...
+
+            # ...get_approval must NOT silently hand back a row whose column and
+            # payload disagree: it must fail closed as a corrupt record.
+            with pytest.raises(AgentException) as exc:
+                await repo.get_approval(CHG)
+            assert _err_code(exc.value) == "runtime.record_corrupt"
+
+            # decide() reads the same row through _fetch_approval_record and
+            # must fail closed too, before any state transition or event append.
+            deciding_repo = ChangeSetRepository(db, events=EventStore(db))
+            with pytest.raises(AgentException) as exc:
+                await deciding_repo.decide(
+                    CHG,
+                    changeset_digest=digest,
+                    decision=ApprovalDecision.REJECTED,
+                    now=LATER,
+                )
+            assert _err_code(exc.value) == "runtime.record_corrupt"
+
+            # No state/event mutation: the ChangeSet keeps its seeded state and
+            # no decision/expiry events were appended to the log.
+            stored = await repo.get_changeset(CHG)
+            assert stored.state is ChangeSetState.PROPOSED
+            event_rows = await db.fetchall(
+                "SELECT event_type FROM events WHERE session_id = ? ORDER BY seq",
+                (SES,),
+            )
+            assert [r["event_type"] for r in event_rows] == []
         finally:
             await db.close()
 

@@ -768,6 +768,28 @@ def _verify_payload(payload_json: str, stored_digest: str) -> None:
         raise _record_corrupt()
 
 
+def _check_approval_row_identity(row, approval: ApprovalRecord) -> None:
+    """Verify the denormalized approval columns match the decoded payload DTO.
+
+    The ``approvals`` row denormalizes four identity fields — ``approval_id``,
+    ``change_id``, ``changeset_digest``, ``decision`` — that also live inside the
+    canonical ``payload_json``. The storage digest alone cannot detect a direct
+    ``UPDATE approvals SET approval_id = ...`` that swaps one of these columns
+    for another valid value while leaving ``payload_json``/``digest`` untouched:
+    the payload still decodes and its digest still verifies, yet the row and the
+    decoded DTO disagree about whose approval this is. Requiring the four
+    columns to match the decoded DTO closes that gap and fails closed as
+    ``runtime.record_corrupt``.
+    """
+    if (
+        row["approval_id"] != approval.approval_id
+        or row["change_id"] != approval.change_id
+        or row["changeset_digest"] != approval.changeset_digest
+        or row["decision"] != approval.decision.value
+    ):
+        raise _record_corrupt()
+
+
 def _coerce_states(states: object) -> list[ChangeSetState]:
     if isinstance(states, ChangeSetState):
         raise TypeError("states must be an iterable of ChangeSetState, not a single value")
@@ -1035,7 +1057,9 @@ class ChangeSetRepository:
         if row is None:
             raise _approval_not_found()
         _verify_payload(row["payload_json"], row["digest"])
-        return _decode_approval(_loads_canonical(row["payload_json"]))
+        approval = _decode_approval(_loads_canonical(row["payload_json"]))
+        _check_approval_row_identity(row, approval)
+        return approval
 
     async def update_approval(
         self,
@@ -1690,7 +1714,9 @@ async def _fetch_approval_record(conn, change_id: str) -> ApprovalRecord | None:
     if row is None:
         return None
     _verify_payload(row["payload_json"], row["digest"])
-    return _decode_approval(_loads_canonical(row["payload_json"]))
+    approval = _decode_approval(_loads_canonical(row["payload_json"]))
+    _check_approval_row_identity(row, approval)
+    return approval
 
 
 def _state_changed_payload(
