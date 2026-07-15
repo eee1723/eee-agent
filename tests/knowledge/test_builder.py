@@ -386,3 +386,58 @@ def test_main_real_build_requires_out(capsys) -> None:
     assert rc != 0
     err = capsys.readouterr().err
     assert json.loads(err)["ok"] is False
+
+
+# --- error sanitization ---------------------------------------------------
+
+def test_build_cache_sanitizes_drive_path_in_wrapped_error(tmp_path: Path) -> None:
+    def leaking_writer(path, bundle, manifest):
+        raise OSError("cannot open D:\\houdini\\houdini\\help\\nodes.zip")
+
+    with pytest.raises(BuildError) as exc_info:
+        build_cache(
+            BuildOptions(output=tmp_path / "x.sqlite3", selftest=True),
+            now=lambda: _dt(0), pid_exists=lambda p: False, writer=leaking_writer,
+        )
+    msg = str(exc_info.value)
+    assert msg  # diagnosable, non-empty
+    assert "D:\\" not in msg
+    assert "houdini" not in msg
+
+
+def test_main_sanitizes_sensitive_error_stderr(
+    monkeypatch, capsys, tmp_path: Path
+) -> None:
+    sensitive = (
+        "failed at " + r"D:\houdini\help\nodes.zip"
+        + " and " + r"C:\Users\me\cache"
+        + " via " + r"\\server\share\y"
+        + " query SELECT * FROM edges;"
+        + " Traceback (most recent call last): File \"x\", line 1"
+    )
+
+    def fail(options):
+        raise BuildError(sensitive)
+
+    monkeypatch.setattr("eee_agent.knowledge.build.build_cache", fail)
+    rc = main(["--out", str(tmp_path / "x.sqlite3")])
+    assert rc == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["ok"] is False
+    msg = err["error"]
+    assert msg  # diagnosable, non-empty
+    assert "houdini" not in msg
+    assert "Users" not in msg
+    assert "server" not in msg
+    assert "SELECT" not in msg
+    assert "Traceback" not in msg
+    assert "File \"x\"" not in msg
+
+
+def test_selftest_success_output_has_no_paths(capsys) -> None:
+    rc = main(["--selftest"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert ":\\\\" not in out  # no drive path in success JSON
+    data = json.loads(out)
+    assert data["ok"] is True

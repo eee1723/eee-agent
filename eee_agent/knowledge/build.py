@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -75,6 +76,16 @@ _DEFAULT_HFS_CANDIDATES = (
     Path("C:/Program Files/Side Effects Software/Houdini 21.0.440"),
 )
 
+# Patterns scrubbed from build error messages so no absolute HFS path, UNC path,
+# raw SQL or traceback is ever written to the cache, manifest, stdout or stderr.
+_UNC_PATH_RE = re.compile(r"\\\\[^\s'\":<>|*?]+")
+_DRIVE_PATH_RE = re.compile(r"[A-Za-z]:[\\/][^\s'\":<>|*?]+")
+_SQL_STATEMENT_RE = re.compile(
+    r"\b(?:SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|PRAGMA)\b[^;]*;?",
+    re.IGNORECASE,
+)
+_TRACEBACK_RE = re.compile(r"Traceback \(most recent call last\):.*", re.DOTALL)
+
 
 class BuildError(Exception):
     """A build could not be completed (lock, source, graph or write failure)."""
@@ -115,7 +126,20 @@ def _default_repo_root() -> Path:
 
 
 def _sanitize_error(exc: BaseException) -> str:
-    return str(exc) or type(exc).__name__
+    """Return a diagnosable, non-sensitive message for an exception.
+
+    Scrubs Windows drive paths, UNC paths, raw SQL statements and tracebacks so
+    the builder never writes an absolute HFS path, raw SQL or a traceback into
+    the cache, manifest, stdout or stderr. The short remaining message (or the
+    exception class name) stays diagnosable.
+    """
+    text = str(exc) or type(exc).__name__
+    text = _UNC_PATH_RE.sub("[path]", text)
+    text = _DRIVE_PATH_RE.sub("[path]", text)
+    text = _SQL_STATEMENT_RE.sub("[sql]", text)
+    text = _TRACEBACK_RE.sub("[traceback]", text)
+    text = " ".join(text.split())
+    return text or type(exc).__name__
 
 
 def _new_nonce() -> str:
