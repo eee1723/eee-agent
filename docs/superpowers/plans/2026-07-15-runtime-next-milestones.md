@@ -66,7 +66,7 @@
 
 **Implementation slices (each a separate Claude prompt/commit):**
 
-1. Restricted DTOs and compatibility parser: typed `scene.query`, `workspace.inspect`, `change_set.preview`, `validate`, `capture`, and `cancel`; reject unknown fields, stale scene epoch, wrong token, and oversized payloads.
+1. Restricted DTOs and compatibility parser: typed `scene.query` (including the current Houdini selection), `workspace.inspect`, `change_set.preview`, `validate`, `capture`, and `cancel`; reject unknown fields, stale scene epoch, wrong token, and oversized payloads.
 2. Houdini main-thread queue: bounded request queue, deterministic request completion, cancellation boundaries, and no direct background-thread `hou` calls.
 3. SceneBinding and WorkspaceManifest: scene epoch increments on load/clear, owned-root identity is mirrored in userData, and external nodes are read-only by policy.
 4. Bridge lifecycle and recovery: separate Bridge token, authenticated loopback transport, bounded shutdown, stale-request cleanup, and process-restart diagnostics.
@@ -86,13 +86,23 @@
 
 ## Task 17: Docked `.pypanel` client
 
-**Dependency:** Runtime protocol plus Tasks 15–16 stable enough to expose session/workspace/run state.
+**Dependency:** Runtime protocol plus the read-only portion of Task 15. The read-only panel slice may start before Task 16; its write/approval slice must wait for Task 16.
+
+### 17-A: Read-only selection inspector (earliest Houdini UI test)
 
 - Keep the panel a client only: it must not import the agent graph, open SQLite, or own Runtime/checkpoint lifetimes.
-- Implement reconnect with `last_seq`, snapshot fallback, session/run inspectors, active-run close choices (continue/stop/cancel), approval display, and actionable structured errors.
-- Preserve the existing panel as a rollback path until the new client reaches parity for the accepted Runtime commands.
+- Implement the dockable shell, Runtime connection/discovery, reconnect with `last_seq`, snapshot fallback, and a selection inspector that requests the typed `scene.query` DTO and displays selected node paths, node types, scene epoch, and read-only geometry facts.
+- The first manual UI test is: select a node in Houdini, refresh or receive a selection update, and verify the panel shows the same path/type without changing the scene or writing a file.
+- Preserve the existing `chat_panel.py` path as a rollback path until this read-only slice is accepted.
 
-**Acceptance gate:** Houdini UI smoke, disconnect/reconnect without loss or duplicate, Runtime restart recovery, approval stale-state display, and no mutation from a read-only inspection session.
+### 17-B: Interactive approval and run UI
+
+- After Task 16, add session/run inspectors, active-run close choices (continue/stop/cancel), ChangeSet preview, approval state, stale-precondition display, and actionable structured errors.
+- No Apply button may call a legacy unrestricted bridge function; it must submit the typed ChangeSet flow and render the receipt/reconciliation result.
+
+**Acceptance gate for 17-A:** Houdini UI smoke, reconnect without loss or duplicate, selection path/type parity, scene-epoch display, and no mutation from a read-only inspection session.
+
+**Acceptance gate for 17-B:** Runtime restart recovery, approval stale-state display, typed apply/receipt rendering, and no legacy unrestricted write path.
 
 ## Task 18: Strict modeling capability
 
@@ -116,6 +126,6 @@
 
 ## Milestone order and promotion rule
 
-`Task 14 delivery gate → Task 15 Bridge → Task 16 ChangeSet/Policy → Task 17 Panel → Task 18 Modeling → Task 19 Capture/Vision/Eval`.
+`Task 14 delivery gate → Task 15 Bridge read-only slice → Task 17-A selection inspector → Task 16 ChangeSet/Policy → Task 17-B approval UI → Task 18 Modeling → Task 19 Capture/Vision/Eval`.
 
 Each task receives its own approved file list and Claude prompt. Codex promotes a task only after independent verification and a clean focused commit. Deferred Runtime commands remain structured capability errors until their task is accepted; no speculative schema or compatibility shim is added early.
