@@ -19,7 +19,14 @@ path.
 Identity resolution follows the design (sections 7–8): a stable owned node id
 (reported in the mirrored ``eee.node_id`` user-data key) is resolved BEFORE the
 path, and any ambiguity (one stable id mirrored at two distinct paths) fails
-closed. A path is never identity by itself.
+closed. A path is never identity by itself. The bounded scene identity resolver
+performs a single read-only pass over the scene root's sub-tree, indexing every
+node that mirrors an ``eee.node_id``; an owned reference resolves to the unique
+current node with that id (even at a moved path), and more than one such node
+is ``policy.ownership_ambiguous``. For owned manifest references the mirrored
+``eee.schema_version`` and ``eee.created_by_run`` are validated as identity
+facts (schema must be the supported schema-v1 value; the run of origin must
+agree with the supplied manifest); these raw values are never exposed in a DTO.
 """
 
 from __future__ import annotations
@@ -58,6 +65,11 @@ _WS_KEY = "eee.workspace_id"
 _NODE_ID_KEY = "eee.node_id"
 _CAP_KEY = "eee.capability"
 _ROLE_KEY = "eee.role"
+_SCHEMA_KEY = "eee.schema_version"
+_RUN_KEY = "eee.created_by_run"
+# The only supported WorkspaceManifest schema version is 1 (the contracts reject
+# every other value). The mirror carries it as the user-data string "1".
+_SUPPORTED_SCHEMA_VERSION = "1"
 
 
 def _identity(ref: NodeRef) -> str:
@@ -145,30 +157,32 @@ class ChangeSetPreflightAdapter:
         create_targets = self._create_target_identities(changeset)
         refs = self._collect_node_refs(changeset)
 
-        # Pass 1: resolve every reference and gather mirrored identity, without
-        # raising, so ambiguity can be detected across the whole set first.
-        facts: dict[str, PreflightNodeFact] = {}
-        mirrored_id_to_paths: dict[str, set[str]] = {}
-        for ref in refs:
-            fact = self._resolve_node_fact(hou, ref)
-            facts[_identity(ref)] = fact
-            if fact.exists and fact.node_id is not None:
-                mirrored_id_to_paths.setdefault(fact.node_id, set()).add(fact.actual_path)
+        # Single bounded read-only pass: index every scene node that mirrors a
+        # stable owned id. An owned reference resolves through this index BEFORE
+        # its (locator) path; more than one scene node mirroring the same id is
+        # full identity ambiguity and fails closed (design sections 7-8).
+        node_id_index = self._index_scene_by_node_id(hou)
 
-        # Ambiguity: one stable node id mirrored at two distinct paths.
-        for node_id, paths in mirrored_id_to_paths.items():
-            if len(paths) > 1:
-                raise _ambiguous()
+        # Pass 1: resolve every reference. Owned refs resolve by stable id
+        # (raising on ambiguity); external path-only refs stay path-based. The
+        # mirrored schema/run identity facts travel out-of-band, never in a DTO.
+        facts: dict[str, PreflightNodeFact] = {}
+        extras: dict[str, tuple[str | None, str | None]] = {}
+        for ref in refs:
+            fact, schema_version, created_by_run = self._resolve_node_fact(hou, ref, node_id_index)
+            identity = _identity(ref)
+            facts[identity] = fact
+            extras[identity] = (schema_version, created_by_run)
 
         # Pass 2: verify each existing-required reference against current facts.
         for ref in refs:
-            if _identity(ref) in create_targets:
+            identity = _identity(ref)
+            if identity in create_targets:
                 continue  # a node this ChangeSet creates: absence is expected
-            fact = facts[_identity(ref)]
-            self._verify_existing(ref, fact, workspace, owned_by_id)
+            self._verify_existing(ref, facts[identity], extras[identity], workspace, owned_by_id)
 
-        parm_facts = self._gather_parm_facts(hou, changeset)
-        wire_facts = self._gather_wire_facts(hou, changeset)
+        parm_facts = self._gather_parm_facts(hou, changeset, facts)
+        wire_facts = self._gather_wire_facts(hou, changeset, facts)
         condition_results = self._evaluate_conditions(
             changeset, binding, workspace, facts, parm_facts, wire_facts
         )
@@ -243,59 +257,131 @@ class ChangeSetPreflightAdapter:
 
     # --------------------------------------------------------------- resolution
 
-    def _resolve_node_fact(self, hou: object, ref: NodeRef) -> PreflightNodeFact:
-        node = hou.node(ref.path)  # type: ignore[union-attr]
+    def _index_scene_by_node_id(self, hou: object) -> dict[str, list[object]]:
+        """Single bounded read-only pass: map mirrored node id -> scene nodes.
+
+        Enumerates the scene root's sub-tree once and groups every node that
+        mirrors an ``eee.node_id`` user-data key. Nodes without a mirrored id
+        (external/unowned) are ignored. This index is the only scene enumeration
+        in preflight; it is read-only, finite, and confined to this queue
+        callable. An id mapped to more than one node is ambiguity.
+        """
+        root = hou.node("/")  # type: ignore[union-attr]
+        nodes = () if root is None else tuple(root.allSubChildren())  # type: ignore[union-attr]
+        index: dict[str, list[object]] = {}
+        for node in nodes:
+            node_id = _read_user_data(node, _NODE_ID_KEY)
+            if node_id is None:
+                continue
+            index.setdefault(node_id, []).append(node)
+        return index
+
+    def _resolve_node_fact(
+        self, hou: object, ref: NodeRef, node_id_index: dict[str, list[object]]
+    ) -> tuple[PreflightNodeFact, str | None, str | None]:
+        """Resolve a reference to a node fact plus out-of-band identity extras.
+
+        Owned references (``node_id is not None``) resolve by mirrored stable id
+        BEFORE the locator path: the unique current node mirroring that id is the
+        node even if its current path differs from ``ref.path``. Two or more
+        scene nodes mirroring the same id is ``policy.ownership_ambiguous``; zero
+        is a provably-absent owned node (fail closed). External path-only
+        references (``node_id is None``) remain path-based. Returns the fact and
+        the mirrored ``schema_version`` / ``created_by_run`` (``None`` when the
+        node is absent or external); these never enter the result DTO.
+        """
+        if ref.node_id is None:
+            # External scoped node: path is the only locator, no ownership claim.
+            return self._fact_from_node(hou.node(ref.path), ref)  # type: ignore[union-attr]
+        mirrors = node_id_index.get(ref.node_id, ())
+        if len(mirrors) > 1:
+            raise _ambiguous()
+        node = mirrors[0] if mirrors else None
+        return self._fact_from_node(node, ref)
+
+    def _fact_from_node(
+        self, node: object | None, ref: NodeRef
+    ) -> tuple[PreflightNodeFact, str | None, str | None]:
+        """Build a node fact from a resolved HOM node, plus identity extras.
+
+        ``node is None`` yields an absent fact. The mirrored schema/run values
+        are returned alongside (for internal validation) but are not carried on
+        the DTO.
+        """
         if node is None:
-            return PreflightNodeFact(
-                requested=ref,
-                exists=False,
-                actual_path=None,
-                actual_type=None,
-                parent_path=None,
-                workspace_id=None,
-                node_id=None,
-                capability=None,
-                role=None,
-                is_locked=False,
+            return (
+                PreflightNodeFact(
+                    requested=ref,
+                    exists=False,
+                    actual_path=None,
+                    actual_type=None,
+                    parent_path=None,
+                    workspace_id=None,
+                    node_id=None,
+                    capability=None,
+                    role=None,
+                    is_locked=False,
+                ),
+                None,
+                None,
             )
-        return PreflightNodeFact(
-            requested=ref,
-            exists=True,
-            actual_path=str(node.path()),
-            actual_type=str(node.type().name()),
-            parent_path=str(node.parent().path()),
-            workspace_id=_read_user_data(node, _WS_KEY),
-            node_id=_read_user_data(node, _NODE_ID_KEY),
-            capability=_read_user_data(node, _CAP_KEY),
-            role=_read_user_data(node, _ROLE_KEY),
-            is_locked=_read_is_locked(node),
+        return (
+            PreflightNodeFact(
+                requested=ref,
+                exists=True,
+                actual_path=str(node.path()),  # type: ignore[union-attr]
+                actual_type=str(node.type().name()),  # type: ignore[union-attr]
+                parent_path=str(node.parent().path()),  # type: ignore[union-attr]
+                workspace_id=_read_user_data(node, _WS_KEY),
+                node_id=_read_user_data(node, _NODE_ID_KEY),
+                capability=_read_user_data(node, _CAP_KEY),
+                role=_read_user_data(node, _ROLE_KEY),
+                is_locked=_read_is_locked(node),
+            ),
+            _read_user_data(node, _SCHEMA_KEY),
+            _read_user_data(node, _RUN_KEY),
         )
 
     def _verify_existing(
         self,
         ref: NodeRef,
         fact: PreflightNodeFact,
+        identity_extras: tuple[str | None, str | None],
         workspace: WorkspaceManifest | None,
         owned_by_id: dict[str, object],
     ) -> None:
         if not fact.exists:
-            raise _stale(f"The referenced node was not found at {ref.path}.")
+            raise _stale("The referenced node was not found in the scene.")
         if ref.expected_type != fact.actual_type:
             raise _stale(
-                f"The node at {ref.path} has type {fact.actual_type!r}, not {ref.expected_type!r}."
+                f"The node at {fact.actual_path} has type {fact.actual_type!r}, not {ref.expected_type!r}."
             )
         if ref.node_id is None:
             return  # external scoped node: identity is path-only, no ownership claim
         # Owned node: mirrored stable id must agree with the requested id.
         if fact.node_id is None or fact.node_id != ref.node_id:
             raise _stale(
-                f"The node at {ref.path} does not mirror the expected stable node id."
+                "The resolved node does not mirror the expected stable node id."
             )
         if ref.expected_workspace_id is not None and (
             fact.workspace_id is None or fact.workspace_id != ref.expected_workspace_id
         ):
             raise _stale(
-                f"The node at {ref.path} does not belong to the expected workspace."
+                "The resolved node does not belong to the expected workspace."
+            )
+        # Mirrored identity facts (design section 4.1): the schema version must
+        # be the supported schema-v1 value, and the run of origin must agree with
+        # the supplied workspace manifest. Missing/mismatched values fail closed.
+        schema_version, created_by_run = identity_extras
+        if schema_version != _SUPPORTED_SCHEMA_VERSION:
+            raise _stale(
+                "The resolved node's mirrored schema version is missing or unsupported."
+            )
+        if workspace is not None and (
+            created_by_run is None or created_by_run != workspace.created_by_run
+        ):
+            raise _stale(
+                "The resolved node's mirrored run of origin does not match the workspace."
             )
         if workspace is not None:
             owned = owned_by_id.get(ref.node_id)
@@ -303,20 +389,24 @@ class ChangeSetPreflightAdapter:
                 raise _stale(
                     f"The node id {ref.node_id!r} is not present in the workspace manifest."
                 )
+            # Manifest facts are compared against the CURRENT scene facts (the
+            # resolved actual path/type/parent), not the request's locator path.
             if (
-                owned.path != ref.path  # type: ignore[attr-defined]
+                owned.path != fact.actual_path  # type: ignore[attr-defined]
                 or owned.node_type != fact.actual_type  # type: ignore[attr-defined]
                 or owned.parent_path != fact.parent_path  # type: ignore[attr-defined]
                 or owned.capability != fact.capability  # type: ignore[attr-defined]
                 or owned.role != fact.role  # type: ignore[attr-defined]
             ):
                 raise _stale(
-                    f"The node at {ref.path} no longer matches the workspace manifest facts."
+                    "The resolved node no longer matches the workspace manifest facts."
                 )
 
     # --------------------------------------------------------------- parm facts
 
-    def _gather_parm_facts(self, hou: object, changeset) -> list[PreflightParmFact]:  # type: ignore[no-untyped-def]
+    def _gather_parm_facts(
+        self, hou: object, changeset, node_facts: dict[str, PreflightNodeFact]
+    ) -> list[PreflightParmFact]:  # type: ignore[no-untyped-def]
         targets: list[tuple[NodeRef, str]] = []
         seen: set[tuple[str, str]] = set()
 
@@ -335,13 +425,24 @@ class ChangeSetPreflightAdapter:
 
         facts: list[PreflightParmFact] = []
         for target, name in targets:
-            node = hou.node(target.path)  # type: ignore[union-attr]
+            # Resolve through the identity-resolved fact so a moved node's parm
+            # is read from its current path, not a stale locator.
+            node = self._resolved_node(hou, target, node_facts)
             exists = False
             value: object | None = None
             if node is not None:
                 value, exists = self._read_parm_value(node, name)
             facts.append(PreflightParmFact(target=target, parm_name=name, exists=exists, value=value))
         return facts
+
+    def _resolved_node(
+        self, hou: object, target: NodeRef, node_facts: dict[str, PreflightNodeFact]
+    ) -> object | None:
+        """Look up a referenced node through its resolved fact's current path."""
+        fact = node_facts.get(_identity(target))
+        if fact is None or not fact.exists or fact.actual_path is None:
+            return None
+        return hou.node(fact.actual_path)  # type: ignore[union-attr]
 
     def _read_parm_value(self, node: object, name: str) -> tuple[object | None, bool]:
         parm = node.parm(name)  # type: ignore[union-attr]
@@ -362,7 +463,9 @@ class ChangeSetPreflightAdapter:
 
     # --------------------------------------------------------------- wire facts
 
-    def _gather_wire_facts(self, hou: object, changeset) -> list[PreflightWireFact]:  # type: ignore[no-untyped-def]
+    def _gather_wire_facts(
+        self, hou: object, changeset, node_facts: dict[str, PreflightNodeFact]
+    ) -> list[PreflightWireFact]:  # type: ignore[no-untyped-def]
         targets: list[tuple[NodeRef, int]] = []
         seen: set[tuple[str, int]] = set()
 
@@ -381,7 +484,9 @@ class ChangeSetPreflightAdapter:
 
         facts: list[PreflightWireFact] = []
         for target, index in targets:
-            node = hou.node(target.path)  # type: ignore[union-attr]
+            # Resolve through the identity-resolved fact (current path), not the
+            # locator, so a moved node's input is read from where it now is.
+            node = self._resolved_node(hou, target, node_facts)
             source: WireRef | None = None
             if node is not None:
                 source = self._read_wire_source(node, index)

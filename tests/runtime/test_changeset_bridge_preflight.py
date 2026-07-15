@@ -220,6 +220,22 @@ class _HipFileEventType:
     AfterLoad = "AfterLoad"
 
 
+class _FakeSceneRoot:
+    """Synthetic scene root exposing a bounded read-only node enumeration.
+
+    The resolver enumerates the scene once via ``hou.node("/").allSubChildren()``
+    to index nodes by their mirrored stable id. This root returns every fake node
+    in a single pass; it has no write surface (no ``__getattr__`` recorder), so
+    enumeration never registers as a mutation.
+    """
+
+    def __init__(self, nodes: dict[str, _FakeNode]) -> None:
+        self._nodes = nodes
+
+    def allSubChildren(self) -> tuple[_FakeNode, ...]:
+        return tuple(self._nodes.values())
+
+
 class FakeHou:
     def __init__(
         self,
@@ -241,7 +257,11 @@ class FakeHou:
     def selectedNodes(self) -> tuple:
         return ()
 
-    def node(self, path: str) -> _FakeNode | None:
+    def node(self, path: str) -> _FakeNode | _FakeSceneRoot | None:
+        # The scene root exposes a bounded read-only enumeration used by the
+        # identity resolver; it is not a writable fake node.
+        if path == "/":
+            return _FakeSceneRoot(self._nodes)
         n = self._nodes.get(path)
         if n is not None:
             # Attach the spy so writes on looked-up nodes are recorded.
@@ -1406,3 +1426,237 @@ async def test_old_server_rejects_preflight_before_parsing(tmp_path: Path) -> No
         writer.close()
     finally:
         await harness.stop()
+
+
+# ==========================================================================
+# 11. identity integrity: stable-id resolution BEFORE path + manifest facts
+#
+# A path is a locator, never identity. An owned NodeRef (node_id != None) must
+# resolve to the unique current node whose mirrored eee.node_id agrees, even
+# when its current path differs from the requested path; the manifest facts
+# (schema_version, created_by_run, path/type/parent/capability/role) then
+# decide whether that resolution is still fresh. Same node_id mirrored at two
+# scene paths is full identity ambiguity and fails closed even when only one of
+# the paths is referenced by the ChangeSet.
+# ==========================================================================
+
+
+def _moved_child_nodes(spy: list) -> dict[str, _FakeNode]:
+    """Standard workspace, but the child geo was renamed/moved to a new path.
+
+    The mirrored stable node id (n_child) is unchanged; only the path differs
+    from the stale path the request still carries.
+    """
+    root = _FakeNode("/obj/ws", type_name="subnet", parent="/obj", user_data=_mirror("n_root", role="root"), spy=spy)
+    src = _FakeNode("/obj/ws/src1", type_name="xform", parent="/obj/ws", user_data=_mirror("n_src"), spy=spy)
+    geo = _FakeNode(
+        "/obj/ws/geo_moved",
+        type_name="geo",
+        parent="/obj/ws",
+        user_data=_mirror("n_child"),
+        parms={"tx": _FakeParm(0)},
+        spy=spy,
+    )
+    return {"/obj/ws": root, "/obj/ws/src1": src, "/obj/ws/geo_moved": geo}
+
+
+def _manifest_for(adapter: HoudiniSceneAdapter, owned_nodes: tuple[OwnedNodeRef, ...]) -> WorkspaceManifest:
+    binding = adapter.binding()
+    return WorkspaceManifest.build(
+        workspace_id=WS,
+        session_id=SES,
+        instance_id=binding.instance_id,
+        scene_epoch=binding.scene_epoch,
+        roots=(owned_nodes[0],),
+        nodes=owned_nodes,
+        created_by_run=RUN,
+        updated_at=NOW,
+    )
+
+
+def _request_with_manifest(
+    adapter: HoudiniSceneAdapter,
+    *,
+    operations: tuple[object, ...],
+    affected: tuple[NodeRef, ...],
+    manifest: WorkspaceManifest,
+    preconditions: tuple = (),
+) -> PreflightRequest:
+    binding = adapter.binding()
+    cs = _changeset(binding, operations, affected, preconditions=preconditions)
+    return PreflightRequest.build(
+        request_id="req_identity",
+        deadline_ms=5000,
+        scene_epoch=binding.scene_epoch,
+        changeset=cs,
+        workspace=manifest,
+    )
+
+
+@async_test
+async def test_preflight_owned_node_resolved_by_id_at_moved_path(tmp_path: Path) -> None:
+    # The request carries a STALE path (/obj/ws/geo1), but the scene moved the
+    # node to /obj/ws/geo_moved while keeping its mirrored stable id. The
+    # resolver must follow the stable id FIRST, find the node at its current
+    # path, and — because the manifest agrees with the current path — succeed.
+    spy: list = []
+    harness = _Harness()
+    port = await harness.start(tmp_path, nodes=_moved_child_nodes(spy))
+    try:
+        client = BridgeClient(host="127.0.0.1", port=port, identity=harness.identity)
+        await client.open()
+        assert harness.adapter is not None
+        root_o = _owned("n_root", "/obj/ws", "subnet", "/obj", role="root")
+        src_o = _owned("n_src", "/obj/ws/src1", "xform", "/obj/ws")
+        child_o = _owned("n_child", "/obj/ws/geo_moved", "geo", "/obj/ws")  # manifest matches the NEW path
+        manifest = _manifest_for(harness.adapter, (root_o, src_o, child_o))
+        stale_ref = _noderef("n_child", "/obj/ws/geo1", "geo")  # stale path, correct id
+        request = _request_with_manifest(
+            harness.adapter,
+            operations=(SetParm(op_id="op1", target=stale_ref, parm_name="tx", value=0, expected_old_value=0),),
+            affected=(stale_ref,),
+            manifest=manifest,
+        )
+        result = await client.preflight(request)
+        assert isinstance(result, PreflightResult)
+        assert len(result.node_facts) == 1
+        # Resolved by stable id to the CURRENT path, not the stale requested path.
+        assert result.node_facts[0].exists is True
+        assert result.node_facts[0].actual_path == "/obj/ws/geo_moved"
+        assert result.node_facts[0].node_id == "n_child"
+        # The parm fact is read from the resolved (moved) node, not the stale path.
+        assert len(result.parm_facts) == 1
+        assert result.parm_facts[0].parm_name == "tx"
+        assert result.parm_facts[0].exists is True
+        await client.close()
+    finally:
+        await harness.stop()
+    assert spy == [], f"identity resolution performed writes: {spy!r}"
+
+
+@async_test
+async def test_preflight_owned_node_stale_when_manifest_path_disagrees(tmp_path: Path) -> None:
+    # Same moved node, but the manifest still records the OLD path. Stable-id
+    # resolution finds the node at the new path; the manifest fact comparison
+    # (path vs the CURRENT scene path, not the request path) then fails closed.
+    spy: list = []
+    harness = _Harness()
+    port = await harness.start(tmp_path, nodes=_moved_child_nodes(spy))
+    try:
+        client = BridgeClient(host="127.0.0.1", port=port, identity=harness.identity)
+        await client.open()
+        assert harness.adapter is not None
+        root_o = _owned("n_root", "/obj/ws", "subnet", "/obj", role="root")
+        src_o = _owned("n_src", "/obj/ws/src1", "xform", "/obj/ws")
+        child_o = _owned("n_child", "/obj/ws/geo1", "geo", "/obj/ws")  # manifest still has the STALE path
+        manifest = _manifest_for(harness.adapter, (root_o, src_o, child_o))
+        stale_ref = _noderef("n_child", "/obj/ws/geo1", "geo")
+        request = _request_with_manifest(
+            harness.adapter,
+            operations=(SetParm(op_id="op1", target=stale_ref, parm_name="tx", value=0, expected_old_value=0),),
+            affected=(stale_ref,),
+            manifest=manifest,
+        )
+        with pytest.raises(BridgeClientError) as exc:
+            await client.preflight(request)
+        assert exc.value.code == "changeset.stale"
+        await client.close()
+    finally:
+        await harness.stop()
+
+
+@async_test
+async def test_preflight_ambiguous_identity_with_unreferenced_duplicate(tmp_path: Path) -> None:
+    # The SAME stable node id is mirrored at two scene paths, but the ChangeSet
+    # references only ONE of them. Path-based resolution would not see the
+    # second path; stable-id resolution must still detect full identity
+    # ambiguity and fail closed.
+    spy: list = []
+    nodes = _standard_nodes(spy)
+    dup = _FakeNode(
+        "/obj/ws/geo2",
+        type_name="geo",
+        parent="/obj/ws",
+        user_data=_mirror("n_child"),  # same id as /obj/ws/geo1
+        spy=spy,
+    )
+    nodes["/obj/ws/geo2"] = dup
+    harness = _Harness()
+    port = await harness.start(tmp_path, nodes=nodes)
+    try:
+        client = BridgeClient(host="127.0.0.1", port=port, identity=harness.identity)
+        await client.open()
+        assert harness.adapter is not None
+        only = _noderef("n_child", "/obj/ws/geo1", "geo")  # geo2 is NOT referenced
+        request = _preflight_for(
+            harness.adapter,
+            operations=(SetParm(op_id="op1", target=only, parm_name="tx", value=0, expected_old_value=0),),
+            affected=(only,),
+        )
+        with pytest.raises(BridgeClientError) as exc:
+            await client.preflight(request)
+        assert exc.value.code == "policy.ownership_ambiguous"
+        await client.close()
+    finally:
+        await harness.stop()
+
+
+async def _expect_stale_after_mirror_mutation(
+    tmp_path: Path, mutate: Callable[[dict[str, str]], None]
+) -> None:
+    """Run a standard workspace preflight after mutating geo1's mirror; expect stale."""
+    spy: list = []
+    nodes = _standard_nodes(spy)
+    ud = dict(nodes["/obj/ws/geo1"].user_data)
+    mutate(ud)
+    nodes["/obj/ws/geo1"].user_data = ud
+    harness = _Harness()
+    port = await harness.start(tmp_path, nodes=nodes)
+    try:
+        client = BridgeClient(host="127.0.0.1", port=port, identity=harness.identity)
+        await client.open()
+        assert harness.adapter is not None
+        target = _noderef("n_child", "/obj/ws/geo1", "geo")
+        request = _preflight_for(
+            harness.adapter,
+            operations=(SetParm(op_id="op1", target=target, parm_name="tx", value=0, expected_old_value=0),),
+            affected=(target,),
+        )
+        with pytest.raises(BridgeClientError) as exc:
+            await client.preflight(request)
+        assert exc.value.code == "changeset.stale"
+        await client.close()
+    finally:
+        await harness.stop()
+
+
+@async_test
+async def test_preflight_missing_schema_version_rejected(tmp_path: Path) -> None:
+    def mutate(ud: dict[str, str]) -> None:
+        ud.pop("eee.schema_version", None)
+
+    await _expect_stale_after_mirror_mutation(tmp_path, mutate)
+
+
+@async_test
+async def test_preflight_wrong_schema_version_rejected(tmp_path: Path) -> None:
+    def mutate(ud: dict[str, str]) -> None:
+        ud["eee.schema_version"] = "2"  # not the supported schema-v1 value
+
+    await _expect_stale_after_mirror_mutation(tmp_path, mutate)
+
+
+@async_test
+async def test_preflight_missing_created_by_run_rejected(tmp_path: Path) -> None:
+    def mutate(ud: dict[str, str]) -> None:
+        ud.pop("eee.created_by_run", None)
+
+    await _expect_stale_after_mirror_mutation(tmp_path, mutate)
+
+
+@async_test
+async def test_preflight_wrong_created_by_run_rejected(tmp_path: Path) -> None:
+    def mutate(ud: dict[str, str]) -> None:
+        ud["eee.created_by_run"] = f"run_{'3' * 32}"  # disagrees with the manifest
+
+    await _expect_stale_after_mirror_mutation(tmp_path, mutate)
