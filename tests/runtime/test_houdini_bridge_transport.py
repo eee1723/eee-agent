@@ -1101,3 +1101,48 @@ async def test_serve_rejects_closed_server(tmp_path: Path) -> None:
             await listener.wait_closed()
         except Exception:  # noqa: BLE001
             pass
+
+
+# ==========================================================================
+# Task 16-C: the successful hello ack advertises sorted capabilities
+# ==========================================================================
+
+
+@async_test
+async def test_success_ack_advertises_changeset_capability(tmp_path: Path) -> None:
+    adapter, _ = _make_adapter(selected=[_geo_node()])
+    harness = _Harness()
+    port = await harness.start(tmp_path, adapter=adapter)
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        await _send_raw(
+            writer,
+            {"protocol": PROTOCOL, "kind": "hello", "token": harness.identity.token},
+        )
+        resp = await _read_frame(reader)
+        ack = json.loads(resp)
+        assert ack["ok"] is True
+        assert ack["capabilities"] == ["changeset.v1"]  # sorted + unique
+        writer.close()
+    finally:
+        await harness.stop()
+
+
+@async_test
+async def test_failed_auth_ack_has_no_capabilities(tmp_path: Path) -> None:
+    adapter, _ = _make_adapter(selected=[_geo_node()])
+    harness = _Harness()
+    port = await harness.start(tmp_path, adapter=adapter)
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        await _send_raw(
+            writer,
+            {"protocol": PROTOCOL, "kind": "hello", "token": "wrong-token"},
+        )
+        resp = await _read_frame(reader)
+        ack = json.loads(resp)
+        assert ack["ok"] is False
+        assert "capabilities" not in ack
+        writer.close()
+    finally:
+        await harness.stop()

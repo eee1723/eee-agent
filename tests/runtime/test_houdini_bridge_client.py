@@ -53,8 +53,11 @@ def _dumps(obj: object) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def _ack_frame(ok: bool = True) -> bytes:
-    return _frame(_dumps({"protocol": _PROTO, "kind": "hello", "ok": ok}))
+def _ack_frame(ok: bool = True, caps: list[str] | None = None) -> bytes:
+    ack: dict[str, object] = {"protocol": _PROTO, "kind": "hello", "ok": ok}
+    if caps is not None:
+        ack["capabilities"] = caps
+    return _frame(_dumps(ack))
 
 
 def _sample_result() -> SceneQueryResult:
@@ -632,3 +635,60 @@ def test_from_state_dir_reads_host_port_from_discovery(tmp_path: Path) -> None:
     # The client binds to the loopback host/port advertised in discovery.
     assert client.host == "127.0.0.1"
     assert client.port == 51234
+
+
+# ==========================================================================
+# Task 16-C: hello capability negotiation on the client
+# ==========================================================================
+
+from eee_agent.houdini_bridge.changesets import CHANGESET_V1  # noqa: E402
+
+
+@async_test
+async def test_client_stores_advertised_capabilities() -> None:
+    fake = FakeTransport(inbox=_ack_frame(caps=["changeset.v1"]))
+    client = _client(fake)
+    await client.open()
+    assert client.capabilities == ("changeset.v1",)
+    assert CHANGESET_V1 in client.capabilities
+    await client.close()
+
+
+@async_test
+async def test_client_legacy_ack_yields_empty_capabilities() -> None:
+    fake = FakeTransport(inbox=_ack_frame())  # no capabilities key
+    client = _client(fake)
+    await client.open()
+    assert client.capabilities == ()
+    await client.close()
+
+
+@pytest.mark.parametrize(
+    "bad_caps",
+    [
+        "changeset.v1",  # not a list
+        ["changeset.v1", "changeset.v1"],  # duplicate
+        ["scene.v1", "changeset.v1"],  # unsorted
+        ["changeset.v1", 7],  # non-string element
+        ["BADCAP"],  # bad grammar
+    ],
+    ids=["non-list", "duplicate", "unsorted", "non-string", "bad-grammar"],
+)
+def test_client_malformed_capability_ack_fails_closed(bad_caps: object) -> None:
+    async def body() -> None:
+        fake = FakeTransport(inbox=_ack_frame(caps=bad_caps))  # type: ignore[arg-type]
+        client = _client(fake)
+        with pytest.raises(BridgeClientError):
+            await client.open()
+
+    asyncio.run(body())
+
+
+@async_test
+async def test_close_clears_capabilities() -> None:
+    fake = FakeTransport(inbox=_ack_frame(caps=["changeset.v1"]))
+    client = _client(fake)
+    await client.open()
+    assert client.capabilities == ("changeset.v1",)
+    await client.close()
+    assert client.capabilities == ()

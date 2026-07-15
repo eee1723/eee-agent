@@ -1029,3 +1029,33 @@ def test_scene_mutation_after_query_does_not_affect_result() -> None:
     # the already-returned DTO is unaffected
     assert result.selected_nodes[0].geometry_stats["points"] == 8
     assert result.to_dict() == result.to_dict()  # stable
+
+
+# ==========================================================================
+# Task 16-C: the single FIFO is name-neutral — scene.query and preflight
+# operations share one queue with no second worker/queue.
+# ==========================================================================
+
+
+@async_test
+async def test_single_fifo_serves_mixed_operation_types() -> None:
+    queue = MainThreadReadQueue(capacity=4)
+    order: list[str] = []
+
+    def query_op() -> str:
+        order.append("scene.query")
+        return "scene.query"
+
+    def preflight_op() -> str:
+        order.append("changeset.preflight")
+        return "changeset.preflight"
+
+    fq = queue.submit("q1", query_op, deadline_monotonic=_future_deadline())
+    fp = queue.submit("p1", preflight_op, deadline_monotonic=_future_deadline())
+    assert queue.pump_one() is True
+    assert queue.pump_one() is True
+    assert order == ["scene.query", "changeset.preflight"]
+    assert await fq == "scene.query"
+    assert await fp == "changeset.preflight"
+    # Only one item is ever running at a time on the single pump thread.
+    assert queue.pending_count == 0

@@ -29,7 +29,7 @@ import hashlib
 import json
 import os
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from eee_agent.houdini_bridge.auth import (
@@ -37,6 +37,12 @@ from eee_agent.houdini_bridge.auth import (
     remove_bridge_identity_files,
     validate_bridge_token,
     write_bridge_identity_files,
+)
+from eee_agent.houdini_bridge.changesets import (
+    CHANGESET_V1,
+    PreflightResponse,
+    parse_preflight_request,
+    validate_capabilities,
 )
 from eee_agent.houdini_bridge.contracts import (
     MAX_MESSAGE_BYTES,
@@ -422,6 +428,35 @@ async def _await_listener_closed(listener: object) -> None:
         pass
 
 
+def _make_preflight_adapter(adapter: "HoudiniSceneAdapter") -> object:
+    """Lazily build the read-only preflight adapter.
+
+    Imported lazily so ``secure_bridge`` and ``changeset_executor`` do not form a
+    top-level import cycle (each test/entrypoint may import either first).
+    """
+    from houdini_side.changeset_executor import ChangeSetPreflightAdapter
+
+    return ChangeSetPreflightAdapter(adapter)
+
+
+class _QueuedError:
+    """A bounded bridge error produced by queue/operation failure.
+
+    Carries only the structured bridge-error fields (no traceback) so the
+    dispatcher can render a leak-free error envelope for either operation.
+    """
+
+    __slots__ = ("code", "category", "message_for_user", "retryable")
+
+    def __init__(
+        self, code: str, category: str, message_for_user: str, retryable: bool
+    ) -> None:
+        self.code = code
+        self.category = category
+        self.message_for_user = message_for_user
+        self.retryable = retryable
+
+
 class BridgeServer:
     """Read-only, loopback, token-authenticated bridge server.
 
@@ -442,19 +477,30 @@ class BridgeServer:
         identity: BridgeIdentity,
         state_dir: Path | str,
         queue: MainThreadReadQueue | None = None,
+        capabilities: tuple[str, ...] = (CHANGESET_V1,),
     ) -> None:
         if not isinstance(adapter, HoudiniSceneAdapter):
             raise TypeError("adapter must be a HoudiniSceneAdapter")
         if not isinstance(identity, BridgeIdentity):
             raise TypeError("identity must be a BridgeIdentity")
+        # Capabilities are advertised on a successful hello ack. They are an
+        # exact, sorted, unique list (validated here so a misconfigured server
+        # fails loudly instead of advertising a malformed set).
+        self._capabilities = validate_capabilities(list(capabilities))
         self._adapter = adapter
         self._identity = identity
         self._state_dir = Path(state_dir)
         self._queue = queue if queue is not None else MainThreadReadQueue()
+        self._preflight = _make_preflight_adapter(adapter)
         self._closed = False
         self._writers: list[object] = []
         self._listener: object | None = None
         self._ready = False
+
+    @property
+    def capabilities(self) -> tuple[str, ...]:
+        """The exact, sorted capabilities advertised on a successful hello."""
+        return self._capabilities
 
     @property
     def is_serving(self) -> bool:
@@ -607,7 +653,12 @@ class BridgeServer:
         except (_ConnectionClosed, _FrameError):
             return False
         ok = self._validate_hello(hello_bytes)
-        ack = {"protocol": PROTOCOL, "kind": "hello", "ok": ok}
+        # A successful ack advertises the exact, sorted capability list so a new
+        # client can gate write-style operations (changeset.preflight). A failed
+        # ack carries only the protocol/kind/ok fields.
+        ack: dict[str, object] = {"protocol": PROTOCOL, "kind": "hello", "ok": ok}
+        if ok:
+            ack["capabilities"] = list(self._capabilities)
         await self._send(writer, _canonical_dumps(ack).encode("utf-8"))
         return ok
 
@@ -622,7 +673,51 @@ class BridgeServer:
         return validate_bridge_token(self._identity, obj.get("token"))
 
     async def _serve(self, frame_bytes: bytes) -> bytes:
-        """Parse + queue one request frame and return the response envelope bytes."""
+        """Strict typed dispatch: route one request frame to its typed handler.
+
+        Only ``scene.query`` and ``changeset.preflight`` are served in this slice.
+        The operation name is read through strict JSON (rejecting malformed,
+        non-UTF-8, and duplicate-key frames) and dispatched explicitly — there is
+        no arbitrary name dispatch surface. Both operations share the single
+        bounded main-thread FIFO so HOM access never interleaves with a write.
+        """
+        obj = _loads_object(frame_bytes)
+        if obj is None:
+            return self._error_envelope(
+                _MALFORMED_REQUEST_ID,
+                code="bridge.invalid_request",
+                category="protocol",
+                message_for_user="The bridge request is not valid.",
+            )
+        operation = obj.get("operation")
+        if operation == "scene.query":
+            return await self._serve_scene_query(frame_bytes)
+        if operation == "changeset.preflight":
+            # Admission: an old server that does not advertise changeset.v1 must
+            # fail closed for preflight BEFORE any HOM access or payload parsing.
+            if CHANGESET_V1 not in self._capabilities:
+                request_id = obj.get("request_id")
+                if type(request_id) is not str:
+                    request_id = _MALFORMED_REQUEST_ID
+                return self._error_envelope(
+                    request_id,
+                    code="bridge.capability_unavailable",
+                    category="capability",
+                    message_for_user="The bridge does not support changeset preflight.",
+                )
+            return await self._serve_preflight(frame_bytes)
+        request_id = obj.get("request_id")
+        if type(request_id) is not str:
+            request_id = _MALFORMED_REQUEST_ID
+        return self._error_envelope(
+            request_id,
+            code="bridge.invalid_request",
+            category="protocol",
+            message_for_user="The bridge operation is not supported.",
+        )
+
+    async def _serve_scene_query(self, frame_bytes: bytes) -> bytes:
+        """Parse + queue a scene.query request; return the response envelope bytes."""
         try:
             request = parse_request(frame_bytes)
         except (TypeError, ValueError):
@@ -647,53 +742,102 @@ class BridgeServer:
                 expected_scene_epoch=expected_scene_epoch,
             )
 
-        deadline_monotonic = time.monotonic() + request.deadline_ms / 1000.0
+        result = await self._run_on_queue(request_id, request.deadline_ms, operation)
+        if isinstance(result, _QueuedError):
+            return self._error_envelope(
+                request_id,
+                code=result.code,
+                category=result.category,
+                message_for_user=result.message_for_user,
+                retryable=result.retryable,
+            )
+        response = BridgeResponse(request_id=request_id, result=result, error=None)
+        return response.to_json().encode("utf-8")
+
+    async def _serve_preflight(self, frame_bytes: bytes) -> bytes:
+        """Parse + queue a changeset.preflight request; return the response bytes.
+
+        Parsing validates the full canonical ChangeSet, its digest, manifest
+        identity/binding consistency, exact fields, duplicate keys, and size
+        BEFORE the main-thread callable runs. The callable performs only
+        read-only scene fact gathering through the shared FIFO.
+        """
+        try:
+            request = parse_preflight_request(frame_bytes)
+        except (TypeError, ValueError):
+            return self._error_envelope(
+                _MALFORMED_REQUEST_ID,
+                code="bridge.invalid_request",
+                category="protocol",
+                message_for_user="The preflight request is not valid.",
+            )
+        request_id = request.request_id
+        preflight_request = request
+
+        def operation() -> object:
+            return self._preflight.preflight(preflight_request)  # type: ignore[union-attr]
+
+        result = await self._run_on_queue(request_id, request.deadline_ms, operation)
+        if isinstance(result, _QueuedError):
+            return self._error_envelope(
+                request_id,
+                code=result.code,
+                category=result.category,
+                message_for_user=result.message_for_user,
+                retryable=result.retryable,
+            )
+        response = PreflightResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
+        return response.to_json().encode("utf-8")
+
+    async def _run_on_queue(
+        self,
+        request_id: str,
+        deadline_ms: int,
+        operation: "Callable[[], object]",
+    ) -> object:
+        """Submit one operation to the shared FIFO and map queue failures.
+
+        Returns the operation result, or a :class:`_QueuedError` carrying a
+        bounded bridge error code (no traceback is ever leaked to the client).
+        """
+        deadline_monotonic = time.monotonic() + deadline_ms / 1000.0
         try:
             future = self._queue.submit(
                 request_id, operation, deadline_monotonic=deadline_monotonic
             )
-            result = await future  # type: ignore[func-returns-value]
+            return await future  # type: ignore[func-returns-value]
         except HoudiniAdapterError as exc:
-            return self._error_envelope(
-                request_id,
-                code=exc.code,
-                category=exc.category,
-                message_for_user=exc.message_for_user,
-                retryable=exc.retryable,
-                technical_detail_ref=exc.technical_detail_ref,
+            return _QueuedError(
+                exc.code, exc.category, exc.message_for_user, exc.retryable
             )
         except QueueItemExpired:
-            return self._error_envelope(
-                request_id,
-                code="bridge.deadline_exceeded",
-                category="deadline",
-                message_for_user="The bridge request exceeded its deadline.",
-                retryable=True,
+            return _QueuedError(
+                "bridge.deadline_exceeded",
+                "deadline",
+                "The bridge request exceeded its deadline.",
+                True,
             )
         except QueueItemCancelled:
-            return self._error_envelope(
-                request_id,
-                code="bridge.cancelled",
-                category="cancelled",
-                message_for_user="The bridge request was cancelled.",
+            return _QueuedError(
+                "bridge.cancelled",
+                "cancelled",
+                "The bridge request was cancelled.",
+                False,
             )
         except QueueRejected:
-            return self._error_envelope(
-                request_id,
-                code="bridge.not_available",
-                category="not_available",
-                message_for_user="The bridge is no longer available.",
-                retryable=True,
+            return _QueuedError(
+                "bridge.not_available",
+                "not_available",
+                "The bridge is no longer available.",
+                True,
             )
         except Exception:  # noqa: BLE001 — never leak a traceback to the client
-            return self._error_envelope(
-                request_id,
-                code="bridge.internal_failure",
-                category="internal",
-                message_for_user="The bridge encountered an internal failure.",
+            return _QueuedError(
+                "bridge.internal_failure",
+                "internal",
+                "The bridge encountered an internal failure.",
+                False,
             )
-        response = BridgeResponse(request_id=request_id, result=result, error=None)
-        return response.to_json().encode("utf-8")
 
     # -- framed transport (reader/writer only; no asyncio import) ------------
 

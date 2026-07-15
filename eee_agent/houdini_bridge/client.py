@@ -30,6 +30,13 @@ from eee_agent.houdini_bridge.auth import (
     load_bridge_identity,
     read_bridge_discovery,
 )
+from eee_agent.houdini_bridge.changesets import (
+    CHANGESET_V1,
+    PreflightRequest,
+    PreflightResult,
+    parse_preflight_response,
+    validate_capabilities,
+)
 from eee_agent.houdini_bridge.contracts import (
     MAX_MESSAGE_BYTES,
     PROTOCOL,
@@ -216,6 +223,10 @@ class BridgeClient:
         self._opened = False
         self._helloed = False
         self._closed = False
+        # Capabilities advertised by the server on a successful hello. A legacy
+        # ack (no ``capabilities`` key) yields an empty tuple; preflight requires
+        # ``changeset.v1`` before any frame is sent.
+        self._capabilities: tuple[str, ...] = ()
 
     @property
     def host(self) -> str:
@@ -224,6 +235,11 @@ class BridgeClient:
     @property
     def port(self) -> int:
         return self._port
+
+    @property
+    def capabilities(self) -> tuple[str, ...]:
+        """The exact capabilities advertised by the server (empty until hello)."""
+        return self._capabilities
 
     @classmethod
     def from_state_dir(
@@ -284,6 +300,7 @@ class BridgeClient:
             return
         self._closed = True
         self._helloed = False
+        self._capabilities = ()
         transport = self._transport
         self._transport = None
         if transport is not None:
@@ -312,7 +329,7 @@ class BridgeClient:
             raise RuntimeError(
                 "BridgeClient.request() requires a successful open()/hello"
             )
-        response_bytes = await self._exchange(request)
+        response_bytes = await self._exchange(request.to_json(), request.deadline_ms)
         # Parse + validate outside the I/O timeout (pure CPU work).
         try:
             response = parse_response(response_bytes)
@@ -342,13 +359,62 @@ class BridgeClient:
             )
         return response.result
 
+    async def preflight(self, request: PreflightRequest) -> PreflightResult:
+        """Send a ``changeset.preflight`` request and return the typed facts.
+
+        Requires the advertised ``changeset.v1`` capability. If it is absent the
+        client fails closed with ``bridge.capability_unavailable`` and sends no
+        frame. On a server bridge error the structured fields are re-raised as
+        :class:`BridgeClientError`; the connection is left open for that case.
+        """
+        if type(request) is not PreflightRequest:
+            raise TypeError("request must be a PreflightRequest")
+        if CHANGESET_V1 not in self._capabilities:
+            raise _client_error(
+                "bridge.capability_unavailable",
+                "capability",
+                "The bridge does not support changeset preflight.",
+                retryable=False,
+            )
+        if not self._helloed or self._transport is None:
+            raise RuntimeError(
+                "BridgeClient.preflight() requires a successful open()/hello"
+            )
+        response_bytes = await self._exchange(request.to_json(), request.deadline_ms)
+        try:
+            response = parse_preflight_response(response_bytes)
+        except (TypeError, ValueError) as exc:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response is not a valid preflight envelope.",
+            ) from exc
+        if response.request_id != request.request_id:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response does not match the request id.",
+            )
+        if response.error is not None:
+            err = response.error
+            raise BridgeClientError(
+                code=err.code,
+                category=err.category,
+                message_for_user=err.message_for_user,
+                retryable=err.retryable,
+                technical_detail_ref=err.technical_detail_ref,
+            )
+        return response.result
+
     # -- internals --------------------------------------------------------
 
-    async def _exchange(self, request: BridgeRequest) -> bytes:
-        """Send the request frame and read the response frame within the deadline."""
+    async def _exchange(self, request_json: str, deadline_ms: int) -> bytes:
+        """Send a request frame and read the response frame within the deadline."""
         try:
-            async with asyncio.timeout(request.deadline_ms / 1000):
-                await self._send_frame(request.to_json().encode("utf-8"))
+            async with asyncio.timeout(deadline_ms / 1000):
+                await self._send_frame(request_json.encode("utf-8"))
                 return await self._recv_frame()
         except TimeoutError as exc:
             await self._abort()
@@ -407,6 +473,21 @@ class BridgeClient:
                 "permission",
                 "Bridge authentication failed.",
             )
+        # Capabilities: a legacy ack omits the field (treated as empty). A
+        # malformed advertisement (non-list, non-string, duplicate, unsorted, or
+        # bad grammar) fails closed — the client must not trust the bridge.
+        caps_field = obj.get("capabilities", None)
+        if caps_field is None:
+            self._capabilities = ()
+        else:
+            try:
+                self._capabilities = validate_capabilities(caps_field)
+            except (TypeError, ValueError) as exc:
+                raise _client_error(
+                    "bridge.incompatible_version",
+                    "protocol",
+                    "The bridge advertised malformed capabilities.",
+                ) from exc
 
     async def _send_frame(self, data: bytes) -> None:
         assert self._transport is not None
