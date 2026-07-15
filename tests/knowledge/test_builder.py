@@ -154,6 +154,24 @@ def test_nodes_archive_excludes_non_node_type_under_sop() -> None:
     assert docs == []
 
 
+def test_nodes_archive_rejects_nested_sop_path() -> None:
+    # Only top-level sop/*.txt is a node source; a nested sop path is rejected.
+    docs = parse_archive_documents("nodes.zip", [("sop/nested/x.txt", _NODE_TXT)])
+    assert docs == []
+
+
+def test_nodes_archive_rejects_non_txt_suffix_under_sop() -> None:
+    # Only the .txt suffix is accepted under sop/.
+    docs = parse_archive_documents("nodes.zip", [("sop/x.md", _NODE_TXT)])
+    assert docs == []
+
+
+def test_nodes_archive_parses_top_level_sop_txt() -> None:
+    docs = parse_archive_documents("nodes.zip", [("sop/x.txt", _NODE_TXT)])
+    entities = [e for d in docs for e in d.entities]
+    assert {e.entity_id for e in entities} == {"node_document:sop/x.txt@current"}
+
+
 def test_node_dispatch_excludes_non_sop_from_graph_counts() -> None:
     entries = [
         ("sop/boolean.txt", _NODE_TXT),

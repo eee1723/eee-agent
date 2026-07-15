@@ -148,10 +148,15 @@ def _new_nonce() -> str:
 
 # --- source gathering -----------------------------------------------------
 
-def _path_context(logical: str) -> str:
-    """Top-level directory of a logical source path ('sop' for 'sop/x.txt')."""
-    head, _sep, _tail = logical.partition("/")
-    return head
+def _is_top_level_sop_txt(logical: str) -> bool:
+    """True iff ``logical`` is exactly ``sop/<name>.txt``.
+
+    Requires exactly one path separator, a parent directory of exactly ``sop``
+    and a ``.txt`` suffix, so nested SOP paths (``sop/nested/x.txt``) and non-txt
+    SOP entries (``sop/x.md``) are never treated as node sources.
+    """
+    parts = logical.split("/")
+    return len(parts) == 2 and parts[0] == "sop" and parts[1].endswith(".txt")
 
 
 def _dispatch_archive_page(
@@ -161,13 +166,13 @@ def _dispatch_archive_page(
 
     ``nodes.zip`` yields node documents only for top-level ``sop/*.txt`` pages
     with ``#type: node``; pages in ``vop/``, ``obj/``, ``dop/``, ``apex/``,
-    ``shop/``, ``sop_state/`` etc. are never parsed as SOP nodes. ``hom.zip``
-    and ``vex.zip`` keep their existing ``#type`` dispatch. Unknown or
-    unsupported types produce no entity.
+    ``shop/``, ``sop_state/`` etc. -- and nested or non-txt ``sop/`` entries --
+    are never parsed as SOP nodes. ``hom.zip`` and ``vex.zip`` keep their
+    existing ``#type`` dispatch. Unknown or unsupported types produce no entity.
     """
     doc_type = parse_metadata(text).get("type", "").strip()
     if archive_name == "nodes.zip":
-        if _path_context(logical) != "sop" or doc_type != "node":
+        if not _is_top_level_sop_txt(logical) or doc_type != "node":
             return None
         return parse_node_document(logical, text)
     if archive_name == "hom.zip":
