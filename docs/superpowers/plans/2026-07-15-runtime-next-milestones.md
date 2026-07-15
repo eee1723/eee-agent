@@ -65,7 +65,10 @@ at `4c22d45`, and Task 15-B (Bridge identity and authenticated client) is
 Codex-accepted at `379a5c8`. Task 15-B delivered 33 auth tests, 34 client
 tests, a 257-test focused regression slice, and a fresh full offline suite of
 1275 passed. Task 15-C (main-thread queue and Houdini-side scene query) is
-next. The read-only design and executable breakdown are recorded in
+Codex-accepted at `c717e60` (implementation `3d4687f` plus the cross-thread
+Future-resolution fix); its final focused regression passed 311 tests and the
+fresh full offline suite passed 1329 tests. Task 15-D (real transport and
+integration acceptance) is next. The read-only design and executable breakdown are recorded in
 `docs/superpowers/specs/2026-07-15-secure-houdini-bridge-readonly-design.md`
 and `docs/superpowers/plans/2026-07-15-secure-houdini-bridge-readonly.md`.
 

@@ -29,18 +29,24 @@ Generated: 2026-07-15 (Asia/Shanghai)
   `docs/superpowers/specs/2026-07-15-secure-houdini-bridge-readonly-design.md`;
   its executable plan is
   `docs/superpowers/plans/2026-07-15-secure-houdini-bridge-readonly.md`.
-  No implementation has started and no Claude prompt has been issued.
+  Task 15-A, 15-B, and 15-C implementation slices have now been reviewed;
+  Task 15-D is the next unstarted slice.
 - Task 15-A strict DTO/error contracts are Codex-accepted at `4c22d45`.
   Focused contract tests: 97 passed; Task 15-A regression slice: 261 passed;
-  fresh full offline suite: 1208 passed. No transport, queue, Houdini-side
-  adapter, UI, or scene-write code has started.
+  fresh full offline suite: 1208 passed.
 - Task 15-B Bridge identity/authenticated client is Codex-accepted at
   `379a5c8`. Auth suite: 33 passed; client suite: 34 passed; focused
   regression: 257 passed; fresh full offline suite: 1275 passed. It uses a
   framed loopback client with injected fake transport and changes no server,
   queue, Houdini adapter, UI, or scene-write path.
-- The latest local tip is `379a5c8`; it is ready to push after this status
-  update. Task 15-C is next.
+- Task 15-C main-thread queue/Houdini read-only adapter is Codex-accepted at
+  `c717e60` (implementation `3d4687f` plus the cross-thread Future-resolution
+  fix). Cross-thread regression: 5 passed; queue suite: 54 passed; focused
+  regression: 311 passed; fresh full offline suite: 1329 passed. The queue
+  resolves Futures through the owning loop's `call_soon_threadsafe`; the
+  adapter remains lazy-import/read-only and has no transport listener.
+- The latest local tip is `c717e60`; it is ready to push after this status
+  update. Task 15-D is next.
 
 Do not merge this branch to `main` until the three accepted commits are pushed
 and the final integration decision is made. Manual GLM/Houdini acceptance is
@@ -333,12 +339,34 @@ The commit changes exactly `eee_agent/houdini_bridge/auth.py`,
 `tests/runtime/test_houdini_bridge_client.py`. It uses a 4-byte big-endian
 length-prefixed loopback client, a separate Bridge token, constant-time token
 validation, strict frame limits, deadline/cancellation cleanup, and DTO-only
-responses. Task 15-C is next; no Houdini server, main-thread queue, UI, or
-scene-write path has been started.
+responses. Task 15-C was then implemented and independently accepted as
+documented below.
+
+## Task 15-C: Accepted main-thread queue and Houdini read-only adapter (`c717e60`)
+
+Independent verification confirmed:
+
+```text
+Cross-thread regression: 5 passed
+Queue suite:             54 passed
+Focused regression:      311 passed
+Full offline suite:      1329 passed
+uv lock --check:         exit 0
+compileall:              exit 0
+git diff --check:         exit 0
+```
+
+The implementation commit `3d4687f` plus fix `c717e60` changes only the queue,
+Houdini adapter, and their tests. The queue has no worker/task and resolves
+cross-thread Futures through the owning event loop. The adapter lazy-imports
+`hou`, performs only bounded reads, tracks load/clear epochs, and creates no
+transport listener. Task 15-D is next; no UI, ChangeSet, approval, or scene
+write path has started.
 
 ## Remaining Delivery Sequence
 
-1. Push completed: `feature/runtime` is at `9293174` on GitHub.
+1. Push completed through Task 15-B at `f9738e2`; Task 15-C commits and this
+   acceptance update are the next push.
 2. On the next computer, restore the branch from `origin/feature/runtime` and
    rerun the clean baseline verification below.
 3. Perform the separate manual GLM-5.2 and Houdini read-only smoke procedures
