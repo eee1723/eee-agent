@@ -1,5 +1,9 @@
 # EEE Agent Runtime Migration Handoff
 
+> Superseded on 2026-07-15 by
+> `docs/handoffs/2026-07-15-runtime-migration.md`. Keep this document for the
+> Tasks 1-9 history, but do not use its progress snapshot or resume prompt.
+
 ## Purpose
 
 This is the repository-owned handoff for continuing the persistent Runtime
