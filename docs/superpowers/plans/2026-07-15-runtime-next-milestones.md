@@ -22,7 +22,9 @@
 
 ## Task 14: Runtime v1 external acceptance and delivery gate
 
-**Status:** In progress. The accepted branch was pushed to `origin/feature/runtime` at `9293174`; clean restore and manual GLM/Houdini acceptance are pending.
+**Status:** In progress. The accepted branch was pushed and the 2026-07-15
+target-computer restore at `5915720` passed; manual GLM/Houdini acceptance is
+still pending.
 
 **Owner split:** Codex/user performs the manual smoke and delivery actions. Claude Code may implement only a follow-up fix prompt naming the exact files and regression tests supplied by Codex.
 
@@ -33,6 +35,15 @@
 - Push the five local commits currently ahead of `origin/feature/runtime` on `feature/runtime`; this sub-step is complete at `9293174`. Never force-push and never merge to `main` in this gate.
 - On the target computer, clone/fetch `origin/feature/runtime`, rebuild Python 3.11 dependencies with `uv sync --frozen --extra eval --python 3.11`, and do not transfer `.venv`, SQLite files, tokens, discovery files, logs, or `.env`.
 - Verify `uv lock --check`, `uv run --extra eval pytest -q`, `uv run python -m compileall -q eee_agent houdini_side tests`, `git diff --check`, and a clean worktree. The expected current baseline is at least 1388 passed with no failures; machine-dependent environment probes may be skipped only if no new skip is introduced.
+
+Restore evidence recorded 2026-07-15 (Asia/Shanghai): fast-forwarded
+`feature/runtime` from `e036da2` to `5915720`; `uv sync --frozen --extra eval
+--python 3.11` and `uv lock --check` resolved/checked 69 packages; the complete
+offline suite reported `1387 passed, 1 skipped` (1388 collected, with only the
+pre-existing optional WSL probe skipped); compileall and `git diff --check`
+exited zero; the worktree was clean before Task 16 planning edits. The machine
+has Houdini 21.0.440 at `C:\Program Files\Side Effects Software\Houdini
+21.0.440` and hython reports Python 3.11.7.
 
 ### 14.2 GLM-5.2 read-only continuity smoke
 
@@ -106,6 +117,31 @@ approval, or scene-write behavior is included.
 ## Task 16: Policy, typed ChangeSet, approval, and transactional execution
 
 **Dependency:** Task 15 DTOs, SceneBinding, and WorkspaceManifest accepted.
+
+**Current state:** Design and executable slices are Codex-reviewed in
+`docs/superpowers/specs/2026-07-15-typed-changeset-policy-design.md` and
+`docs/superpowers/plans/2026-07-15-typed-changeset-policy.md`. Task 16-A is
+complete and Codex-accepted at `79f281d` after the implementation
+chain `6b94cb5`, `9f750ae`, `6b860ff`, `dff573f`, and `79f281d`; all F1-F8
+findings are closed. The independent gate passed 187 focused, 423 regression,
+and 1574 full offline tests with only the pre-existing optional WSL probe
+skipped. Eight historical identity/policy findings are recorded in
+`docs/superpowers/reviews/2026-07-15-task16-a-review-result.md`. Task 15 did not
+deliver WorkspaceManifest; the accepted Task 16-A contract now supplies that
+missing immutable foundation before any write capability is enabled.
+
+Task 16-B is split for auditability: B1 (schema v2, migration checksums, and
+typed repository) is Codex-accepted at `54f2989` after implementation
+`a3914f5`; B2 (approval service and Runtime protocol) is now unblocked but has
+been split into B2a/B2b. B2a is Codex-accepted at `7b3bff8` after
+implementation `8fed692` and two approval-integrity follow-ups. Task 16-C is
+Codex-accepted at `6050a00` after implementation `86a6bb6` and two
+identity-integrity follow-ups; B2b may now be planned against that accepted
+provider seam. Task 16-D is Codex-accepted at `3435f4b`. Its independent gate
+passed 462 focused and 1821 full offline tests (one existing optional WSL skip),
+plus the real Houdini 21.0.440 transactional smoke. The closed findings and
+residual boundary are recorded in
+`docs/superpowers/reviews/2026-07-16-task16-d-review-result.md`.
 
 - Add immutable `ChangeSet`, precondition, approval, receipt, and validation contracts in a new milestone-specific spec.
 - Implement policy modes `OwnedWorkspace`, `ScopedPatch`, and `ProjectChange`; default-deny external nodes and all untyped effects.

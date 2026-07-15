@@ -22,8 +22,9 @@ Generated: 2026-07-15 (Asia/Shanghai)
   below as historical detail).
 - Task 13 accepted tip: `c8e6af1` (implementation `3b69532` plus the reviewed
   graceful-timeout/cleanup-order follow-up).
-- Task 14 is in progress. The accepted branch has been pushed; clean restore
-  and manual Runtime/Houdini acceptance remain. The detailed gate is in
+- Task 14 is in progress. The accepted branch has been pushed and the
+  2026-07-15 target-computer restore at `5915720` passed; manual Runtime/GLM
+  and Houdini acceptance remain. The detailed gate and restore evidence are in
   `docs/superpowers/plans/2026-07-15-runtime-next-milestones.md`.
 - Task 15 read-only Bridge design is approved and recorded in
   `docs/superpowers/specs/2026-07-15-secure-houdini-bridge-readonly-design.md`;
@@ -52,8 +53,23 @@ Generated: 2026-07-15 (Asia/Shanghai)
   full offline suite: 1388 passed; real hython smoke: 20 checks passed. The
   lifecycle fix makes publication failure close and await the adopted listener,
   remove both identity files, and preserve the original publication error.
-- The latest pushed tip is `c98824d` (the Task 15-D acceptance/documentation
-  commit on top of `bfc00f3`). Task 16 remains unstarted.
+- The latest pushed implementation/status tip before the cross-computer restore
+  is `5915720` (handoff refresh on top of Task 15-D). On the restore machine,
+  Task 16 received a Codex-reviewed design and executable plan; the Task 16-A
+  implementation prompt and independent review checklist are also prepared.
+  Task 16-A is complete and Codex-accepted at `79f281d` after commits
+  `6b94cb5`, `9f750ae`, `6b860ff`, `dff573f`, and `79f281d`. All F1-F8
+  findings are closed; the final independent gate passed 187 focused, 423
+  regression, and 1574 full offline tests with only the existing optional WSL
+  probe skipped. Eight historical identity/policy findings are recorded in
+  `docs/superpowers/reviews/2026-07-15-task16-a-review-result.md`. The design
+  closes the discovered WorkspaceManifest gap in Task 16-A before enabling any
+  write capability.
+- Task 16-B1, 16-B2a, and 16-C are Codex-accepted at `54f2989`, `7b3bff8`,
+  and `6050a00`. Task 16-D is Codex-accepted at `3435f4b`; its final gate passed
+  462 focused and 1821 full offline tests with only the existing optional WSL
+  skip, plus a real Houdini 21.0.440 transactional smoke. Task 16-E and B2b
+  have not started.
 
 Do not merge this branch to `main` until the accepted implementation and
 documentation commits are pushed
@@ -73,6 +89,9 @@ Read these files in order on the new computer:
 7. `docs/superpowers/specs/2026-07-15-secure-houdini-bridge-readonly-design.md`
 8. `docs/superpowers/plans/2026-07-15-secure-houdini-bridge-readonly.md`
 9. `docs/superpowers/plans/2026-07-15-runtime-next-milestones.md`
+10. `docs/superpowers/specs/2026-07-15-typed-changeset-policy-design.md`
+11. `docs/superpowers/plans/2026-07-15-typed-changeset-policy.md`
+12. `docs/superpowers/reviews/2026-07-16-task16-d-review-result.md`
 
 The approved design has not changed. Continue one plan task at a time. Claude
 Code CLI with explicit model `glm-5.2[1m]` performs implementation; Codex owns
@@ -87,9 +106,14 @@ the plan, diff review, adversarial diagnostics, and independent acceptance.
 | 11 Protocol/Auth/RuntimeLock | Complete, Codex accepted | `64fa688` |
 | 12 WebSocket server | Complete, Codex accepted | `724a8fb` |
 | 13 CLI/restart E2E/docs/final verification | Complete, Codex accepted | `c8e6af1` |
-| 14 Runtime v1 external acceptance and delivery | In progress: pushed, restore/smokes pending | See next-milestones plan |
+| 14 Runtime v1 external acceptance and delivery | In progress: pushed/restore passed; manual smokes pending | See next-milestones plan |
 | 15-A/B/C/D Secure read-only Houdini Bridge | Complete, Codex accepted | `c98824d` (implementation through `bfc00f3`) |
-| 16 Typed ChangeSet/policy/approval/write gate | Planned, not started | New Codex plan required |
+| 16-A ChangeSet/WorkspaceManifest/pure policy | Complete, Codex accepted | `79f281d` |
+| 16-B1 Schema v2/typed ChangeSet repository | Complete, Codex accepted | `54f2989` (implementation `a3914f5`) |
+| 16-B2a Approval service/approve-reject protocol | Complete, Codex accepted | `7b3bff8` (implementation `8fed692`) |
+| 16-B2b Workspace lifecycle protocol | Ready to plan against accepted 16-C provider seam | Task 16 plan |
+| 16-C Bridge preflight/capability negotiation | Complete, Codex accepted | `6050a00` (implementation `86a6bb6`) |
+| 16-D Transactional executor/receipt/rollback | Complete, Codex accepted | `3435f4b` |
 
 ## Task 10: Accepted RuntimeService
 
@@ -401,18 +425,64 @@ the queue, writers, adapter callback, and identity files. The real smoke used
 selection parity, stale epoch, FIFO, deadline cleanup, wrong-token rejection,
 shutdown cleanup, and unchanged scene fingerprint.
 
+## Task 16-D: Accepted transactional executor (`3435f4b`)
+
+The accepted implementation adds strict typed `changeset.apply` and
+`changeset.receipt` DTOs/client/server dispatch, one main-thread transactional
+executor, derived inverse rollback, bounded process-local receipt evidence,
+idempotent replay, write freeze after uncertain recovery, and a disposable real
+Houdini smoke. It does not add Runtime approval consumption, durable receipt
+persistence, workspace public commands, UI, or a general RPC/eval surface.
+
+Independent acceptance evidence:
+
+```text
+Task 16-D focused gate:  462 passed
+Full offline suite:      1821 passed, 1 skipped
+uv lock --check:         69 packages, exit 0
+compileall:              exit 0
+git diff --check:        exit 0
+```
+
+The only skip is the pre-existing optional WSL environment probe. The exact
+real smoke command was:
+
+```powershell
+$env:PYTHONPATH = (Get-Location).Path
+& 'C:\Program Files\Side Effects Software\Houdini 21.0.440\bin\hython.exe' tests\runtime\changeset_houdini_smoke.py
+```
+
+It exited zero and reported `Applied` for ordered create/set/connect,
+`AlreadyApplied` for replay, cached receipt recovery, and cleanup of
+`/obj/eee_task16d_smoke` without save/load/clear. Hython also emitted a
+non-fatal Qt timer warning after the successful cleanup line.
+
+Ten review findings were closed before the implementation commit: Bridge-side
+policy and mandatory fact coverage, inverse journaling before mutation,
+reconciliation/rollback exception containment, non-success replay semantics,
+receipt digest/epoch conflicts, real cancellation-after-start evidence,
+shutdown drain ordering, and strict rollback identity reads. Full details are
+in `docs/superpowers/reviews/2026-07-16-task16-d-review-result.md`.
+
+Residual boundary: the accepted Task 16-A policy does not treat a node created
+earlier in the same ChangeSet as manifest-owned for a later SetParm or
+ConnectInput target, and mandatory preflight facts cannot read that absent node.
+The accepted smoke therefore uses one create plus set/connect on pre-existing
+owned nodes. Do not make a compiler emit dependent create-then-set/connect (or
+create-under-created-parent) sequences until that cross-slice policy/derivation
+rule receives an explicit design and file-scope follow-up.
+
 ## Remaining Delivery Sequence
 
-1. Push the accepted Task 15-D implementation and this handoff update; keep
+1. Push the accepted Task 16-D implementation and documentation commits; keep
    `feature/runtime` separate from `main` until the integration decision.
 2. On the next computer, restore the branch from `origin/feature/runtime` and
    rerun the clean baseline verification below.
 3. Perform the separate manual GLM-5.2 and Houdini read-only smoke procedures
    from the Runtime plan, recording external-service failures separately.
-4. Codex must write and review the Task 16 design/implementation plan before
-   Claude receives any Task 16 execution prompt. Task 16 owns typed ChangeSet,
-   policy, approval, and transactional write behavior; the current Bridge
-   remains strictly read-only.
+4. Task 16-D is accepted. Plan B2b or Task 16-E as a separate bounded slice;
+   do not start either from the 16-D prompt. Preserve the residual
+   create-then-set/connect boundary recorded above until explicitly designed.
 5. Decide whether to merge `feature/runtime` into `main`; do not merge during
    the migration without an explicit integration decision.
 
@@ -438,7 +508,7 @@ Expected baseline before new development:
 - Branch is `feature/runtime` and tracks `origin/feature/runtime`.
 - Worktree is clean.
 - `uv lock --check` exits 0 with 69 packages.
-- Full suite reports at least `1388 passed` on the current environment. The
+- Full suite reports at least `1821 passed` on the current environment. The
   optional WSL environment probe may be skipped or may run on another machine;
   either result is acceptable if there are no failures and no new skips.
 - Compileall exits 0.
@@ -476,8 +546,14 @@ Resume the persistent Runtime milestone from origin/feature/runtime.
 Tasks 1-13 are complete and Codex-accepted. Task 14 remains a separate
 external-acceptance/restore gate. Task 15-A/B/C/D is complete and Codex-
 accepted; implementation tips are 4c22d45, 379a5c8, c717e60, fcdee32, and
-bfc00f3, with the latest pushed documentation/status tip c98824d. Task 16 is
-planned but not started.
+bfc00f3, with the latest pushed documentation/status tip c98824d. Task 16-A is
+Codex-accepted at 79f281d; Task 16-B1 is Codex-accepted at 54f2989 after
+implementation a3914f5 and an approval-identity follow-up. Task 16-B2a is
+Codex-accepted at 7b3bff8 after implementation 8fed692 and two integrity
+follow-ups. Task 16-C is Codex-accepted at 6050a00 after implementation
+86a6bb6 and identity-integrity follow-ups 357d862/6050a00. Task 16-D is
+Codex-accepted at 3435f4b after 462 focused, 1821 full offline, and real
+Houdini 21.0.440 smoke acceptance. B2b and Task 16-E have not started.
 Read, in order:
 
 1. docs/superpowers/specs/2026-07-14-runtime-design.md
@@ -487,14 +563,17 @@ Read, in order:
 5. docs/superpowers/specs/2026-07-15-secure-houdini-bridge-readonly-design.md
 6. docs/superpowers/plans/2026-07-15-secure-houdini-bridge-readonly.md
 7. docs/superpowers/plans/2026-07-15-runtime-next-milestones.md
+8. docs/superpowers/specs/2026-07-15-typed-changeset-policy-design.md
+9. docs/superpowers/plans/2026-07-15-typed-changeset-policy.md
+10. docs/superpowers/reviews/2026-07-16-task16-d-review-result.md
 
 Run `uv sync --frozen --extra eval --python 3.11`, `uv lock --check`, the full
 pytest suite, compileall including `houdini_side`, and `git status` before any
 new work.
 
-Do not start Task 16 or Task 17 without a current Codex plan and acceptance
-gate. Task 15 read-only implementation is complete; only verification or
-documentation corrections may be made without a new task authorization.
+Do not start Task 16-B2b, Task 16-E, or Task 17 without a current Codex plan and
+acceptance gate. Task 16-D is complete; only verification or documentation
+corrections may be made without a new task authorization.
 Claude Code is responsible only for the concrete implementation task supplied
 by Codex; Codex owns plan/status documents, diff review, adversarial checks,
 acceptance, and push/merge decisions. Use model `glm-5.2[1m]` when Codex assigns
