@@ -352,6 +352,162 @@ def test_queue_item_is_frozen_snapshot() -> None:
         item.request_id = "x"  # type: ignore[misc]
 
 
+# ---------------------------------------------------------------------------
+# Cross-thread safety: pump_one/cancel/shutdown run on the Houdini main thread
+# while the awaited Future belongs to the transport thread's event loop. Future
+# resolution MUST go through the owning loop's call_soon_threadsafe, otherwise
+# the transport await never wakes. Each test uses a bounded watchdog so a
+# regression cannot hang pytest.
+# ---------------------------------------------------------------------------
+
+
+def _spawn_transport(runner: Callable[[], Awaitable[object]]) -> tuple:
+    """Run ``runner()`` in a daemon thread with its own event loop.
+
+    Returns ``(thread, state)`` where ``state`` captures ``result``/``error``.
+    The thread is a daemon so a stuck run cannot block process exit.
+    """
+    state: dict = {"result": None, "error": None}
+
+    def target() -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            state["result"] = loop.run_until_complete(runner())
+        except BaseException as exc:  # noqa: BLE001 — captured for assertions
+            state["error"] = exc
+        finally:
+            loop.close()
+
+    thread = threading.Thread(target=target, name="eee-transport-test", daemon=True)
+    thread.start()
+    return thread, state
+
+
+_WATCHDOG = 5.0
+
+
+@async_test
+async def test_cross_thread_pump_one_wakes_transport_loop() -> None:
+    # Runs in the test's own loop only to satisfy async_test; the real work
+    # happens on the spawned transport thread + the calling (main) thread.
+    queue = MainThreadReadQueue()
+    submitted = threading.Event()
+
+    async def runner() -> str:
+        fut = queue.submit("r1", lambda: "ok", deadline_monotonic=_future_deadline())
+        submitted.set()
+        return await fut  # type: ignore[no-any-return]
+
+    thread, state = _spawn_transport(runner)
+    assert submitted.wait(timeout=_WATCHDOG), "transport thread did not submit"
+    assert queue.pump_one() is True  # main thread runs the operation
+    thread.join(timeout=_WATCHDOG)
+    assert not thread.is_alive(), "transport thread stuck — cross-thread wake failed"
+    assert state["error"] is None, f"unexpected error: {state['error']!r}"
+    assert state["result"] == "ok"
+
+
+@async_test
+async def test_cross_thread_operation_exception_reaches_transport_loop() -> None:
+    queue = MainThreadReadQueue()
+    submitted = threading.Event()
+
+    def boom() -> None:
+        raise ValueError("houdini boom")
+
+    async def runner() -> tuple:
+        fut = queue.submit("r1", boom, deadline_monotonic=_future_deadline())
+        submitted.set()
+        try:
+            await fut
+            return ("completed", None)
+        except BaseException as exc:  # noqa: BLE001
+            return ("raised", exc)
+
+    thread, state = _spawn_transport(runner)
+    assert submitted.wait(timeout=_WATCHDOG)
+    assert queue.pump_one() is True  # operation raises on the main thread
+    thread.join(timeout=_WATCHDOG)
+    assert not thread.is_alive(), "transport thread stuck on exception delivery"
+    assert state["error"] is None
+    kind, exc = state["result"]
+    assert kind == "raised"
+    assert isinstance(exc, ValueError)
+
+
+@async_test
+async def test_cross_thread_already_done_future_is_not_overwritten() -> None:
+    queue = MainThreadReadQueue()
+    future_cancelled = threading.Event()
+
+    async def runner() -> str:
+        fut = queue.submit("r1", lambda: "ok", deadline_monotonic=_future_deadline())
+        fut.cancel()  # cancel the asyncio Future directly -> already done
+        future_cancelled.set()
+        try:
+            await fut
+            return "completed"
+        except asyncio.CancelledError:
+            return "cancelled"
+
+    thread, state = _spawn_transport(runner)
+    assert future_cancelled.wait(timeout=_WATCHDOG)
+    # The operation runs, but _resolve must skip the already-done Future
+    # (no InvalidStateError, no double-set).
+    assert queue.pump_one() is True
+    thread.join(timeout=_WATCHDOG)
+    assert not thread.is_alive(), "transport thread stuck after double-set guard"
+    assert state["error"] is None
+    assert state["result"] == "cancelled"
+
+
+@async_test
+async def test_cross_thread_cancel_from_transport_thread_resolves_safely() -> None:
+    queue = MainThreadReadQueue()
+
+    async def runner() -> tuple:
+        fut = queue.submit("r1", lambda: "ok", deadline_monotonic=_future_deadline())
+        await asyncio.sleep(0.05)  # let it sit queued; main does NOT pump
+        cancelled = queue.cancel("r1")  # called from the transport thread
+        try:
+            await fut
+            return ("completed", cancelled)
+        except QueueItemCancelled:
+            return ("cancelled", cancelled)
+
+    thread, state = _spawn_transport(runner)
+    thread.join(timeout=_WATCHDOG)
+    assert not thread.is_alive(), "transport thread stuck on self-cancel"
+    assert state["error"] is None, f"unexpected error: {state['error']!r}"
+    kind, cancelled = state["result"]
+    assert cancelled is True
+    assert kind == "cancelled"
+
+
+@async_test
+async def test_cross_thread_shutdown_wakes_transport_loop() -> None:
+    queue = MainThreadReadQueue()
+    submitted = threading.Event()
+
+    async def runner() -> str:
+        fut = queue.submit("r1", lambda: "ok", deadline_monotonic=_future_deadline())
+        submitted.set()
+        try:
+            await fut
+            return "completed"
+        except QueueRejected:
+            return "rejected"
+
+    thread, state = _spawn_transport(runner)
+    assert submitted.wait(timeout=_WATCHDOG)
+    queue.shutdown()  # from the main thread; must wake the transport loop
+    thread.join(timeout=_WATCHDOG)
+    assert not thread.is_alive(), "transport thread stuck on shutdown drain"
+    assert state["error"] is None
+    assert state["result"] == "rejected"
+
+
 # ==========================================================================
 # Part B — read-only Houdini scene adapter (fake_hou, offline)
 # ==========================================================================
