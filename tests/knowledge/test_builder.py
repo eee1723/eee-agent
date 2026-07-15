@@ -10,12 +10,20 @@ from __future__ import annotations
 import io
 import json
 import zipfile
+from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from eee_agent.knowledge.build import BuildError, BuildOptions, build_cache, main
+from eee_agent.knowledge.build import (
+    BuildError,
+    BuildOptions,
+    build_cache,
+    main,
+    parse_archive_documents,
+)
+from eee_agent.knowledge.graph import assemble_graph
 from eee_agent.knowledge.lock import (
     LOCK_STALE_TTL_SECONDS,
     LockBusy,
@@ -23,6 +31,7 @@ from eee_agent.knowledge.lock import (
     lock_path_for,
     release_build_lock,
 )
+from eee_agent.knowledge.models import EntityKind
 from eee_agent.knowledge.sources import SourceError, load_archive_entries, load_skill_sources
 from eee_agent.knowledge.writer import validate_cache
 
@@ -37,6 +46,22 @@ def _make_zip(entries) -> bytes:
         for name, data in entries:
             zf.writestr(name, data)
     return buf.getvalue()
+
+
+REQUIRED_SKILL_NAMES = (
+    "parametric-building",
+    "procedural-components",
+    "sop-cookbook",
+    "vex-patterns",
+)
+
+
+def _make_skills(tmp_path: Path, names=REQUIRED_SKILL_NAMES) -> Path:
+    skills = tmp_path / "skills"
+    for name in names:
+        (skills / name).mkdir(parents=True)
+        (skills / name / "SKILL.md").write_text(f"---\nname: {name}\n---\n\n# {name}\nbody\n")
+    return skills
 
 
 # --- sources --------------------------------------------------------------
@@ -59,17 +84,106 @@ def test_load_archive_entries_rejects_unsafe(bad: str) -> None:
         load_archive_entries(_make_zip([(bad, b"x")]))
 
 
-def test_load_skill_sources_reads_skills(tmp_path: Path) -> None:
-    skills = tmp_path / "skills"
-    for name in ("vex-patterns", "sop-cookbook"):
-        (skills / name).mkdir(parents=True)
-        (skills / name / "SKILL.md").write_text(f"# {name}\nbody\n")
+def test_load_skill_sources_requires_exactly_four_skills(tmp_path: Path) -> None:
+    skills = _make_skills(tmp_path)
     fps, entries = load_skill_sources(skills, tmp_path)
     logicals = {fp.logical_name for fp in fps}
     assert logicals == {
-        "skills/vex-patterns/SKILL.md", "skills/sop-cookbook/SKILL.md",
+        "skills/parametric-building/SKILL.md",
+        "skills/procedural-components/SKILL.md",
+        "skills/sop-cookbook/SKILL.md",
+        "skills/vex-patterns/SKILL.md",
     }
     assert {logical for logical, _ in entries} == logicals
+    assert len(fps) == 4
+
+
+def test_load_skill_sources_missing_skill_fails(tmp_path: Path) -> None:
+    skills = _make_skills(tmp_path, names=REQUIRED_SKILL_NAMES[:3])  # omit one
+    with pytest.raises(SourceError):
+        load_skill_sources(skills, tmp_path)
+
+
+def test_load_skill_sources_extra_skill_fails(tmp_path: Path) -> None:
+    skills = _make_skills(tmp_path)
+    (skills / "extra").mkdir()
+    (skills / "extra" / "SKILL.md").write_text("# extra\n")
+    with pytest.raises(SourceError):
+        load_skill_sources(skills, tmp_path)
+
+
+# --- node source dispatch (archive context restriction) -------------------
+
+_NODE_TXT = (
+    b"#type: node\n#context: sop\n#internal: boolean\n"
+    b"= Boolean =\n\"\"\"Boolean op.\"\"\"\n"
+)
+_NON_SOP_NODE_TXT = b"#type: node\n= X =\n\"\"\"non-sop node page.\"\"\"\n"
+_HOM_TXT = (
+    b"= hou.Node =\n#type: homclass\n\"\"\"Node class.\"\"\"\n"
+)
+_VEX_TXT = (
+    b"#type: vex\n#context: sop\n= intersect =\n\"\"\"Intersect.\"\"\"\n"
+    b":usage: intersect(geo) -> int\n"
+)
+
+
+def test_nodes_archive_only_parses_sop_context_node_pages() -> None:
+    entries = [
+        ("sop/boolean.txt", _NODE_TXT),
+        ("obj/not_sop.txt", _NON_SOP_NODE_TXT),
+        ("vop/not_sop.txt", _NON_SOP_NODE_TXT),
+    ]
+    docs = parse_archive_documents("nodes.zip", entries)
+    entities = [e for d in docs for e in d.entities]
+    assert {e.entity_id for e in entities} == {
+        "node_document:sop/boolean.txt@current"
+    }
+
+
+@pytest.mark.parametrize("ctx", ["vop", "obj", "dop", "apex", "shop", "sop_state"])
+def test_nodes_archive_excludes_non_sop_contexts(ctx: str) -> None:
+    docs = parse_archive_documents("nodes.zip", [(f"{ctx}/x.txt", _NON_SOP_NODE_TXT)])
+    assert docs == []
+
+
+def test_nodes_archive_excludes_non_node_type_under_sop() -> None:
+    docs = parse_archive_documents(
+        "nodes.zip", [("sop/_common.txt", b"#type: include\n= c =\n\"\"\"c.\"\"\"\n")]
+    )
+    assert docs == []
+
+
+def test_node_dispatch_excludes_non_sop_from_graph_counts() -> None:
+    entries = [
+        ("sop/boolean.txt", _NODE_TXT),
+        ("vop/not_sop.txt", _NON_SOP_NODE_TXT),
+        ("obj/not_sop.txt", _NON_SOP_NODE_TXT),
+        ("dop/not_sop.txt", _NON_SOP_NODE_TXT),
+    ]
+    docs = parse_archive_documents("nodes.zip", entries)
+    bundle = assemble_graph(tuple(docs), inventory=frozenset({"boolean"}))
+    counts = Counter(e.kind.value for e in bundle.entities)
+    assert counts == {"node_document": 1}
+    paths = {e.source_path for e in bundle.entities}
+    assert paths == {"sop/boolean.txt"}
+
+
+def test_hom_archive_dispatch_unchanged() -> None:
+    docs = parse_archive_documents("hom.zip", [("hou/Node.txt", _HOM_TXT)])
+    kinds = {e.kind for d in docs for e in d.entities}
+    assert EntityKind.HOM_CLASS in kinds
+
+
+def test_vex_archive_dispatch_unchanged() -> None:
+    docs = parse_archive_documents("vex.zip", [("functions/intersect.txt", _VEX_TXT)])
+    kinds = {e.kind for d in docs for e in d.entities}
+    assert EntityKind.VEX_FUNCTION in kinds
+
+
+def test_unknown_archive_type_produces_no_entity() -> None:
+    docs = parse_archive_documents("hom.zip", [("hou/x.txt", b"#type: include\n= x =\n\"\"\"x.\"\"\"\n")])
+    assert docs == []
 
 
 # --- lock -----------------------------------------------------------------

@@ -58,6 +58,7 @@ __all__ = [
     "BuildOptions",
     "build_cache",
     "main",
+    "parse_archive_documents",
 ]
 
 BUILDER_VERSION = "1"
@@ -123,42 +124,69 @@ def _new_nonce() -> str:
 
 # --- source gathering -----------------------------------------------------
 
-def _parse_document(logical: str, text: str) -> ParsedDocument:
-    """Dispatch a Houdini archive page to its parser by ``#type``."""
+def _path_context(logical: str) -> str:
+    """Top-level directory of a logical source path ('sop' for 'sop/x.txt')."""
+    head, _sep, _tail = logical.partition("/")
+    return head
+
+
+def _dispatch_archive_page(
+    archive_name: str, logical: str, text: str
+) -> ParsedDocument | None:
+    """Dispatch one archive page to its parser, respecting archive context.
+
+    ``nodes.zip`` yields node documents only for top-level ``sop/*.txt`` pages
+    with ``#type: node``; pages in ``vop/``, ``obj/``, ``dop/``, ``apex/``,
+    ``shop/``, ``sop_state/`` etc. are never parsed as SOP nodes. ``hom.zip``
+    and ``vex.zip`` keep their existing ``#type`` dispatch. Unknown or
+    unsupported types produce no entity.
+    """
     doc_type = parse_metadata(text).get("type", "").strip()
-    if doc_type == "node":
+    if archive_name == "nodes.zip":
+        if _path_context(logical) != "sop" or doc_type != "node":
+            return None
         return parse_node_document(logical, text)
-    if doc_type == "vex":
-        return parse_vex_document(logical, text)
-    if doc_type in _HOM_TYPES:
-        return parse_hom_document(logical, text)
-    return ParsedDocument((), (), ())
+    if archive_name == "hom.zip":
+        if doc_type in _HOM_TYPES:
+            return parse_hom_document(logical, text)
+        return None
+    if archive_name == "vex.zip":
+        if doc_type == "vex":
+            return parse_vex_document(logical, text)
+        return None
+    return None
 
 
-def _parse_all(
-    archive_entries: list[tuple[str, bytes]],
-    skill_entries: list[tuple[str, bytes]],
+def parse_archive_documents(
+    archive_name: str, entries: list[tuple[str, bytes]]
 ) -> list[ParsedDocument]:
+    """Parse archive entries with archive-aware dispatch.
+
+    Archive boundaries are preserved: the ``archive_name`` decides which parser
+    and path rules apply, so a flattened entry list cannot turn non-SOP node
+    pages into ``node_document`` entities.
+    """
     docs: list[ParsedDocument] = []
-    for logical, data in archive_entries:
+    for logical, data in entries:
         try:
             text = data.decode("utf-8-sig")
         except UnicodeDecodeError:
             continue
-        docs.append(_parse_document(logical, text))
-    for logical, data in skill_entries:
-        docs.append(parse_skill_document(logical, data.decode("utf-8-sig")))
+        document = _dispatch_archive_page(archive_name, logical, text)
+        if document is not None:
+            docs.append(document)
     return docs
 
 
 def _load_three_archives(hfs: Path):
+    """Read the three required archives, keeping per-archive entry boundaries."""
     fingerprints = []
-    entries: list[tuple[str, bytes]] = []
+    per_archive: dict[str, list[tuple[str, bytes]]] = {}
     for name in _REQUIRED_ARCHIVES:
         data = (hfs / "houdini" / "help" / name).read_bytes()
         fingerprints.append(fingerprint_bytes(name, data))
-        entries.extend(load_archive_entries(data))
-    return tuple(fingerprints), entries
+        per_archive[name] = load_archive_entries(data)
+    return tuple(fingerprints), per_archive
 
 
 def _gather_hfs_sources(
@@ -170,9 +198,13 @@ def _gather_hfs_sources(
         _DEFAULT_HFS_CANDIDATES,
     )
     snapshot = load_inventory_snapshot(hfs, runner=runner)
-    archive_fps, archive_entries = _load_three_archives(hfs)
+    archive_fps, per_archive = _load_three_archives(hfs)
     skill_fps, skill_entries = load_skill_sources(repo_root / "skills", repo_root)
-    docs = _parse_all(archive_entries, skill_entries)
+    docs: list[ParsedDocument] = []
+    for name in _REQUIRED_ARCHIVES:
+        docs.extend(parse_archive_documents(name, per_archive[name]))
+    for logical, data in skill_entries:
+        docs.append(parse_skill_document(logical, data.decode("utf-8-sig")))
     return docs, snapshot, archive_fps, skill_fps
 
 

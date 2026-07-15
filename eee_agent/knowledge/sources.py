@@ -15,11 +15,27 @@ from pathlib import Path
 from eee_agent.knowledge.ids import normalize_source_path
 from eee_agent.knowledge.manifest import SourceFingerprint, fingerprint_bytes
 
-__all__ = ["SourceError", "load_archive_entries", "load_skill_sources"]
+__all__ = [
+    "REQUIRED_SKILL_PATHS",
+    "SourceError",
+    "load_archive_entries",
+    "load_skill_sources",
+]
 
 
 class SourceError(Exception):
     """A source archive entry or skill path was unsafe."""
+
+
+# The exact, exhaustive set of project skills the builder accepts (design §5).
+# A build fails if any is missing or if any extra ``*/SKILL.md`` is present, so a
+# stale glob result can never pass as the complete source set.
+REQUIRED_SKILL_PATHS = (
+    "parametric-building/SKILL.md",
+    "procedural-components/SKILL.md",
+    "sop-cookbook/SKILL.md",
+    "vex-patterns/SKILL.md",
+)
 
 
 def load_archive_entries(data: bytes) -> list[tuple[str, bytes]]:
@@ -45,19 +61,29 @@ def load_archive_entries(data: bytes) -> list[tuple[str, bytes]]:
 def load_skill_sources(
     skills_dir: Path, repo_root: Path
 ) -> tuple[tuple[SourceFingerprint, ...], list[tuple[str, bytes]]]:
-    """Load each ``*/SKILL.md`` under ``skills_dir``.
+    """Load exactly the four required project skills under ``skills_dir``.
 
     Returns ``(fingerprints, entries)`` where each logical path is the SKILL.md
-    path relative to ``repo_root``, normalized to POSIX form.
+    path relative to ``repo_root``, normalized to POSIX form. A missing required
+    skill or any extra ``*/SKILL.md`` raises :class:`SourceError` -- the result
+    is never a silent partial glob.
     """
     skills_dir = Path(skills_dir)
     repo_root = Path(repo_root)
     fingerprints: list[SourceFingerprint] = []
     entries: list[tuple[str, bytes]] = []
-    for skill_path in sorted(skills_dir.glob("*/SKILL.md")):
+    required = set(REQUIRED_SKILL_PATHS)
+    for relative in REQUIRED_SKILL_PATHS:
+        skill_path = skills_dir / relative
+        if not skill_path.is_file():
+            raise SourceError(f"missing required project skill: skills/{relative}")
         data = skill_path.read_bytes()
-        relative = skill_path.relative_to(repo_root)
-        logical = normalize_source_path(str(relative))
+        logical = normalize_source_path(str(skill_path.relative_to(repo_root)))
         fingerprints.append(fingerprint_bytes(logical, data))
         entries.append((logical, data))
+    # Reject any unexpected top-level SKILL.md so the source set is exact.
+    for candidate in sorted(skills_dir.glob("*/SKILL.md")):
+        if candidate.relative_to(skills_dir).as_posix() not in required:
+            rel = candidate.relative_to(skills_dir).as_posix()
+            raise SourceError(f"unexpected project skill: skills/{rel}")
     return tuple(fingerprints), entries
