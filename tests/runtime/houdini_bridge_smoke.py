@@ -156,8 +156,10 @@ async def main(args: argparse.Namespace) -> int:
     )
     host = args.host
     aio = await asyncio.start_server(server.handle_connection, host, args.port)
-    port = aio.sockets[0].getsockname()[1]
-    server.publish_identity(host=host, port=port)
+    # serve() publishes the identity AFTER the bind (so discovery advertises the
+    # real port) and guarantees that on a publication failure the listener is
+    # closed and awaited — the host never has to remember cleanup.
+    port = await server.serve(aio, host=host)
     print(f"server: bound {host}:{port}; identity published to {state_dir}")
 
     _expect((state_dir / BRIDGE_TOKEN_FILENAME).exists(), "bridge.token published")
@@ -266,18 +268,11 @@ async def main(args: argparse.Namespace) -> int:
             await pump_task
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
-        server.close()
-        # Houdini ships its own asyncio shim (houdini/python3.11libs/haio.py)
-        # whose Server.close()/wait_closed() are not stdlib-compatible; tolerate
-        # either flavour. The port is released when the short-lived smoke exits.
-        try:
-            aio.close()
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            await asyncio.wait_for(aio.wait_closed(), timeout=3.0)
-        except Exception:  # noqa: BLE001
-            pass
+        # stop() owns the full shutdown: close the listener (awaited), drain the
+        # queue, close writers, remove identity files, remove the epoch callback.
+        # Houdini's asyncio shim (haio.py) has non-stdlib close/wait_closed;
+        # BridgeServer._await_listener_closed tolerates both flavours.
+        await server.stop()
         await asyncio.sleep(0.05)
 
     # --- shutdown cleanup ---------------------------------------------------

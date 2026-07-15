@@ -404,6 +404,24 @@ def _canonical_dumps(obj: object) -> str:
     )
 
 
+async def _await_listener_closed(listener: object) -> None:
+    """Best-effort ``listener.close()`` + ``await listener.wait_closed()``.
+
+    Swallows every error so a failing cleanup can never mask the original
+    publication/shutdown error. Works with both stdlib asyncio and Houdini's
+    ``haio`` listener (whose close/wait_closed are non-stdlib). This helper does
+    NOT import ``asyncio`` — it only calls methods on the passed listener.
+    """
+    try:
+        listener.close()  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        await listener.wait_closed()  # type: ignore[func-returns-value]
+    except Exception:  # noqa: BLE001
+        pass
+
+
 class BridgeServer:
     """Read-only, loopback, token-authenticated bridge server.
 
@@ -435,6 +453,19 @@ class BridgeServer:
         self._queue = queue if queue is not None else MainThreadReadQueue()
         self._closed = False
         self._writers: list[object] = []
+        self._listener: object | None = None
+        self._ready = False
+
+    @property
+    def is_serving(self) -> bool:
+        """True only while an adopted listener is actively serving."""
+        listener = self._listener
+        if listener is None:
+            return False
+        try:
+            return bool(listener.is_serving())  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 — a non-stdlib listener still counts as not serving
+            return False
 
     # -- identity publication ------------------------------------------------
 
@@ -442,7 +473,9 @@ class BridgeServer:
         """Atomically publish ``bridge.token`` then discovery to ``state_dir``.
 
         Raises (and leaves no partial identity file) if either publication
-        fails. Must be called before the listener is advertised.
+        fails. Low-level hook for callers that manage their own listener; most
+        callers should use :meth:`serve` instead, which guarantees the listener
+        is closed on publication failure.
         """
         if self._closed:
             raise RuntimeError("BridgeServer is closed")
@@ -450,31 +483,88 @@ class BridgeServer:
             self._identity, self._state_dir, host=host, port=port
         )
 
+    # -- startup lifecycle seam ----------------------------------------------
+
+    async def serve(self, listener: object, *, host: str) -> int:
+        """Adopt a bound listener, publish identity atomically, mark ready.
+
+        The host creates ``listener`` (``asyncio.start_server(...)``) and passes
+        it here. Identity publication happens AFTER the bind so discovery can
+        advertise the real port. The strong guarantee: if publication fails, the
+        listener is closed and awaited, the identity files are removed, and the
+        ORIGINAL publication error propagates — cleanup errors never mask it.
+        Only after successful publication is the server ``ready``. Returns the
+        bound port.
+
+        This method does not import ``asyncio``; it only calls methods on the
+        passed listener, so the Task 15-C structural import checks are preserved.
+        """
+        if self._closed:
+            raise RuntimeError("BridgeServer is closed")
+        if self._listener is not None:
+            raise RuntimeError("BridgeServer is already serving a listener")
+        bound_port = listener.sockets[0].getsockname()[1]  # type: ignore[attr-defined]
+        self._listener = listener
+        try:
+            self.publish_identity(host=host, port=bound_port)
+        except BaseException:
+            # Guarantee: the listener we adopted is closed + awaited first, then
+            # the rest of the server is cleaned up. The original error is re-raised;
+            # any cleanup failure is swallowed so it cannot mask the original.
+            await _await_listener_closed(self._listener)
+            try:
+                self.close()
+            except Exception:  # noqa: BLE001 — never mask the original failure
+                pass
+            raise
+        self._ready = True
+        return bound_port
+
     # -- shutdown ------------------------------------------------------------
 
     def close(self) -> None:
-        """Stop serving, resolve queued work, release the adapter, remove files.
+        """Stop accepting, drain the queue, close writers, remove files/callback.
 
-        Idempotent. Does not save, clear, mutate, or export the HIP. The owning
-        process closes the TCP listener separately (``server.close()`` cannot,
-        because it does not own it).
+        Idempotent. Synchronously closes the owned listener (use :meth:`stop` to
+        also ``await wait_closed``). Does not save, clear, mutate, or export the
+        HIP.
         """
         if self._closed:
             return
         self._closed = True
-        # Resolve any handler awaiting a queue future so it can finish.
+        self._ready = False
+        # 1. Stop accepting new connections on the owned listener.
+        if self._listener is not None:
+            try:
+                self._listener.close()  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                pass
+        # 2. Drain/reject queued work so no handler stays awaiting a future.
         self._queue.shutdown()
-        # Nudge tracked connection writers so their handlers can wind down.
+        # 3. Close tracked connection writers so handlers wind down.
         for writer in list(self._writers):
             try:
                 writer.close()  # type: ignore[call-arg]
             except Exception:  # noqa: BLE001 — closing must never raise
                 pass
         self._writers = []
-        # Release the scene-epoch callback (non-mutating to the scene).
-        self._adapter.close()
-        # Remove the identity handoff files.
+        # 4. Remove the identity handoff files.
         remove_bridge_identity_files(self._state_dir)
+        # 5. Release the scene-epoch callback (non-mutating to the scene).
+        self._adapter.close()
+
+    async def stop(self) -> None:
+        """Full async shutdown: :meth:`close` then ``await listener.wait_closed()``.
+
+        Idempotent. Ordered: stop accepting, drain/reject queued work, close
+        connection writers, remove identity files, remove the Houdini epoch
+        callback, then await the listener's full close. Does not mutate the HIP.
+        """
+        listener = self._listener
+        self.close()
+        if listener is not None:
+            await _await_listener_closed(listener)
+            self._listener = None
 
     # -- connection handler --------------------------------------------------
 

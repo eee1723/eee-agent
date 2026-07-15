@@ -195,9 +195,20 @@ class _Node:
 class _HipFile:
     def __init__(self, name: str = "") -> None:
         self._name = name
+        self._callbacks: list[Callable[[str], None]] = []
 
     def name(self) -> str:
         return self._name
+
+    def addEventCallback(self, callback: Callable[[str], None]) -> None:
+        self._callbacks.append(callback)
+
+    def removeEventCallback(self, callback: Callable[[str], None]) -> None:
+        if callback in self._callbacks:
+            self._callbacks.remove(callback)
+
+    def eventCallbacks(self) -> list:
+        return list(self._callbacks)
 
 
 class _HipFileEventType:
@@ -291,8 +302,10 @@ class _Harness:
         )
         self._pump = pump
         self.aio = await asyncio.start_server(self.server.handle_connection, host, port)
-        self.port = self.aio.sockets[0].getsockname()[1]
-        self.server.publish_identity(host=host, port=self.port)
+        # serve() publishes identity and guarantees that on a publication
+        # failure the listener is closed — the production lifecycle, exercised
+        # here instead of a bare publish_identity().
+        self.port = await self.server.serve(self.aio, host=host)
         self._stop = asyncio.Event()
         if pump:
 
@@ -316,16 +329,11 @@ class _Harness:
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
             self._pump_task = None
-        # Resolve any handler still awaiting a queue future before closing sockets.
+        # stop() owns the full shutdown: close the listener (awaited), drain the
+        # queue, close writers, remove identity files + the epoch callback.
         if self.server is not None:
-            self.server.close()
-        if self.aio is not None:
-            self.aio.close()
-            try:
-                await asyncio.wait_for(self.aio.wait_closed(), timeout=2.0)
-            except (asyncio.TimeoutError, Exception):  # noqa: BLE001
-                pass
-            self.aio = None
+            await self.server.stop()
+        self.aio = None
         # Let any residual connection handlers finish.
         await asyncio.sleep(0.02)
 
@@ -875,68 +883,8 @@ async def test_shutdown_removes_identity_files(tmp_path: Path) -> None:
     assert not (tmp_path / BRIDGE_DISCOVERY_FILENAME).exists()
 
 
-# ==========================================================================
-# 21. publication failure: listener unusable, no partial files, original
-#     exception propagates, cleanup does not mask it
-# ==========================================================================
-
-
-@async_test
-async def test_publish_failure_closes_listener_and_leaves_no_files(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    adapter, _ = _make_adapter(selected=[_geo_node()])
-    identity = create_bridge_identity()
-    queue = MainThreadReadQueue()
-    server = BridgeServer(
-        adapter=adapter, identity=identity, state_dir=tmp_path, queue=queue
-    )
-    aio = await asyncio.start_server(server.handle_connection, "127.0.0.1", 0)
-
-    def boom(*args, **kwargs):  # type: ignore[no-untyped-def]
-        raise OSError("simulated publish failure")
-
-    monkeypatch.setattr(
-        "eee_agent.houdini_bridge.auth.write_bridge_token", boom
-    )
-    raised: BaseException | None = None
-    try:
-        server.publish_identity(host="127.0.0.1", port=12345)
-    except BaseException as exc:  # noqa: BLE001
-        raised = exc
-    # The original exception propagates.
-    assert isinstance(raised, OSError)
-    assert "simulated publish failure" in str(raised)
-    # The caller closes the listener; the server cleans its files.
-    aio.close()
-    try:
-        await asyncio.wait_for(aio.wait_closed(), timeout=2.0)
-    except (asyncio.TimeoutError, Exception):  # noqa: BLE001
-        pass
-    server.close()
-    assert not (tmp_path / BRIDGE_TOKEN_FILENAME).exists()
-    assert not (tmp_path / BRIDGE_DISCOVERY_FILENAME).exists()
-
-
-def test_publish_failure_cleanup_does_not_mask_original(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    adapter, _ = _make_adapter(selected=[_geo_node()])
-    identity = create_bridge_identity()
-    queue = MainThreadReadQueue()
-    server = BridgeServer(
-        adapter=adapter, identity=identity, state_dir=tmp_path, queue=queue
-    )
-
-    def boom(*args, **kwargs):  # type: ignore[no-untyped-def]
-        raise OSError("the-real-publish-error")
-
-    monkeypatch.setattr(
-        "eee_agent.houdini_bridge.auth.write_bridge_token", boom
-    )
-    # Even if cleanup also fails, the original publish error must surface.
-    with pytest.raises(OSError, match="the-real-publish-error"):
-        server.publish_identity(host="127.0.0.1", port=12345)
+# Publication-failure lifecycle (listener closed, files removed, original error
+# propagated) is covered by the serve()/stop() lifecycle-seam tests below.
 
 
 # ==========================================================================
@@ -977,3 +925,179 @@ def test_server_only_dispatches_scene_query() -> None:
     assert "parse_request" in source
     for needle in ("eval(", "exec(", "getattr(adapter", "import subprocess"):
         assert needle not in source
+
+
+# ==========================================================================
+# Task 15-D follow-up: server startup lifecycle seam (serve / stop)
+#
+# A publish_identity() failure must NEVER leave the host's asyncio listener
+# serving. ``serve()`` adopts an already-bound listener and guarantees that, on
+# publication failure, the listener is closed and awaited, the identity files are
+# removed, and the ORIGINAL error propagates (cleanup errors never mask it).
+# ``stop()`` is the matching idempotent async shutdown. These tests deliberately
+# do NOT manually close the listener before asserting.
+# ==========================================================================
+
+
+def _boom_publish(monkeypatch: pytest.MonkeyPatch, message: str = "publish boom") -> None:
+    """Make bridge token publication fail with a recognizable OSError."""
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise OSError(message)
+
+    monkeypatch.setattr("eee_agent.houdini_bridge.auth.write_bridge_token", boom)
+
+
+@async_test
+async def test_serve_publish_failure_closes_listener(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter, _ = _make_adapter(selected=[_geo_node()])
+    identity = create_bridge_identity()
+    queue = MainThreadReadQueue()
+    server = BridgeServer(
+        adapter=adapter, identity=identity, state_dir=tmp_path, queue=queue
+    )
+    listener = await asyncio.start_server(server.handle_connection, "127.0.0.1", 0)
+    _boom_publish(monkeypatch)
+    with pytest.raises(OSError, match="publish boom"):
+        await server.serve(listener, host="127.0.0.1")
+    # No manual close here — serve() must have closed the listener itself.
+    assert listener.is_serving() is False
+    assert not (tmp_path / BRIDGE_TOKEN_FILENAME).exists()
+    assert not (tmp_path / BRIDGE_DISCOVERY_FILENAME).exists()
+
+
+@async_test
+async def test_serve_publish_failure_propagates_original_not_cleanup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    adapter, _ = _make_adapter(selected=[_geo_node()])
+    identity = create_bridge_identity()
+    queue = MainThreadReadQueue()
+    server = BridgeServer(
+        adapter=adapter, identity=identity, state_dir=tmp_path, queue=queue
+    )
+    listener = await asyncio.start_server(server.handle_connection, "127.0.0.1", 0)
+    _boom_publish(monkeypatch)
+    # Force the post-failure cleanup to raise too; the ORIGINAL publish error
+    # must still be the one that surfaces.
+    monkeypatch.setattr(
+        server, "close", lambda: (_ for _ in ()).throw(RuntimeError("cleanup boom"))
+    )
+    with pytest.raises(OSError, match="publish boom"):
+        await server.serve(listener, host="127.0.0.1")
+    # The listener was still closed despite close() raising.
+    assert listener.is_serving() is False
+
+
+@async_test
+async def test_serve_publish_failure_closes_after_token_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Token file publication succeeds, discovery publication fails: the listener
+    # must still be closed and neither identity file left behind.
+    adapter, _ = _make_adapter(selected=[_geo_node()])
+    identity = create_bridge_identity()
+    queue = MainThreadReadQueue()
+    server = BridgeServer(
+        adapter=adapter, identity=identity, state_dir=tmp_path, queue=queue
+    )
+    listener = await asyncio.start_server(server.handle_connection, "127.0.0.1", 0)
+    _boom_publish(monkeypatch, message="discovery boom")
+    # write_bridge_token is the first publication step; failing it simulates the
+    # discovery step never running (token-only partial state is impossible because
+    # write_bridge_identity_files is all-or-nothing, but the listener guarantee
+    # must hold regardless).
+    with pytest.raises(OSError, match="discovery boom"):
+        await server.serve(listener, host="127.0.0.1")
+    assert listener.is_serving() is False
+    assert not (tmp_path / BRIDGE_TOKEN_FILENAME).exists()
+    assert not (tmp_path / BRIDGE_DISCOVERY_FILENAME).exists()
+
+
+@async_test
+async def test_serve_normal_start_then_stop(tmp_path: Path) -> None:
+    adapter, hou = _make_adapter(selected=[_geo_node()])
+    adapter.install_scene_epoch_callbacks()
+    assert len(hou.hipFile.eventCallbacks()) == 1
+    identity = create_bridge_identity()
+    queue = MainThreadReadQueue()
+    server = BridgeServer(
+        adapter=adapter, identity=identity, state_dir=tmp_path, queue=queue
+    )
+    listener = await asyncio.start_server(server.handle_connection, "127.0.0.1", 0)
+    port = await server.serve(listener, host="127.0.0.1")
+    # Ready: listener serving, identity files published.
+    assert listener.is_serving() is True
+    assert server.is_serving is True
+    assert port == listener.sockets[0].getsockname()[1]
+    assert (tmp_path / BRIDGE_TOKEN_FILENAME).exists()
+    assert (tmp_path / BRIDGE_DISCOVERY_FILENAME).exists()
+
+    # One functional query through the served listener.
+    pump_stop = asyncio.Event()
+
+    async def _pump() -> None:
+        while not pump_stop.is_set():
+            queue.pump_one()
+            await asyncio.sleep(0.001)
+
+    pump_task = asyncio.create_task(_pump())
+    try:
+        client = BridgeClient(host="127.0.0.1", port=port, identity=identity)
+        await client.open()
+        result = await client.request(_make_request("req_serve"))
+        assert isinstance(result, SceneQueryResult)
+        await client.close()
+    finally:
+        pump_stop.set()
+        pump_task.cancel()
+        try:
+            await pump_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+
+    # stop(): listener not serving, files removed, queue drained, callback removed.
+    await server.stop()
+    assert listener.is_serving() is False
+    assert server.is_serving is False
+    assert not (tmp_path / BRIDGE_TOKEN_FILENAME).exists()
+    assert not (tmp_path / BRIDGE_DISCOVERY_FILENAME).exists()
+    assert queue.pending_count == 0
+    assert len(hou.hipFile.eventCallbacks()) == 0
+
+
+@async_test
+async def test_stop_is_idempotent(tmp_path: Path) -> None:
+    adapter, _ = _make_adapter(selected=[_geo_node()])
+    identity = create_bridge_identity()
+    queue = MainThreadReadQueue()
+    server = BridgeServer(
+        adapter=adapter, identity=identity, state_dir=tmp_path, queue=queue
+    )
+    listener = await asyncio.start_server(server.handle_connection, "127.0.0.1", 0)
+    await server.serve(listener, host="127.0.0.1")
+    await server.stop()
+    await server.stop()  # idempotent
+    await server.stop()
+
+
+@async_test
+async def test_serve_rejects_closed_server(tmp_path: Path) -> None:
+    adapter, _ = _make_adapter(selected=[_geo_node()])
+    identity = create_bridge_identity()
+    server = BridgeServer(
+        adapter=adapter, identity=identity, state_dir=tmp_path, queue=MainThreadReadQueue()
+    )
+    server.close()
+    listener = await asyncio.start_server(server.handle_connection, "127.0.0.1", 0)
+    try:
+        with pytest.raises(RuntimeError):
+            await server.serve(listener, host="127.0.0.1")
+    finally:
+        listener.close()
+        try:
+            await listener.wait_closed()
+        except Exception:  # noqa: BLE001
+            pass
