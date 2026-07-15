@@ -10,6 +10,7 @@ regardless of input order.
 from __future__ import annotations
 
 import re
+from typing import Mapping
 
 from eee_agent.knowledge.models import (
     AliasDraft,
@@ -97,6 +98,49 @@ def _reconcile_node(
         sections=entity.sections,
     )
     return new_entity, verified
+
+
+def _retained_versioned_operator(entity: EntityDraft) -> str | None:
+    """The single versioned operator_type alias a non-current node may keep.
+
+    A numeric historical page keeps only ``canonical_name::document_version``;
+    legacy pages (``document_version == "legacy"``) keep none, because no
+    versioned form exists and the unversioned alias would collide with the
+    current operator of the same name.
+    """
+    document_version = entity.attributes.get("document_version")
+    if document_version in (None, "current", "legacy"):
+        return None
+    return f"{entity.canonical_name}::{document_version}"
+
+
+def _isolate_historical_operator_aliases(
+    aliases: list[AliasDraft],
+    entities_by_id: Mapping[str, EntityDraft],
+) -> list[AliasDraft]:
+    """Drop unversioned operator_type aliases from non-current node documents.
+
+    A non-current (historical/legacy) node document must not retain an
+    unversioned ``operator_type`` alias that could masquerade as the current
+    operator of the same name: a numeric historical page keeps only its
+    explicitly-versioned operator, and a legacy page keeps none. Current
+    entities and every other alias type are untouched, so parallel
+    top-priority ambiguity between distinct current entities is preserved.
+    """
+    isolated: list[AliasDraft] = []
+    for alias in aliases:
+        if alias.alias_type == "operator_type":
+            owner = entities_by_id.get(alias.entity_id)
+            if (
+                owner is not None
+                and owner.kind == EntityKind.NODE_DOCUMENT
+                and not owner.is_current
+            ):
+                retained = _retained_versioned_operator(owner)
+                if alias.alias != retained:
+                    continue
+        isolated.append(alias)
+    return isolated
 
 
 def _dedupe_aliases(aliases: list[AliasDraft]) -> list[AliasDraft]:
@@ -291,8 +335,11 @@ def assemble_graph(
             reconciled[entity_id] = entity
 
     deduped_aliases = _dedupe_aliases(aliases + extra_aliases)
+    isolated_aliases = _isolate_historical_operator_aliases(
+        deduped_aliases, reconciled
+    )
     alias_index: dict[str, list[AliasDraft]] = {}
-    for alias in deduped_aliases:
+    for alias in isolated_aliases:
         alias_index.setdefault(alias.alias, []).append(alias)
 
     resolved_edges: list[EdgeDraft] = []
@@ -314,7 +361,7 @@ def assemble_graph(
             resolved_edges.append(edge)
 
     final_entities = tuple(sorted(reconciled.values(), key=lambda e: e.entity_id))
-    final_aliases = tuple(sorted(deduped_aliases, key=_alias_sort_key))
+    final_aliases = tuple(sorted(isolated_aliases, key=_alias_sort_key))
     final_edges = tuple(sorted(_dedupe_edges(resolved_edges), key=_edge_sort_key))
 
     bundle = GraphBundle(

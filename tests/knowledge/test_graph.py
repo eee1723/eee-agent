@@ -410,3 +410,147 @@ def test_current_page_with_documented_version_picks_versioned_operator() -> None
         entity.attributes["operator_type_status"]
         == OperatorTypeStatus.VERIFIED_AT_BUILD
     )
+
+
+# --- historical alias isolation (parser-driven) ---------------------------
+# A historical/legacy node document must not keep an unversioned operator_type
+# alias that could masquerade as the current operator of the same name.
+
+AGENTLOOKAT_CURRENT_NODE = (
+    "#type: node\n#context: sop\n= Agent Look At =\n"
+    "\"\"\"Current agent look at.\"\"\"\n"
+)
+AGENTLOOKAT_HISTORICAL_NODE = (
+    "#type: node\n#context: sop\n#version: 2.0\n= Agent Look At =\n"
+    "\"\"\"Version 2 of agent look at.\"\"\"\n"
+)
+AGENTLOOKAT_LEGACY_NODE = (
+    "#type: node\n#context: sop\n= Agent Look At =\n"
+    "\"\"\"Legacy agent look at page.\"\"\"\n"
+)
+
+AL_CURRENT_ID = "node_document:sop/agentlookat.txt@current"
+AL_HISTORICAL_ID = "node_document:sop/agentlookat-2.0.txt@2.0"
+AL_LEGACY_ID = "node_document:sop/agentlookat-.txt@legacy"
+
+
+def _agentlookat_corpus() -> tuple[ParsedDocument, ...]:
+    return (
+        parse_node_document("sop/agentlookat.txt", AGENTLOOKAT_CURRENT_NODE),
+        parse_node_document("sop/agentlookat-2.0.txt", AGENTLOOKAT_HISTORICAL_NODE),
+        parse_node_document("sop/agentlookat-.txt", AGENTLOOKAT_LEGACY_NODE),
+    )
+
+
+def test_historical_node_keeps_only_versioned_operator_alias() -> None:
+    bundle = assemble_graph(_agentlookat_corpus(), inventory=frozenset())
+    historical_ops = {
+        a.alias for a in bundle.aliases
+        if a.entity_id == AL_HISTORICAL_ID and a.alias_type == "operator_type"
+    }
+    assert historical_ops == {"agentlookat::2.0"}
+    assert "agentlookat" not in historical_ops
+
+
+def test_legacy_node_has_no_operator_type_alias() -> None:
+    bundle = assemble_graph(_agentlookat_corpus(), inventory=frozenset())
+    legacy_ops = [
+        a for a in bundle.aliases
+        if a.entity_id == AL_LEGACY_ID and a.alias_type == "operator_type"
+    ]
+    assert legacy_ops == []
+
+
+def test_historical_node_keeps_descriptive_aliases() -> None:
+    bundle = assemble_graph(_agentlookat_corpus(), inventory=frozenset())
+    by_type: dict[str, set[str]] = {}
+    for a in bundle.aliases:
+        if a.entity_id == AL_HISTORICAL_ID:
+            by_type.setdefault(a.alias_type, set()).add(a.alias)
+    assert by_type.get("document_slug") == {"agentlookat-2.0"}
+    assert by_type.get("filename_alias") == {"sop/agentlookat-2.0"}
+    assert by_type.get("title") == {"Agent Look At"}
+
+
+def test_unversioned_symbol_resolves_only_to_current() -> None:
+    # Even when the inventory misses, Node:agentlookat must resolve uniquely to
+    # the current page rather than colliding with the historical/legacy pages.
+    edge = EdgeDraft(
+        source_id=AL_LEGACY_ID, predicate="references", target_id=None,
+        target_raw="Node:agentlookat", target_anchor=None, resolved=False,
+        source_location="sop/agentlookat-.txt:1",
+    )
+    bundle = assemble_graph(
+        _agentlookat_corpus() + (_doc([], [], [edge]),), inventory=frozenset()
+    )
+    ref = next(e for e in bundle.edges if e.target_raw == "Node:agentlookat")
+    assert ref.resolved is True
+    assert ref.target_id == AL_CURRENT_ID
+
+
+def test_versioned_symbol_resolves_to_historical() -> None:
+    edge = EdgeDraft(
+        source_id=AL_LEGACY_ID, predicate="references", target_id=None,
+        target_raw="Node:agentlookat::2.0", target_anchor=None, resolved=False,
+        source_location="sop/agentlookat-.txt:1",
+    )
+    bundle = assemble_graph(
+        _agentlookat_corpus() + (_doc([], [], [edge]),), inventory=frozenset()
+    )
+    ref = next(e for e in bundle.edges if e.target_raw == "Node:agentlookat::2.0")
+    assert ref.resolved is True
+    assert ref.target_id == AL_HISTORICAL_ID
+
+
+def test_no_historical_current_style_operator_conflict() -> None:
+    # current + versioned historical + legacy must yield zero historical/legacy
+    # operator_type aliases that collide with a current page's operator.
+    bundle = assemble_graph(_agentlookat_corpus(), inventory=frozenset())
+    current_operators = {
+        a.alias for a in bundle.aliases
+        if a.alias_type == "operator_type" and a.entity_id == AL_CURRENT_ID
+    }
+    conflicts = [
+        a for a in bundle.aliases
+        if a.alias_type == "operator_type"
+        and a.entity_id in (AL_HISTORICAL_ID, AL_LEGACY_ID)
+        and a.alias in current_operators
+    ]
+    assert conflicts == []
+    unversioned_owners = {
+        a.entity_id for a in bundle.aliases
+        if a.alias == "agentlookat" and a.alias_type == "operator_type"
+    }
+    assert unversioned_owners == {AL_CURRENT_ID}
+
+
+def test_parallel_current_shared_alias_stays_multivalued() -> None:
+    # Stripping targets only non-current operator_type aliases, so a shared
+    # current alias is kept on both owners and a lookup stays ambiguous rather
+    # than silently selecting one. Two current pages share #internal "dup".
+    docs = (
+        parse_node_document(
+            "sop/dup_a.txt",
+            "#type: node\n#context: sop\n#internal: dup\n= Dup A =\n\"\"\"A.\"\"\"",
+        ),
+        parse_node_document(
+            "sop/dup_b.txt",
+            "#type: node\n#context: sop\n#internal: dup\n= Dup B =\n\"\"\"B.\"\"\"",
+        ),
+    )
+    bundle = assemble_graph(docs, inventory=frozenset())
+    owners = {
+        a.entity_id for a in bundle.aliases
+        if a.alias == "dup" and a.alias_type == "internal_metadata"
+    }
+    assert len(owners) == 2
+    edge = EdgeDraft(
+        source_id="node_document:sop/dup_a.txt@current", predicate="references",
+        target_id=None, target_raw="Node:dup", target_anchor=None,
+        resolved=False, source_location="sop/dup_a.txt:1",
+    )
+    bundle = assemble_graph(docs + (_doc([], [], [edge]),), inventory=frozenset())
+    ref = next(e for e in bundle.edges if e.target_raw == "Node:dup")
+    # Ambiguous at top priority -> not silently resolved.
+    assert ref.resolved is False
+    assert ref.target_id is None
