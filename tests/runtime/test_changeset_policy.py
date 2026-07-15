@@ -223,7 +223,13 @@ def test_owned_workspace_allows_owned_change() -> None:
 
 def test_owned_workspace_denies_missing_manifest() -> None:
     target = _noderef()
-    cs = _changeset((_setparm(target),), affected=(target,), affected_paths=("/obj/ws/geo1",))
+    # No manifest => target ownership unprovable => external touch reported.
+    cs = _changeset(
+        (_setparm(target),),
+        affected=(target,),
+        affected_paths=("/obj/ws/geo1",),
+        touches_external=True,
+    )
     decision = evaluate_policy(cs, workspace=None)
     assert decision.allowed is False
     assert "policy.missing_workspace" in decision.denial_codes
@@ -250,6 +256,7 @@ def test_owned_workspace_denies_external_target_mutation() -> None:
         (_setparm(external),),
         affected=(external,),
         affected_paths=("/obj/external",),
+        touches_external=True,
     )
     decision = evaluate_policy(cs, workspace=_manifest())
     assert decision.allowed is False
@@ -263,6 +270,7 @@ def test_owned_workspace_denies_unowned_changed_target_as_ambiguous() -> None:
         (_setparm(anonymous),),
         affected=(anonymous,),
         affected_paths=("/obj/ws/geo1",),
+        touches_external=True,
     )
     decision = evaluate_policy(cs, workspace=_manifest())
     assert decision.allowed is False
@@ -272,7 +280,7 @@ def test_owned_workspace_denies_unowned_changed_target_as_ambiguous() -> None:
 def test_owned_workspace_denies_created_node_workspace_mismatch() -> None:
     create = CreateNode(
         op_id="op_create",
-        parent=_noderef(node_id="n_root", path="/obj/ws", expected_type="subnet"),
+        parent=_noderef(node_id="n_root", path="/obj/ws", expected_type="geo"),
         node_id="n_new",
         node_type="geo",
         node_name="geo_new",
@@ -282,7 +290,7 @@ def test_owned_workspace_denies_created_node_workspace_mismatch() -> None:
     )
     cs = _changeset(
         (create,),
-        affected=(_noderef(node_id="n_new", path="/obj/ws/geo_new"),),
+        affected=(_noderef(node_id="n_new", path="/obj/ws/geo_new", expected_workspace_id=WS2),),
         affected_paths=("/obj/ws/geo_new",),
     )
     decision = evaluate_policy(cs, workspace=_manifest())
@@ -336,7 +344,7 @@ def test_scoped_patch_allows_scoped_change() -> None:
 def test_scoped_patch_denies_create() -> None:
     create = CreateNode(
         op_id="op_create",
-        parent=_noderef(node_id="n_root", path="/obj/ws", expected_type="subnet"),
+        parent=_noderef(node_id="n_root", path="/obj/ws", expected_type="geo"),
         node_id="n_new",
         node_type="geo",
         node_name="geo_new",
@@ -417,11 +425,13 @@ def test_scoped_patch_denies_wire_endpoint_outside_scope() -> None:
 
 def test_project_change_allows_enumerated_change() -> None:
     target = _noderef()
+    # No manifest => the target's ownership cannot be proven, so it is external.
     cs = _changeset(
         (_setparm(target),),
         affected=(target,),
         affected_paths=("/obj/ws/geo1",),
         permission=PermissionMode.PROJECT_CHANGE,
+        touches_external=True,
     )
     decision = evaluate_policy(cs, workspace=None)
     assert decision.allowed is True
@@ -435,6 +445,7 @@ def test_project_change_denies_omitted_affected_target() -> None:
         affected=(),
         affected_paths=("/obj/ws/geo1",),
         permission=PermissionMode.PROJECT_CHANGE,
+        touches_external=True,
     )
     decision = evaluate_policy(cs, workspace=None)
     assert decision.allowed is False
@@ -444,7 +455,7 @@ def test_project_change_denies_omitted_affected_target() -> None:
 def test_project_change_requires_created_node_in_affected() -> None:
     create = CreateNode(
         op_id="op_create",
-        parent=_noderef(node_id="n_root", path="/obj/ws", expected_type="subnet"),
+        parent=_noderef(node_id="n_root", path="/obj/ws", expected_type="geo"),
         node_id="n_new",
         node_type="geo",
         node_name="geo_new",
@@ -457,6 +468,7 @@ def test_project_change_requires_created_node_in_affected() -> None:
         affected=(),
         affected_paths=("/obj/ws/geo_new",),
         permission=PermissionMode.PROJECT_CHANGE,
+        touches_external=True,  # no manifest => create parent ownership unprovable
     )
     decision = evaluate_policy(cs, workspace=None)
     assert decision.allowed is False
@@ -519,11 +531,13 @@ def test_effect_risk_contradiction_denies() -> None:
 def test_denial_codes_are_sorted_and_namespaced() -> None:
     target = _noderef()
     # missing workspace + backup required => at least two denials, must be sorted.
+    # No manifest => target ownership unprovable => external touch reported.
     cs = _changeset(
         (_setparm(target),),
         affected=(target,),
         affected_paths=("/obj/ws/geo1",),
         requires_backup=True,
+        touches_external=True,
     )
     decision = evaluate_policy(cs, workspace=None)
     assert decision.denial_codes == tuple(sorted(decision.denial_codes))
@@ -581,6 +595,7 @@ def test_owned_denies_changed_target_with_wrong_path() -> None:
         (_setparm(target),),
         affected=(target,),
         affected_paths=("/obj/ws/WRONG",),
+        touches_external=True,
     )
     decision = evaluate_policy(cs, workspace=_manifest())
     assert decision.allowed is False
@@ -593,6 +608,7 @@ def test_owned_denies_changed_target_with_wrong_type() -> None:
         (_setparm(target),),
         affected=(target,),
         affected_paths=("/obj/ws/geo1",),
+        touches_external=True,
     )
     decision = evaluate_policy(cs, workspace=_manifest())
     assert decision.allowed is False
@@ -607,6 +623,7 @@ def test_owned_denies_changed_target_with_wrong_workspace() -> None:
         (_setparm(target),),
         affected=(target,),
         affected_paths=("/obj/ws/geo1",),
+        touches_external=True,
     )
     decision = evaluate_policy(cs, workspace=_manifest())
     assert decision.allowed is False
@@ -620,6 +637,7 @@ def test_owned_denies_owned_wire_source_with_wrong_path() -> None:
         (_wire(target, source),),
         affected=(target, source),
         affected_paths=("/obj/ws/geo1", "/obj/ws/WRONG"),
+        touches_external=True,
     )
     decision = evaluate_policy(cs, workspace=_manifest())
     assert decision.allowed is False
@@ -633,6 +651,7 @@ def test_owned_denies_owned_wire_source_with_wrong_type() -> None:
         (_wire(target, source),),
         affected=(target, source),
         affected_paths=("/obj/ws/geo1", "/obj/ws"),
+        touches_external=True,
     )
     decision = evaluate_policy(cs, workspace=_manifest())
     assert decision.allowed is False
@@ -712,7 +731,7 @@ def test_owned_denies_omitted_wire_source_in_affected() -> None:
 def test_owned_denies_omitted_created_node_in_affected() -> None:
     create = CreateNode(
         op_id="op_create",
-        parent=_noderef(node_id="n_root", path="/obj/ws", expected_type="subnet"),
+        parent=_noderef(node_id="n_root", path="/obj/ws", expected_type="geo"),
         node_id="n_new",
         node_type="geo",
         node_name="geo_new",
@@ -795,7 +814,7 @@ def test_policy_denies_overreported_affected_path() -> None:
 def test_policy_denies_missing_create_derived_path() -> None:
     create = CreateNode(
         op_id="op_create",
-        parent=_noderef(node_id="n_root", path="/obj/ws", expected_type="subnet"),
+        parent=_noderef(node_id="n_root", path="/obj/ws", expected_type="geo"),
         node_id="n_new",
         node_type="geo",
         node_name="geo_new",
@@ -823,13 +842,212 @@ def test_policy_denies_affected_path_contradiction_across_modes(
     target = _noderef()
     scoped = ("n_child",) if permission is PermissionMode.SCOPED_PATCH else ()
     workspace = None if permission is PermissionMode.PROJECT_CHANGE else _manifest()
+    # ProjectChange has no manifest, so its target is external; owned/scoped target is internal.
+    touches_external = permission is PermissionMode.PROJECT_CHANGE
     cs = _changeset(
         (_setparm(target),),
         affected=(target,),
         affected_paths=("/obj/ws/WRONG",),
         permission=permission,
         scoped_node_ids=scoped,
+        touches_external=touches_external,
     )
     decision = evaluate_policy(cs, workspace=workspace)
     assert decision.allowed is False
     assert "policy.effect_contradiction" in decision.denial_codes
+
+
+# --------------------------------------------------------------------------
+# F5: external-touch derivation must include changed targets and fail closed
+# without a manifest; with a manifest it must require exact fact matching
+# (an ID-only match is insufficient).
+# --------------------------------------------------------------------------
+
+
+def test_project_change_denies_external_parm_target_underreported() -> None:
+    target = _noderef()
+    cs = _changeset(
+        (_setparm(target),),
+        affected=(target,),
+        affected_paths=("/obj/ws/geo1",),
+        permission=PermissionMode.PROJECT_CHANGE,
+        touches_external=False,  # no manifest => target ownership unprovable => external
+    )
+    decision = evaluate_policy(cs, workspace=None)
+    assert decision.allowed is False
+    assert "policy.effect_contradiction" in decision.denial_codes
+
+
+def test_project_change_denies_external_wire_source_underreported() -> None:
+    # No manifest and no declared workspace on either endpoint: permissive logic
+    # must not treat these as internal and under-report the external touch.
+    target = NodeRef(
+        node_id="n_child", path="/obj/ws/geo1", expected_type="geo", expected_workspace_id=None
+    )
+    source = NodeRef(
+        node_id="n_ext", path="/obj/external", expected_type="geo", expected_workspace_id=None
+    )
+    cs = _changeset(
+        (_wire(target, source),),
+        affected=(target, source),
+        affected_paths=("/obj/ws/geo1", "/obj/external"),
+        permission=PermissionMode.PROJECT_CHANGE,
+        workspace_id=None,
+        touches_external=False,
+    )
+    decision = evaluate_policy(cs, workspace=None)
+    assert decision.allowed is False
+    assert "policy.effect_contradiction" in decision.denial_codes
+
+
+def test_project_change_denies_owned_id_with_external_path_underreported() -> None:
+    target = _noderef()
+    # source reuses an owned node_id but points at an external path
+    source = _noderef(node_id="n_root", path="/obj/external", expected_type="geo")
+    cs = _changeset(
+        (_wire(target, source),),
+        affected=(target, source),
+        affected_paths=("/obj/ws/geo1", "/obj/external"),
+        permission=PermissionMode.PROJECT_CHANGE,
+        touches_external=False,
+    )
+    decision = evaluate_policy(cs, workspace=_manifest())
+    assert decision.allowed is False
+    assert "policy.effect_contradiction" in decision.denial_codes
+
+
+def test_project_change_allows_external_wire_source_with_correct_flag() -> None:
+    target = _noderef()
+    source = NodeRef(
+        node_id="n_ext", path="/obj/external", expected_type="geo", expected_workspace_id=None
+    )
+    cs = _changeset(
+        (_wire(target, source),),
+        affected=(target, source),
+        affected_paths=("/obj/ws/geo1", "/obj/external"),
+        permission=PermissionMode.PROJECT_CHANGE,
+        touches_external=True,
+    )
+    decision = evaluate_policy(cs, workspace=None)
+    assert decision.allowed is True
+    assert decision.denial_codes == ()
+
+
+# --------------------------------------------------------------------------
+# F6: an affected node that shares the target's identity but disagrees on
+# path/type/workspace must not satisfy affected-node coverage.
+# --------------------------------------------------------------------------
+
+
+def test_owned_denies_affected_node_wrong_path_for_parm_target() -> None:
+    target = _noderef()
+    bad = _noderef(node_id="n_child", path="/obj/ws/WRONG")
+    cs = _changeset((_setparm(target),), affected=(bad,), affected_paths=("/obj/ws/geo1",))
+    decision = evaluate_policy(cs, workspace=_manifest())
+    assert decision.allowed is False
+    assert "policy.affected_target_omitted" in decision.denial_codes
+
+
+def test_owned_denies_affected_node_wrong_type_for_parm_target() -> None:
+    target = _noderef()
+    bad = _noderef(node_id="n_child", path="/obj/ws/geo1", expected_type="WRONG")
+    cs = _changeset((_setparm(target),), affected=(bad,), affected_paths=("/obj/ws/geo1",))
+    decision = evaluate_policy(cs, workspace=_manifest())
+    assert decision.allowed is False
+    assert "policy.affected_target_omitted" in decision.denial_codes
+
+
+def test_owned_denies_affected_node_wrong_workspace_for_parm_target() -> None:
+    target = _noderef()
+    bad = _noderef(node_id="n_child", path="/obj/ws/geo1", expected_workspace_id=WS2)
+    cs = _changeset((_setparm(target),), affected=(bad,), affected_paths=("/obj/ws/geo1",))
+    decision = evaluate_policy(cs, workspace=_manifest())
+    assert decision.allowed is False
+    assert "policy.affected_target_omitted" in decision.denial_codes
+
+
+def test_owned_denies_affected_node_wrong_path_for_wire_target() -> None:
+    target = _noderef()
+    source = _noderef(node_id="n_root", path="/obj/ws", expected_type="geo")
+    bad_target = _noderef(node_id="n_child", path="/obj/ws/WRONG")
+    cs = _changeset(
+        (_wire(target, source),),
+        affected=(bad_target, source),
+        affected_paths=("/obj/ws/geo1", "/obj/ws"),
+    )
+    decision = evaluate_policy(cs, workspace=_manifest())
+    assert decision.allowed is False
+    assert "policy.affected_target_omitted" in decision.denial_codes
+
+
+def test_owned_denies_affected_node_wrong_path_for_wire_source() -> None:
+    target = _noderef()
+    source = _noderef(node_id="n_root", path="/obj/ws", expected_type="geo")
+    bad_source = _noderef(node_id="n_root", path="/obj/ws/WRONG", expected_type="geo")
+    cs = _changeset(
+        (_wire(target, source),),
+        affected=(target, bad_source),
+        affected_paths=("/obj/ws/geo1", "/obj/ws"),
+    )
+    decision = evaluate_policy(cs, workspace=_manifest())
+    assert decision.allowed is False
+    assert "policy.affected_target_omitted" in decision.denial_codes
+
+
+def test_owned_denies_affected_node_wrong_path_for_created_node() -> None:
+    create = CreateNode(
+        op_id="op_create",
+        parent=_noderef(node_id="n_root", path="/obj/ws", expected_type="geo"),
+        node_id="n_new",
+        node_type="geo",
+        node_name="geo_new",
+        workspace_id=WS,
+        capability="modeling",
+        role="member",
+    )
+    bad = _noderef(node_id="n_new", path="/obj/ws/WRONG")  # derived path is /obj/ws/geo_new
+    cs = _changeset((create,), affected=(bad,), affected_paths=("/obj/ws/geo_new",))
+    decision = evaluate_policy(cs, workspace=_manifest())
+    assert decision.allowed is False
+    assert "policy.affected_target_omitted" in decision.denial_codes
+
+
+def test_owned_denies_affected_node_wrong_type_for_created_node() -> None:
+    create = CreateNode(
+        op_id="op_create",
+        parent=_noderef(node_id="n_root", path="/obj/ws", expected_type="geo"),
+        node_id="n_new",
+        node_type="geo",
+        node_name="geo_new",
+        workspace_id=WS,
+        capability="modeling",
+        role="member",
+    )
+    bad = _noderef(node_id="n_new", path="/obj/ws/geo_new", expected_type="WRONG")
+    cs = _changeset((create,), affected=(bad,), affected_paths=("/obj/ws/geo_new",))
+    decision = evaluate_policy(cs, workspace=_manifest())
+    assert decision.allowed is False
+    assert "policy.affected_target_omitted" in decision.denial_codes
+
+
+@pytest.mark.parametrize(
+    "permission",
+    [PermissionMode.OWNED_WORKSPACE, PermissionMode.SCOPED_PATCH, PermissionMode.PROJECT_CHANGE],
+)
+def test_affected_node_wrong_path_denied_across_modes(permission: PermissionMode) -> None:
+    target = _noderef()  # /obj/ws/geo1
+    bad = _noderef(node_id="n_child", path="/obj/ws/WRONG")
+    scoped = ("n_child",) if permission is PermissionMode.SCOPED_PATCH else ()
+    workspace = None if permission is PermissionMode.PROJECT_CHANGE else _manifest()
+    touches_external = permission is PermissionMode.PROJECT_CHANGE
+    cs = _changeset(
+        (_setparm(target),),
+        affected=(bad,),
+        affected_paths=("/obj/ws/geo1",),
+        permission=permission,
+        scoped_node_ids=scoped,
+        touches_external=touches_external,
+    )
+    decision = evaluate_policy(cs, workspace=workspace)
+    assert decision.allowed is False
+    assert "policy.affected_target_omitted" in decision.denial_codes

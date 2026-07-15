@@ -14,10 +14,13 @@ because no backup capability exists in this milestone a required backup denies.
 Policy derives every effect, changed target, affected path, and external-touch
 fact from the typed operations plus the workspace manifest/read facts, then
 rejects any :class:`RiskSummary` that under- or over-reports them. For every
-permission mode it also requires each changed target to be enumerated in
-``affected_nodes``. OwnedWorkspace additionally requires changed targets and
-owned wire sources to match the manifest's exact node identity (path, expected
-type, and workspace) — ownership is never inferred from ``node_id`` alone.
+permission mode it requires each changed target to be enumerated in
+``affected_nodes`` — and the enumerated fact must agree with the operation on
+identity, path, expected type, and expected workspace (not just node id).
+OwnedWorkspace additionally requires changed targets and owned wire sources to
+match the manifest's exact node identity — ownership is never inferred from
+``node_id`` alone, and without a manifest ownership is unprovable so every
+referenced node is treated as external for risk reporting.
 """
 
 from __future__ import annotations
@@ -78,6 +81,30 @@ def _matches_manifest(ref: NodeRef, owned: OwnedNodeRef, workspace_id: str) -> b
     )
 
 
+def _is_external_reference(
+    ref: NodeRef,
+    workspace: WorkspaceManifest | None,
+    created_ids: frozenset[str],
+    owned_by_id: dict[str, OwnedNodeRef],
+    owned_by_path: dict[str, OwnedNodeRef],
+) -> bool:
+    """Whether a referenced node is external to the workspace.
+
+    A node created by this changeset is internal. With a manifest, a reference
+    is internal only on an exact path/type/workspace match against an owned
+    fact — an id-only match is insufficient. Without a manifest, ownership is
+    unprovable, so the reference fails closed as external.
+    """
+    if ref.node_id is not None and ref.node_id in created_ids:
+        return False
+    if workspace is not None:
+        owned = owned_by_id.get(ref.node_id) if ref.node_id is not None else owned_by_path.get(ref.path)
+        if owned is None:
+            return True
+        return not _matches_manifest(ref, owned, workspace.workspace_id)
+    return True
+
+
 def evaluate_policy(
     changeset: ChangeSet,
     *,
@@ -115,12 +142,10 @@ def evaluate_policy(
     if backup_required:
         denial_codes.add(_BACKUP_UNAVAILABLE)
 
-    # Derive changed targets, wire sources, created nodes, and create paths.
+    # Derive changed targets, wire sources, create ops, create parents/paths.
     changed_targets: list[NodeRef] = []
     wire_sources: list[NodeRef] = []
-    created_nodes: list[tuple[str, str]] = []
-    create_paths: list[str] = []
-    create_parents: list[NodeRef] = []
+    create_ops: list[CreateNode] = []
     for op in operations:
         if isinstance(op, SetParm):
             changed_targets.append(op.target)
@@ -128,9 +153,7 @@ def evaluate_policy(
             changed_targets.append(op.target)
             wire_sources.append(op.source)
         elif isinstance(op, CreateNode):
-            created_nodes.append((op.node_id, op.workspace_id))
-            create_paths.append(_derive_create_path(op.parent.path, op.node_name))
-            create_parents.append(op.parent)
+            create_ops.append(op)
 
     for target in changed_targets:
         if target.path in locked:
@@ -138,32 +161,49 @@ def evaluate_policy(
         if target.path in ambiguous:
             denial_codes.add(_AMBIGUOUS_TARGET)
 
-    # F3 (all modes): every changed target must be enumerated in affected_nodes.
-    affected_identities = {_node_identity(ref) for ref in changeset.affected_nodes}
+    # F3/F6 (all modes): every changed target must be enumerated in affected_nodes
+    # with agreeing bounded facts (identity + path + expected type + workspace),
+    # not just a shared node id.
+    affected_set = set(changeset.affected_nodes)
     for target in changed_targets:
-        if _node_identity(target) not in affected_identities:
+        if target not in affected_set:
             denial_codes.add(_AFFECTED_TARGET_OMITTED)
     for source in wire_sources:
-        if _node_identity(source) not in affected_identities:
+        if source not in affected_set:
             denial_codes.add(_AFFECTED_TARGET_OMITTED)
-    for node_id, _workspace_id in created_nodes:
-        if node_id not in affected_identities:
+    for op in create_ops:
+        expected = NodeRef(
+            node_id=op.node_id,
+            path=_derive_create_path(op.parent.path, op.node_name),
+            expected_type=op.node_type,
+            expected_workspace_id=op.workspace_id,
+        )
+        if expected not in affected_set:
             denial_codes.add(_AFFECTED_TARGET_OMITTED)
 
     # F4: affected_paths must exactly equal the paths derived from the operations.
     derived_paths = {target.path for target in changed_targets}
     derived_paths |= {source.path for source in wire_sources}
-    derived_paths |= set(create_paths)
+    derived_paths |= {_derive_create_path(op.parent.path, op.node_name) for op in create_ops}
     if set(risk.affected_paths) != derived_paths:
         denial_codes.add(_EFFECT_CONTRADICTION)
 
-    # F4: touches_external_nodes must match the derived external-touch fact.
-    created_ids = {node_id for node_id, _workspace_id in created_nodes}
-    owned_ids = frozenset(node.node_id for node in workspace.nodes) if workspace else frozenset()
-    owned_paths = frozenset(node.path for node in workspace.nodes) if workspace else frozenset()
-    referenced = [*wire_sources, *create_parents]
+    # F4/F5: touches_external_nodes must match the derived external-touch fact,
+    # computed over changed targets, wire sources, and create parents.
+    created_ids = frozenset(op.node_id for op in create_ops)
+    if workspace is not None:
+        owned_by_id = {node.node_id: node for node in workspace.nodes}
+        owned_by_path = {node.path: node for node in workspace.nodes}
+    else:
+        owned_by_id = {}
+        owned_by_path = {}
+    referenced = [
+        *changed_targets,
+        *wire_sources,
+        *(op.parent for op in create_ops),
+    ]
     derived_touches_external = any(
-        _is_external_reference(ref, workspace, created_ids, owned_ids, owned_paths, changeset.workspace_id)
+        _is_external_reference(ref, workspace, created_ids, owned_by_id, owned_by_path)
         for ref in referenced
     )
     if risk.touches_external_nodes != derived_touches_external:
@@ -172,10 +212,10 @@ def evaluate_policy(
     mode = changeset.required_permission
     if mode is PermissionMode.OWNED_WORKSPACE:
         _evaluate_owned(
-            changeset, workspace, changed_targets, wire_sources, created_nodes, denial_codes
+            changeset, workspace, owned_by_id, owned_by_path, changed_targets, wire_sources, create_ops, denial_codes
         )
     elif mode is PermissionMode.SCOPED_PATCH:
-        _evaluate_scoped(changeset, bool(created_nodes), changed_targets, wire_sources, denial_codes)
+        _evaluate_scoped(changeset, bool(create_ops), changed_targets, wire_sources, denial_codes)
     # ProjectChange: no mode-specific rule beyond the global affected/effect checks.
 
     return PolicyDecision(
@@ -189,33 +229,14 @@ def evaluate_policy(
     )
 
 
-def _is_external_reference(
-    ref: NodeRef,
-    workspace: WorkspaceManifest | None,
-    created_ids: set[str],
-    owned_ids: frozenset[str],
-    owned_paths: frozenset[str],
-    changeset_workspace_id: str | None,
-) -> bool:
-    """Whether a referenced wire source / create parent is external to the workspace."""
-    if ref.node_id is not None and ref.node_id in created_ids:
-        return False
-    if workspace is not None:
-        if ref.node_id is not None:
-            return ref.node_id not in owned_ids
-        return ref.path not in owned_paths
-    # No manifest available: fall back to the node's declared workspace membership.
-    if changeset_workspace_id is None:
-        return ref.expected_workspace_id is not None
-    return ref.expected_workspace_id is None or ref.expected_workspace_id != changeset_workspace_id
-
-
 def _evaluate_owned(
     changeset: ChangeSet,
     workspace: WorkspaceManifest | None,
+    owned_by_id: dict[str, OwnedNodeRef],
+    owned_by_path: dict[str, OwnedNodeRef],
     changed_targets: list[NodeRef],
     wire_sources: list[NodeRef],
-    created_nodes: list[tuple[str, str]],
+    create_ops: list[CreateNode],
     denial_codes: set[str],
 ) -> None:
     if workspace is None:
@@ -228,8 +249,6 @@ def _evaluate_owned(
     if workspace.instance_id != binding.instance_id or workspace.scene_epoch != binding.scene_epoch:
         denial_codes.add(_STALE_WORKSPACE)
 
-    owned_by_id = {node.node_id: node for node in workspace.nodes}
-    owned_by_path = {node.path: node for node in workspace.nodes}
     read_dep_identities = {_node_identity(ref) for ref in changeset.read_dependencies}
 
     for target in changed_targets:
@@ -254,8 +273,8 @@ def _evaluate_owned(
         elif not _matches_manifest(source, owned, workspace.workspace_id):
             denial_codes.add(_OWNERSHIP_MISMATCH)
 
-    for _node_id, workspace_id in created_nodes:
-        if workspace_id != workspace.workspace_id:
+    for op in create_ops:
+        if op.workspace_id != workspace.workspace_id:
             denial_codes.add(_OWNERSHIP_MISMATCH)
 
 
