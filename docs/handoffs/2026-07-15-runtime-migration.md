@@ -13,18 +13,23 @@ Generated: 2026-07-15 (Asia/Shanghai)
 
 - Repository: `https://github.com/eee1723/eee-agent.git`
 - Development branch: `feature/runtime`
-- Branch must remain separate from `main` until Runtime Tasks 12-13 pass final
-  acceptance.
+- Branch must remain separate from `main` until the Runtime branch is pushed and
+  the final integration decision is made.
 - Task 10 accepted tip: `5b82082`.
 - Task 11 accepted tip: `64fa688`.
 - Task 12 accepted tip: `724a8fb` (the replay-boundary fix; the `025ac12`
   work-in-progress defect it resolved is documented in the Task 12 section
   below as historical detail).
-- Task 13 is in progress (Runtime CLI, restart E2E, public exports, docs).
-- The source worktree was clean before the documentation changes.
+- Task 13 accepted tip: `c8e6af1` (implementation `3b69532` plus the reviewed
+  graceful-timeout/cleanup-order follow-up).
+- The source worktree is clean and `feature/runtime` is ahead of
+  `origin/feature/runtime` by four commits: the three accepted implementation
+  commits plus the Codex-owned status-document commit `9ecc900`; none are
+  pushed yet.
 
-Do not merge this branch to `main`, or perform manual LLM/Houdini acceptance,
-until Task 13 receives Codex acceptance.
+Do not merge this branch to `main` until the three accepted commits are pushed
+and the final integration decision is made. Manual GLM/Houdini acceptance is
+separate from the offline test gate and remains pending.
 
 ## Sources Of Truth
 
@@ -49,7 +54,7 @@ the plan, diff review, adversarial diagnostics, and independent acceptance.
 | 10 RuntimeService | Complete, Codex accepted | `5b82082` |
 | 11 Protocol/Auth/RuntimeLock | Complete, Codex accepted | `64fa688` |
 | 12 WebSocket server | Complete, Codex accepted | `724a8fb` |
-| 13 CLI/restart E2E/docs/final verification | In progress | (this task) |
+| 13 CLI/restart E2E/docs/final verification | Complete, Codex accepted | `c8e6af1` |
 
 ## Task 10: Accepted RuntimeService
 
@@ -166,7 +171,7 @@ Implemented and currently green behavior includes:
 - Policy-error close for incompatible protocol and deterministic slow-consumer
   close with replayable committed events.
 
-Latest verification at `025ac12`:
+Historical verification before the final replay-boundary fix at `025ac12`:
 
 ```text
 Server + Service + Protocol focused: 179 passed
@@ -177,10 +182,10 @@ compileall eee_agent tests:          exit 0
 git diff --check:                    exit 0
 ```
 
-These green tests do **not** constitute Task 12 acceptance because the overlap
-case below was reproduced independently after the suite passed.
+The historical green suite did **not** constitute Task 12 acceptance because
+the overlap case below was reproduced independently after the suite passed.
 
-## Blocking Defect Before Task 12 Acceptance
+## Historical Task 12 Defect (Resolved at `724a8fb`)
 
 File: `eee_agent/runtime/server.py`, `_do_subscribe` gap path.
 
@@ -193,7 +198,7 @@ Deterministic scenario:
 4. The live initialization buffer also contains the same committed event
    `seq=7`.
 
-Current incorrect wire output:
+Incorrect wire output from the pre-fix implementation:
 
 ```text
 response result.last_seq = 6
@@ -206,7 +211,7 @@ Root cause: after the second replay succeeds, `_do_subscribe` leaves `boundary`
 at the snapshot sequence instead of advancing it to `replay.last_seq`. The
 response reports a stale boundary and the buffered event is not deduplicated.
 
-Required fix:
+The required fix was implemented and independently accepted:
 
 - After the final gap replay returns `snapshot_required=False`, set the final
   replay boundary to `replay.last_seq`.
@@ -221,25 +226,55 @@ Required fix:
 - Optionally bound repeated gap/snapshot retries and convert exhaustion to
   `internal.runtime_failure` while cleaning the half-initialized subscription.
 
-Only `server.py` and `test_server.py` are authorized for this remaining Task 12
-fix. Suggested focused commit message:
+Only `server.py` and `test_server.py` were authorized for this Task 12 fix.
+The focused commit was:
 
 ```text
 fix: advance websocket replay boundaries
 ```
 
-After the fix, Codex must independently reproduce the overlap case and rerun
-the focused, Runtime, and full offline suites before marking Task 12 complete.
+Codex independently reproduced the overlap case after the fix. The accepted
+wire result was `session.snapshot` followed by `seq=7` and `seq=8`, with
+`response.result.last_seq == 7` and replay calls `after_seq=[1, 6]`.
+
+## Task 13: Accepted (`c8e6af1`)
+
+Task 13 implementation commit: `3b69532 feat: complete persistent runtime
+vertical slice`.
+
+The reviewed follow-up commit `c8e6af1 fix: wire runtime graceful shutdown
+timeout` additionally:
+
+- wires CLI `--graceful-timeout` into `RuntimeService` and instance shutdown;
+- preserves the default 10-second behavior for existing callers;
+- removes identity/discovery files only after the WebSocket server context exits;
+- adds deterministic tests for both contracts.
+
+Accepted verification:
+
+```text
+Task 13 follow-up suite:             67 passed
+Task 13 + E2E + Server + Protocol:  136 passed
+Runtime suite:                      736 passed
+Full offline suite:                1111 passed, 0 skipped, 0 xfailed
+uv lock --check:                    exit 0 (69 packages)
+compileall:                         exit 0
+git diff --check:                   exit 0
+```
+
+All automated tests are offline. GLM-5.2 and Houdini read-only smokes remain
+manual acceptance activities and have not been run by the test suite.
 
 ## Remaining Delivery Sequence
 
-1. Finish and independently accept the Task 12 replay-boundary fix.
-2. Execute Task 13 only after Task 12 acceptance:
-   Runtime CLI, process-level restart E2E, public exports, README/CLAUDE updates,
-   secret/local-state scan, and complete fresh verification.
-3. Perform the separate manual GLM and Houdini read-only smoke procedures from
-   the Runtime plan.
-4. Merge only after final Runtime acceptance; do not merge during migration.
+1. Push the four local commits on `feature/runtime`:
+   `724a8fb`, `3b69532`, `c8e6af1`, and `9ecc900`.
+2. On the next computer, restore the branch from `origin/feature/runtime` and
+   rerun the clean baseline verification below.
+3. Perform the separate manual GLM-5.2 and Houdini read-only smoke procedures
+   from the Runtime plan, recording external-service failures separately.
+4. Decide whether to merge `feature/runtime` into `main`; do not merge during
+   the migration without an explicit integration decision.
 
 ## New Computer Restore Procedure
 
@@ -263,9 +298,9 @@ Expected baseline before new development:
 - Branch is `feature/runtime` and tracks `origin/feature/runtime`.
 - Worktree is clean.
 - `uv lock --check` exits 0 with 69 packages.
-- Full suite reports at least `1086 passed, 1 skipped` on a machine without the
-  optional WSL probe environment. A machine with WSL may run that test instead
-  of skipping it.
+- Full suite reports at least `1111 passed` on the current environment. The
+  optional WSL environment probe may be skipped or may run on another machine;
+  either result is acceptable if there are no failures and no new skips.
 - Compileall exits 0.
 
 If the repository already has a local `feature/runtime` branch, use:
@@ -292,33 +327,29 @@ keys into source, tests, documentation, issues, or chat transcripts.
 
 ## Resume Prompt
 
-Use this prompt in the first development conversation on the new computer:
+Use this prompt in the first conversation on the new computer:
 
 ```text
 Resume the persistent Runtime milestone from origin/feature/runtime.
 
-Tasks 1-11 are complete and Codex-accepted. Task 12 is implemented at 025ac12
-but is NOT accepted. Read, in order:
+Tasks 1-13 are complete and Codex-accepted. The accepted implementation tips
+are 724a8fb (Task 12), 3b69532 (Task 13), and c8e6af1 (Task 13 follow-up).
+Read, in order:
 
 1. docs/superpowers/specs/2026-07-14-runtime-design.md
 2. docs/superpowers/plans/2026-07-14-runtime.md
 3. docs/handoffs/2026-07-15-runtime-migration.md
 4. docs/handoffs/2026-07-14-runtime-migration.md for Tasks 1-9 history
 
-Run uv sync --frozen --extra eval --python 3.11, uv lock --check, the full pytest
-suite, compileall, and git status before editing.
+Run `uv sync --frozen --extra eval --python 3.11`, `uv lock --check`, the full
+pytest suite, compileall, and `git status` before any new work.
 
-Continue ONLY Task 12. Fix _do_subscribe so a post-snapshot replay advances the
-boundary to replay.last_seq before buffered live events are deduplicated. Add a
-real-socket test where the second replay and buffer both contain seq=7 and the
-buffer additionally contains seq=8. Expect snapshot, 7, 8 exactly once and a
-subscribe response last_seq equal to the final replay boundary. Also make a
-duplicate subscribe report the existing subscription's actual last_delivered.
-
-Only eee_agent/runtime/server.py and tests/runtime/test_server.py are authorized.
-Use Claude Code CLI model glm-5.2[1m] for implementation. Codex must independently
-review and verify the focused commit before Task 13 starts. Do not push a Task 12
-fix or start Task 13 until that review is complete.
+There is no approved Task 14 yet. Do not modify production code, start a new
+feature, or run a manual GLM/Houdini smoke without a new Codex plan and prompt.
+Claude Code is responsible only for the concrete implementation task supplied
+by Codex; Codex owns plan/status documents, diff review, adversarial checks,
+acceptance, and push/merge decisions. Use model `glm-5.2[1m]` when Codex assigns
+the next implementation task.
 ```
 
 ## Git Safety
