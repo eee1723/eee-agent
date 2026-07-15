@@ -17,17 +17,14 @@ Generated: 2026-07-15 (Asia/Shanghai)
   acceptance.
 - Task 10 accepted tip: `5b82082`.
 - Task 11 accepted tip: `64fa688`.
-- Task 12 work-in-progress tip before this handoff commit: `025ac12`.
-- Task 12 is **not accepted**. One deterministic subscription replay-boundary
-  defect remains.
-- Task 13 has not started.
+- Task 12 accepted tip: `724a8fb` (the replay-boundary fix; the `025ac12`
+  work-in-progress defect it resolved is documented in the Task 12 section
+  below as historical detail).
+- Task 13 is in progress (Runtime CLI, restart E2E, public exports, docs).
 - The source worktree was clean before the documentation changes.
-- The handoff documentation commit is newer than `025ac12`; after the push, the
-  authoritative restore point is the current tip of
-  `origin/feature/runtime`.
 
-Do not merge this branch to `main`, start Task 13, or perform manual LLM/Houdini
-acceptance until Task 12 receives Codex acceptance.
+Do not merge this branch to `main`, or perform manual LLM/Houdini acceptance,
+until Task 13 receives Codex acceptance.
 
 ## Sources Of Truth
 
@@ -51,8 +48,8 @@ the plan, diff review, adversarial diagnostics, and independent acceptance.
 | 1-9 | Complete, Codex accepted | See `2026-07-14-runtime-migration.md` |
 | 10 RuntimeService | Complete, Codex accepted | `5b82082` |
 | 11 Protocol/Auth/RuntimeLock | Complete, Codex accepted | `64fa688` |
-| 12 WebSocket server | In progress, not accepted | `025ac12` |
-| 13 CLI/restart E2E/docs/final verification | Not started | Pending Task 12 |
+| 12 WebSocket server | Complete, Codex accepted | `724a8fb` |
+| 13 CLI/restart E2E/docs/final verification | In progress | (this task) |
 
 ## Task 10: Accepted RuntimeService
 
@@ -138,17 +135,23 @@ union even though runtime behavior correctly rejects it. This annotation cleanup
 does not affect the wire contract and can be handled only when a later approved
 file scope includes `protocol.py`.
 
-## Task 12: Current Work In Progress
+## Task 12: Accepted (tip `724a8fb`)
+
+The replay-boundary defect recorded below was fixed and independently accepted
+at `724a8fb fix: advance websocket replay boundaries` (the only files touched
+were `eee_agent/runtime/server.py` and `tests/runtime/test_server.py`). The
+defect description is retained as historical detail.
 
 Authorized files:
 
 - `eee_agent/runtime/server.py`
 - `tests/runtime/test_server.py`
 
-Current commits:
+Commits:
 
 - `812e4af feat: serve authenticated runtime websocket`
 - `025ac12 fix: make websocket recovery gap-free`
+- `724a8fb fix: advance websocket replay boundaries` (accepted)
 
 Implemented and currently green behavior includes:
 

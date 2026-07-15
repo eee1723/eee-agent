@@ -116,6 +116,39 @@ copy .env.example .env   # fill DEEPSEEK_API_KEY  (or switch EEE_LLM_PROVIDER)
    Foundation**; `openinference` is not in `uv.lock` (later milestone). See `CLAUDE.md`
    gotcha #7.
 
+## Runtime (additive, loopback, read-only v1)
+
+A second, **persistent and authenticated** Runtime (`eee_agent/runtime/`) runs as
+its own process. It is **additive** — the existing `python -m eee_agent.cli …`
+commands above remain available as the rollback path. It does **not** replace the
+Secure HoudiniBridge (deferred).
+
+```powershell
+# Start the Runtime (binds 127.0.0.1 exclusively; ephemeral port by default).
+uv run --extra eval python -m eee_agent.runtime serve
+uv run --extra eval python -m eee_agent.runtime serve --help   # options
+```
+
+- **Loopback only** — `--host` must be `127.0.0.1` (rejected before any socket is
+  created); `--port 0` = ephemeral; `--graceful-timeout` default 10s. Bearer-token
+  handshake auth (HTTP 401 on failure); wire protocol `eee.runtime/1`.
+- **Data home** — `%LOCALAPPDATA%\EEEAgent\` by default. Override for local
+  testing/coverage with `EEE_RUNTIME_HOME=<absolute dir>`. Under `<home>/state/`:
+  `app.sqlite` (sessions/runs/events), `checkpoints.sqlite` (LangGraph),
+  `runtime.lock`, `runtime.json` (discovery: host/port/pid/nonce + a token
+  **fingerprint** only), `runtime.token` (the full bearer token — its only home).
+- **Read-only Houdini boundary (v1)** — the Runtime agent uses an exact read-only
+  tool allowlist (`hou_status`, `find_nodes`, `describe_node_type`,
+  `geometry_stats`, `validate_geometry`, `work_status`, `anchor_graph`); no
+  write/save/export and no implicit general-purpose subagent. Conversation
+  continuity uses `thread_id = session_id`.
+- **Offline tests** — the full Runtime suite (incl. a real-subprocess restart E2E)
+  runs with **no live LLM and no Houdini**. GLM-5.2 and Houdini read-only smokes
+  are **manual only** and never block offline acceptance.
+- **Never commit** runtime state — `app.sqlite*`, `checkpoints.sqlite*`,
+  `runtime.token`, `runtime.json`, `runtime.lock`, logs, `.env`, `.venv` are all
+  `.gitignore`d. Spec: `docs/superpowers/specs/2026-07-14-runtime-design.md`.
+
 ## Status
 
 | Area | State |
@@ -128,7 +161,7 @@ copy .env.example .env   # fill DEEPSEEK_API_KEY  (or switch EEE_LLM_PROVIDER)
 | Observability | ✅ Phoenix one-click launcher + tool-error spans (runtime deps return in a later milestone) |
 | **Foundation milestone** | ✅ done — uv-locked deps, core contracts, provider registry (DeepSeek via official Anthropic endpoint), normalized events, explicit harness (no implicit `task`), `cli versions`. 369 tests pass. See `docs/handoffs/2026-07-13-foundation-migration.md` |
 | **Live end-to-end agent run on current machine** | ⏳ pending — bridge must be started in Houdini, then `selftest` + a `prompt` |
-| Runtime milestone (Session/Run, SQLite, WebSocket) | ⏳ next — plan not yet written (spec §18.2) |
+| Runtime milestone (Session/Run, SQLite, WebSocket) | ✅ implemented (Tasks 1–13, branch `feature/runtime`) — persistent loopback Runtime, read-only agent, restart E2E; pending Codex final acceptance + merge. See `docs/handoffs/2026-07-15-runtime-migration.md` |
 | B2 — per-component subagents | ⏳ deferred (largest change; after model swap) |
 | Eval framework | ⏳ scaffold (`eval/`), cases minimal |
 

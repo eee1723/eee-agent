@@ -113,6 +113,39 @@ memory. Houdini version/API mismatches break everything.
   to the system prompt every turn broke prompt caching.
 - Cross-machine setup: see `SETUP.md`.
 
+## Runtime (additive, loopback, read-only v1)
+
+A **persistent, authenticated Runtime** lives in `eee_agent/runtime/` and runs
+as its own process — additive to the existing CLI, which remains the supported
+rollback path. It does **not** replace the Secure HoudiniBridge (deferred).
+
+- **Start**: `uv run --extra eval python -m eee_agent.runtime serve`. Subcommand
+  `serve`; `--host` must be `127.0.0.1`, `--port 0` = ephemeral, `--graceful-timeout`
+  default 10s. Non-loopback hosts are rejected before any socket is created;
+  `--help` documents the options.
+- **Loopback only**: binds `127.0.0.1` exclusively; bearer-token handshake auth
+  (HTTP 401 on failure). Wire protocol is `eee.runtime/1`.
+- **Data home**: `%LOCALAPPDATA%\EEEAgent\` by default; override for local
+  testing with `EEE_RUNTIME_HOME=<absolute dir>` (must be absolute). Layout
+  under `<home>/state/`: `app.sqlite` (sessions/runs/events),
+  `checkpoints.sqlite` (LangGraph), `runtime.lock`, `runtime.json` (discovery —
+  host/port/pid/nonce + a token FINGERPRINT only), `runtime.token` (the full
+  bearer token — the only place it ever lives).
+- **Read-only Houdini boundary (v1)**: the Runtime agent uses an exact read-only
+  tool allowlist (`hou_status`, `find_nodes`, `describe_node_type`,
+  `geometry_stats`, `validate_geometry`, `work_status`, `anchor_graph`) — no
+  write/save/export, no implicit general-purpose subagent. Checkpoint continuity
+  uses `thread_id = session_id`.
+- **Offline tests**: the full Runtime suite — including a real-subprocess
+  restart E2E (`tests/runtime/runtime_process_fixture.py`) — runs with NO live
+  LLM and NO Houdini. GLM-5.2 and Houdini read-only smokes are MANUAL only (plan
+  §"Manual Acceptance") and never block offline acceptance.
+- **Don't commit**: runtime SQLite (`app.sqlite*`, `checkpoints.sqlite*`),
+  `runtime.token`, `runtime.json`, `runtime.lock`, logs, `.env`, `.venv` — all
+  `.gitignore`d. Approved spec:
+  `docs/superpowers/specs/2026-07-14-runtime-design.md`; status:
+  `docs/handoffs/2026-07-15-runtime-migration.md`.
+
 ## Known limitation
 DeepSeek V4 Pro loops on long-horizon tasks (over-iteration). Architecture is proven
 (parametric table: change width → legs move). Mitigations now in place: recursion
@@ -125,7 +158,7 @@ Claude is the recommended swap for reliability (one-line via
 `eee_agent/` — **core/** (Foundation: ids, errors, artifacts, events, versioning) ·
 **providers/** (Foundation: contracts, registry, secrets, deepseek_v4, anthropic,
 openai, factory, events, normalize) · **harness.py** (Foundation: disable implicit
-general-purpose subagent) · config, model, app, cli · `bridge/` (rpyc client +
+general-purpose subagent) · **runtime/** (persistent loopback Runtime v1: paths, models, lock, database, migrations, sessions, runs, events, protocol, auth, checkpoints, agent_runner, service, server, __main__) · config, model, app, cli · `bridge/` (rpyc client +
 plain-Python serialization, no proxies leak) · `tools/` (25 @tool functions:
 scene/nodes/vex/compose/inspect/procedural) · context_store, context_trim, loop_guard,
 tool_error_trace, workflow_middleware, tracing, system_prompt · `skills/`
