@@ -14,6 +14,8 @@ import re
 from dataclasses import dataclass
 from typing import Mapping
 
+from eee_agent.knowledge.ids import normalize_source_path
+
 __all__ = [
     "BuildManifest",
     "SourceFingerprint",
@@ -23,21 +25,6 @@ __all__ = [
 ]
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_DRIVE_RE = re.compile(r"^[A-Za-z]:")
-
-
-def _validate_logical_name(name: str) -> None:
-    if not name or not name.strip():
-        raise ValueError("logical_name must be a non-empty logical path")
-    if any(ord(ch) <= 0x1F or ord(ch) == 0x7F for ch in name):
-        raise ValueError("logical_name contains a control character")
-    if _DRIVE_RE.match(name):
-        raise ValueError("logical_name must not have a Windows drive prefix")
-    if name.startswith("/"):
-        raise ValueError("logical_name must not be an absolute POSIX path")
-    for segment in name.split("/"):
-        if segment in ("", ".", ".."):
-            raise ValueError("logical_name contains a traversal or empty segment")
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +36,14 @@ class SourceFingerprint:
     sha256: str
 
     def __post_init__(self) -> None:
-        _validate_logical_name(self.logical_name)
+        # Store only a safe, normalized POSIX logical path: backslashes become
+        # forward slashes and drive/UNC/rooted/absolute/traversal/control inputs
+        # are rejected. This is the exact rule used for entity source paths, so
+        # the same archive/skill reached via either slash style fingerprints
+        # identically. ``re`` remains used by ``_SHA256_RE`` below.
+        object.__setattr__(
+            self, "logical_name", normalize_source_path(self.logical_name)
+        )
         if self.size_bytes < 0:
             raise ValueError("size_bytes must be non-negative")
         if not _SHA256_RE.match(self.sha256):

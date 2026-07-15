@@ -81,6 +81,54 @@ def test_fingerprint_bytes() -> None:
     assert sf.sha256 == hashlib.sha256(b"hello").hexdigest()
 
 
+# --- logical path normalization ------------------------------------------
+
+def test_backslash_logical_name_normalized_to_posix() -> None:
+    sf = SourceFingerprint(
+        logical_name=r"skills\x\SKILL.md", size_bytes=10, sha256="a" * 64
+    )
+    assert sf.logical_name == "skills/x/SKILL.md"
+    assert "\\" not in sf.logical_name
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        r"\\server\share\foo.zip",  # UNC share
+        r"\foo\bar",                # rooted backslash path
+        r"foo\..\bar",              # traversal via backslash
+        r"foo\\bar",                # empty segment via backslash
+    ],
+)
+def test_unsafe_backslash_logical_name_rejected(name: str) -> None:
+    with pytest.raises(ValueError):
+        SourceFingerprint(logical_name=name, size_bytes=10, sha256="a" * 64)
+
+
+def test_backslash_path_normalized_in_payload_and_metadata() -> None:
+    sf = SourceFingerprint(
+        logical_name=r"skills\vex-patterns\SKILL.md", size_bytes=0, sha256="a" * 64
+    )
+    manifest = _build(skill_sources=(sf,))
+    assert "skills/vex-patterns/SKILL.md" in manifest.canonical_payload
+    assert "\\" not in manifest.canonical_payload
+    meta = manifest.to_metadata()
+    assert meta["skill_sources"][0]["path"] == "skills/vex-patterns/SKILL.md"
+    # The backslash form of the path must not survive anywhere in the
+    # serialized metadata (the forward-slash form is the only one stored).
+    assert r"vex-patterns\SKILL" not in json.dumps(meta)
+
+
+def test_backslash_and_forward_slash_produce_equivalent_hash() -> None:
+    m1 = _build(
+        skill_sources=(_sf(r"skills\vex-patterns\SKILL.md", size=0, sha="a" * 64),)
+    )
+    m2 = _build(
+        skill_sources=(_sf("skills/vex-patterns/SKILL.md", size=0, sha="a" * 64),)
+    )
+    assert m1.manifest_sha256 == m2.manifest_sha256
+
+
 # --- canonical payload and hashing ---------------------------------------
 
 def test_canonical_json_exact_separators_and_sorted_keys() -> None:
