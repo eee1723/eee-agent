@@ -29,3 +29,6 @@ include = ["eee_agent*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+markers = [
+    "houdini_kb: requires local Houdini 21.0.440 HFS and hython",
+]
