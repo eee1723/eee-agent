@@ -91,6 +91,26 @@ class FakeService:
         self.replay_result: Any = None
         self.replay_side_effect: Any = None
         self.snapshot_side_effect: Any = None
+        self.approve_result: dict = {
+            "change_id": SID,
+            "approval_id": f"apr_{'c' * 32}",
+            "changeset_digest": "a" * 64,
+            "decision": "Approved",
+            "state": "Approved",
+            "approved_instance_id": "hou_instance_1",
+            "approved_scene_epoch": 1,
+        }
+        self.reject_result: dict = {
+            "change_id": SID,
+            "approval_id": f"apr_{'c' * 32}",
+            "changeset_digest": "a" * 64,
+            "decision": "Rejected",
+            "state": "Rejected",
+            "approved_instance_id": None,
+            "approved_scene_epoch": None,
+        }
+        self.approve_side_effect: Any = None
+        self.reject_side_effect: Any = None
 
     def _record(self, name: str, **kwargs: Any) -> None:
         self.calls.append((name, kwargs))
@@ -133,6 +153,34 @@ class FakeService:
     async def stop_run(self, run_id: str, *, force: bool = False) -> RunRecord:
         self._record("stop_run", run_id=run_id, force=force)
         return self.stop_result
+
+    async def approve_changeset(
+        self, change_id: str, changeset_digest: str
+    ) -> dict:
+        self._record(
+            "approve_changeset",
+            change_id=change_id,
+            changeset_digest=changeset_digest,
+        )
+        if self.approve_side_effect is not None:
+            exc = self.approve_side_effect
+            self.approve_side_effect = None
+            raise exc
+        return self.approve_result
+
+    async def reject_changeset(
+        self, change_id: str, changeset_digest: str
+    ) -> dict:
+        self._record(
+            "reject_changeset",
+            change_id=change_id,
+            changeset_digest=changeset_digest,
+        )
+        if self.reject_side_effect is not None:
+            exc = self.reject_side_effect
+            self.reject_side_effect = None
+            raise exc
+        return self.reject_result
 
     async def replay(self, session_id: str, *, after_seq: int, limit: int):
         self._record(
@@ -582,6 +630,109 @@ def test_run_force_stop_routing(service, identity) -> None:
             async with connect(_uri(s), additional_headers=_headers(identity), compression=None) as ws:
                 await _request(ws, "r1", "run.force_stop", {"run_id": RID})
                 assert _last(service, "stop_run") == {"run_id": RID, "force": True}
+    _run(scenario())
+
+
+_CHG = f"chg_{'d' * 32}"
+_DIGEST = "a" * 64
+
+
+def _approve_payload(**overrides) -> dict:
+    payload = {"change_id": _CHG, "changeset_digest": _DIGEST}
+    payload.update(overrides)
+    return payload
+
+
+def test_changeset_approve_routing(service, identity) -> None:
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(_uri(s), additional_headers=_headers(identity), compression=None) as ws:
+                resp = await _request(ws, "r1", "changeset.approve", _approve_payload())
+                assert resp["ok"] is True
+                assert _last(service, "approve_changeset") == {
+                    "change_id": _CHG, "changeset_digest": _DIGEST,
+                }
+                assert resp["result"] == service.approve_result
+    _run(scenario())
+
+
+def test_changeset_reject_routing(service, identity) -> None:
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(_uri(s), additional_headers=_headers(identity), compression=None) as ws:
+                resp = await _request(ws, "r1", "changeset.reject", _approve_payload())
+                assert resp["ok"] is True
+                assert _last(service, "reject_changeset") == {
+                    "change_id": _CHG, "changeset_digest": _DIGEST,
+                }
+                assert resp["result"] == service.reject_result
+    _run(scenario())
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"change_id": _CHG},
+        {"changeset_digest": _DIGEST},
+        {"change_id": _CHG, "changeset_digest": _DIGEST, "operations": []},
+        {"change_id": _CHG, "changeset_digest": _DIGEST, "manifest": {}},
+        {"change_id": f"run_{'d' * 32}", "changeset_digest": _DIGEST},
+        {"change_id": 123, "changeset_digest": _DIGEST},
+        {"change_id": True, "changeset_digest": _DIGEST},
+        {"change_id": _CHG, "changeset_digest": 123},
+        {"change_id": _CHG, "changeset_digest": "X" * 64},
+        {"change_id": _CHG, "changeset_digest": "a" * 63},
+        {"change_id": "chg_short", "changeset_digest": _DIGEST},
+    ],
+    ids=[
+        "missing-digest", "missing-id", "extra-operations", "extra-manifest",
+        "wrong-id-kind", "id-non-string", "id-bool", "digest-non-string",
+        "digest-non-hex", "digest-short", "id-bad",
+    ],
+)
+def test_changeset_approve_rejects_invalid_payload(
+    service, identity, payload
+) -> None:
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(_uri(s), additional_headers=_headers(identity), compression=None) as ws:
+                resp = await _request(ws, "r1", "changeset.approve", payload)
+                assert resp["ok"] is False
+                assert resp["error"]["code"] == "protocol.invalid_envelope"
+                assert not any(n == "approve_changeset" for n, _ in service.calls)
+    _run(scenario())
+
+
+def test_changeset_approve_maps_service_error(service, identity) -> None:
+    from eee_agent.core import AgentError, AgentException, ErrorCategory
+
+    service.approve_side_effect = AgentException(
+        AgentError(
+            code="approval.expired",
+            category=ErrorCategory.VALIDATION,
+            message_for_user="The approval has expired.",
+        )
+    )
+
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(_uri(s), additional_headers=_headers(identity), compression=None) as ws:
+                resp = await _request(ws, "r1", "changeset.approve", _approve_payload())
+                assert resp["ok"] is False
+                assert resp["error"]["code"] == "approval.expired"
+                assert "Traceback" not in json.dumps(resp)
+    _run(scenario())
+
+
+def test_changeset_apply_remains_rejected(service, identity) -> None:
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(_uri(s), additional_headers=_headers(identity), compression=None) as ws:
+                resp = await _request(
+                    ws, "r1", "changeset.apply", _approve_payload(operations=[])
+                )
+                assert resp["ok"] is False
+                assert resp["error"]["code"] == "protocol.unknown_command"
     _run(scenario())
 
 

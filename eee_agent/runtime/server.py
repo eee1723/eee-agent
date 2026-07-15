@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime, timezone
 from http import HTTPStatus
 
@@ -36,6 +37,10 @@ _SLOW_REASON = "runtime.slow_consumer"
 _INCOMPATIBLE_REASON = "protocol.incompatible_version"
 _SUBSCRIBE_LIMIT = 1000
 _SHUTDOWN = object()
+
+# Exact ChangeSet approval payload shapes (chg_<uuid> / 64 lowercase hex).
+_CHANGE_ID_RE = re.compile(r"^chg_[0-9a-f]{32}$")
+_CHANGESET_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class _CloseAction:
@@ -87,6 +92,15 @@ def _is_non_neg_int(v: object) -> bool:
 
 def _is_limit(v: object) -> bool:
     return type(v) is int and 1 <= v <= _SUBSCRIBE_LIMIT
+
+
+def _is_change_id(v: object) -> bool:
+    # bool is a subclass of int, not str, so exact-str rules out bool/numbers.
+    return type(v) is str and _CHANGE_ID_RE.fullmatch(v) is not None
+
+
+def _is_changeset_digest(v: object) -> bool:
+    return type(v) is str and _CHANGESET_DIGEST_RE.fullmatch(v) is not None
 
 
 def _validate(payload: object, schema: dict) -> dict:
@@ -479,6 +493,28 @@ class RuntimeWebSocketServer:
             _validate(payload, {"run_id": _is_str})
             result = await self._service.stop_run(payload["run_id"], force=True)
             self._put(ctx, success_response(req, result.to_dict()))
+            return
+
+        if ct == "changeset.approve":
+            _validate(
+                payload,
+                {"change_id": _is_change_id, "changeset_digest": _is_changeset_digest},
+            )
+            result = await self._service.approve_changeset(
+                payload["change_id"], payload["changeset_digest"]
+            )
+            self._put(ctx, success_response(req, result))
+            return
+
+        if ct == "changeset.reject":
+            _validate(
+                payload,
+                {"change_id": _is_change_id, "changeset_digest": _is_changeset_digest},
+            )
+            result = await self._service.reject_changeset(
+                payload["change_id"], payload["changeset_digest"]
+            )
+            self._put(ctx, success_response(req, result))
             return
 
         # COMMAND_TYPES are all handled above; unreachable for valid commands.

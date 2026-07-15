@@ -24,6 +24,13 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Mapping
 
+from eee_agent.changesets.contracts import ApprovalDecision
+from eee_agent.changesets.repository import ChangeSetRepository
+from eee_agent.changesets.service import (
+    ChangeSetService,
+    expired_error,
+    summary_from_decision,
+)
 from eee_agent.core import (
     AgentError,
     AgentException,
@@ -158,6 +165,8 @@ class RuntimeService:
         paths: RuntimePaths,
         *,
         graceful_timeout: float = _GRACEFUL_TIMEOUT_SECONDS,
+        changeset_clock: "Callable[[], datetime] | None" = None,
+        changeset_binding_provider: "Callable[[], object] | None" = None,
     ) -> None:
         self._database = database
         self._paths = paths
@@ -177,6 +186,16 @@ class RuntimeService:
         self._state_lock = asyncio.Lock()
         self._checkpoints: CheckpointManager | None = None
         self._runner: object | None = None
+        # Trusted ChangeSet approval service. It shares this service's EventStore
+        # so proposal/decision events commit in the same transaction as the
+        # changeset/approval mutation, and it is constructed with injected
+        # clock/binding seams. The binding provider stays None (fail-closed)
+        # until a later task wires the read-only Bridge scene query.
+        self._changesets = ChangeSetService(
+            ChangeSetRepository(database, events=self._events),
+            clock=changeset_clock,
+            binding_provider=changeset_binding_provider,  # type: ignore[arg-type]
+        )
 
     @property
     def graceful_timeout(self) -> float:
@@ -195,6 +214,8 @@ class RuntimeService:
         *,
         runner_factory: RunnerFactory,
         graceful_timeout: float = _GRACEFUL_TIMEOUT_SECONDS,
+        changeset_clock: "Callable[[], datetime] | None" = None,
+        changeset_binding_provider: "Callable[[], object] | None" = None,
     ) -> AsyncIterator["RuntimeService"]:
         """Open a service in the approved order and close it in reverse.
 
@@ -214,7 +235,13 @@ class RuntimeService:
         try:
             paths.create_used_directories()
             database = await RuntimeDatabase.open(paths.app_db)
-            service = cls(database, paths, graceful_timeout=graceful_timeout)
+            service = cls(
+                database,
+                paths,
+                graceful_timeout=graceful_timeout,
+                changeset_clock=changeset_clock,
+                changeset_binding_provider=changeset_binding_provider,
+            )
             await service._reconcile()
             checkpoints = CheckpointManager(paths.checkpoints_db)
             await checkpoints.__aenter__()
@@ -524,6 +551,50 @@ class RuntimeService:
             self._callbacks.discard(callback)
 
         return unsubscribe
+
+    # ------------------------------------------------------------------
+    # changeset approval operations
+    # ------------------------------------------------------------------
+
+    async def _decide_changeset(
+        self,
+        change_id: str,
+        changeset_digest: str,
+        *,
+        approve: bool,
+    ) -> dict[str, object]:
+        # The ChangeSet service commits the approval/changeset mutation and its
+        # durable events in one repository transaction before returning. Only
+        # after that committed result is back do we notify subscribers, so an
+        # event is never broadcast before it is durable and a failed decision
+        # never notifies anyone. An expired decision still commits the expiry
+        # transition + events; we broadcast those, then surface the
+        # approval.expired error to the caller.
+        if approve:
+            result = await self._changesets.approve(change_id, changeset_digest)
+        else:
+            result = await self._changesets.reject(change_id, changeset_digest)
+        for record in result.events:
+            await self._notify(record)
+        if result.outcome is ApprovalDecision.EXPIRED:
+            raise expired_error()
+        return summary_from_decision(result).to_dict()
+
+    async def approve_changeset(
+        self, change_id: str, changeset_digest: str
+    ) -> dict[str, object]:
+        """Approve a pending ChangeSet; returns the bounded approval summary."""
+        return await self._decide_changeset(
+            change_id, changeset_digest, approve=True
+        )
+
+    async def reject_changeset(
+        self, change_id: str, changeset_digest: str
+    ) -> dict[str, object]:
+        """Reject a pending ChangeSet; returns the bounded approval summary."""
+        return await self._decide_changeset(
+            change_id, changeset_digest, approve=False
+        )
 
     # ------------------------------------------------------------------
     # internal: append + notify, transitions, run task, handlers

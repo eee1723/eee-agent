@@ -32,8 +32,12 @@ from eee_agent.runtime.paths import RuntimePaths
 
 __all__ = [
     "AgentRunner",
+    "ApprovalSummary",
+    "ChangeSetService",
+    "DecisionResult",
     "EventCallback",
     "EventRecord",
+    "ProposalResult",
     "RetentionClass",
     "RunRecord",
     "RunStatus",
@@ -68,6 +72,13 @@ _LAZY: dict[str, str] = {
     "SessionSnapshot": "eee_agent.runtime.service",
     "EventCallback": "eee_agent.runtime.service",
     "RuntimeWebSocketServer": "eee_agent.runtime.server",
+    # Task 16-B2a: stable ChangeSet approval records/service re-exported here so
+    # the public Runtime surface keeps one import path. They remain defined in
+    # the changesets package and are resolved lazily.
+    "ChangeSetService": "eee_agent.changesets.service",
+    "ApprovalSummary": "eee_agent.changesets.service",
+    "ProposalResult": "eee_agent.changesets.repository",
+    "DecisionResult": "eee_agent.changesets.repository",
 }
 
 

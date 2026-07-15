@@ -111,6 +111,50 @@ def _payload_too_large() -> AgentException:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedEvent:
+    """A validated, frozen event ready to insert on an open transaction."""
+
+    domain: DomainEvent
+    payload_value: object
+    payload_text: str
+    timestamp: datetime
+    timestamp_iso: str
+    retention_class: RetentionClass
+
+
+def _prepare_event(
+    event_type: str,
+    payload: dict[str, JsonValue],
+    retention_class: RetentionClass,
+) -> _PreparedEvent:
+    """Validate and freeze an event synchronously (no await).
+
+    Foundation DomainEvent validates the namespaced event type and the strict
+    payload and freezes the payload, yielding an independent snapshot. Splitting
+    this out lets :meth:`EventStore.append` capture the snapshot BEFORE it
+    awaits the write lock, while :meth:`EventStore._append_conn` (used by the
+    ChangeSet service inside an already-open transaction) captures it before its
+    first await.
+    """
+    if type(retention_class) is not RetentionClass:
+        raise TypeError("retention_class must be an exact RetentionClass")
+    domain = DomainEvent.create(event_type=event_type, payload=payload)
+    payload_value = domain.to_dict()["payload"]
+    payload_text = canonical_json_dumps(payload_value)
+    if len(payload_text.encode("utf-8")) > _MAX_PAYLOAD_BYTES:
+        raise _payload_too_large()
+    timestamp = domain.timestamp
+    return _PreparedEvent(
+        domain=domain,
+        payload_value=payload_value,
+        payload_text=payload_text,
+        timestamp=timestamp,
+        timestamp_iso=timestamp.isoformat(),
+        retention_class=retention_class,
+    )
+
+
 def _row_to_event(row) -> EventRecord:
     return EventRecord(
         event_id=row["event_id"],
@@ -166,70 +210,90 @@ class EventStore:
     ) -> EventRecord:
         sid = _require_session_id(session_id)
         rid = _require_optional_run_id(run_id)
-        if type(retention_class) is not RetentionClass:
-            raise TypeError("retention_class must be an exact RetentionClass")
-        # Foundation DomainEvent validates the namespaced event type and the
-        # strict payload, and freezes the payload. Capture an independent
-        # snapshot from it before the first await so a caller mutating the
-        # original dict while we wait for the write lock cannot diverge the DB
-        # text and the returned record.
-        domain = DomainEvent.create(event_type=event_type, payload=payload)
-        payload_value = domain.to_dict()["payload"]
-        payload_text = canonical_json_dumps(payload_value)
-        if len(payload_text.encode("utf-8")) > _MAX_PAYLOAD_BYTES:
-            raise _payload_too_large()
-        timestamp = domain.timestamp
-        timestamp_iso = timestamp.isoformat()
-
+        # Validate + freeze the payload BEFORE acquiring the write lock so a
+        # caller mutating the original dict while we await the lock cannot
+        # diverge the persisted text and the returned record.
+        prepared = _prepare_event(event_type, payload, retention_class)
         async with self._database.write_transaction() as conn:
-            sess_cursor = await conn.execute(
-                "SELECT 1 FROM sessions WHERE session_id = ?", (sid,)
+            return await self._append_prepared_conn(conn, sid, rid, prepared)
+
+    async def _append_conn(
+        self,
+        conn,
+        *,
+        session_id: str,
+        run_id: str | None,
+        event_type: str,
+        payload: dict[str, JsonValue],
+        retention_class: RetentionClass,
+    ) -> EventRecord:
+        """Append one event on a caller-owned, already-open transaction.
+
+        This is the internal atomic append primitive shared by :meth:`append`
+        (which supplies its own transaction) and the ChangeSet approval service
+        (which appends proposal/decision events inside the same transaction
+        that mutates the changeset/approval rows). It reuses the exact
+        validation, per-session sequence allocation, retention/schema fields,
+        and :class:`EventRecord` construction of :meth:`append`; the only
+        difference is that the caller owns BEGIN/COMMIT, so every row this
+        writes commits or rolls back together with the coupled mutation.
+        """
+        sid = _require_session_id(session_id)
+        rid = _require_optional_run_id(run_id)
+        # The freeze runs synchronously before the first await (the session
+        # check), so for a caller that already holds the transaction there is
+        # no await window in which the payload can diverge.
+        prepared = _prepare_event(event_type, payload, retention_class)
+        return await self._append_prepared_conn(conn, sid, rid, prepared)
+
+    async def _append_prepared_conn(self, conn, sid, rid, prepared) -> EventRecord:
+        sess_cursor = await conn.execute(
+            "SELECT 1 FROM sessions WHERE session_id = ?", (sid,)
+        )
+        if await sess_cursor.fetchone() is None:
+            raise _session_not_found()
+        if rid is not None:
+            run_cursor = await conn.execute(
+                "SELECT session_id FROM runs WHERE run_id = ?", (rid,)
             )
-            if await sess_cursor.fetchone() is None:
-                raise _session_not_found()
-            if rid is not None:
-                run_cursor = await conn.execute(
-                    "SELECT session_id FROM runs WHERE run_id = ?", (rid,)
-                )
-                run_row = await run_cursor.fetchone()
-                if run_row is None:
-                    raise _run_not_found()
-                if run_row["session_id"] != sid:
-                    raise _run_session_mismatch()
-            await conn.execute(
-                "UPDATE sessions SET last_seq = last_seq + 1 WHERE session_id = ?",
-                (sid,),
-            )
-            seq_cursor = await conn.execute(
-                "SELECT last_seq FROM sessions WHERE session_id = ?", (sid,)
-            )
-            seq = (await seq_cursor.fetchone())["last_seq"]
-            await conn.execute(
-                f"INSERT INTO events({_EVENT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    domain.event_id,
-                    sid,
-                    rid,
-                    seq,
-                    domain.event_type,
-                    timestamp_iso,
-                    payload_text,
-                    retention_class.value,
-                    domain.schema_version,
-                ),
-            )
-            record = EventRecord(
-                event_id=domain.event_id,
-                session_id=sid,
-                run_id=rid,
-                seq=seq,
-                event_type=domain.event_type,
-                timestamp=timestamp,
-                payload=payload_value,
-                retention_class=retention_class,
-                schema_version=domain.schema_version,
-            )
-        return record
+            run_row = await run_cursor.fetchone()
+            if run_row is None:
+                raise _run_not_found()
+            if run_row["session_id"] != sid:
+                raise _run_session_mismatch()
+        await conn.execute(
+            "UPDATE sessions SET last_seq = last_seq + 1 WHERE session_id = ?",
+            (sid,),
+        )
+        seq_cursor = await conn.execute(
+            "SELECT last_seq FROM sessions WHERE session_id = ?", (sid,)
+        )
+        seq = (await seq_cursor.fetchone())["last_seq"]
+        await conn.execute(
+            f"INSERT INTO events({_EVENT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                prepared.domain.event_id,
+                sid,
+                rid,
+                seq,
+                prepared.domain.event_type,
+                prepared.timestamp_iso,
+                prepared.payload_text,
+                prepared.retention_class.value,
+                prepared.domain.schema_version,
+            ),
+        )
+        return EventRecord(
+            event_id=prepared.domain.event_id,
+            session_id=sid,
+            run_id=rid,
+            seq=seq,
+            event_type=prepared.domain.event_type,
+            timestamp=prepared.timestamp,
+            payload=prepared.payload_value,
+            retention_class=prepared.retention_class,
+            schema_version=prepared.domain.schema_version,
+        )
 
     async def replay(
         self,

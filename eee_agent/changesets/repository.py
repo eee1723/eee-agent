@@ -61,7 +61,7 @@ from eee_agent.changesets.contracts import (
 from eee_agent.core import AgentError, AgentException, ErrorCategory, IdKind, require_id
 from eee_agent.houdini_bridge.contracts import SceneBinding
 from eee_agent.runtime.database import RuntimeDatabase
-from eee_agent.runtime.models import canonical_json_dumps
+from eee_agent.runtime.models import EventRecord, RetentionClass, canonical_json_dumps
 
 # --------------------------------------------------------------------------
 # ChangeSet state machine (design section 5)
@@ -133,6 +133,38 @@ class StoredChangeSet:
 
     changeset: ChangeSet
     state: ChangeSetState
+
+
+@dataclass(frozen=True, slots=True)
+class ProposalResult:
+    """The committed outcome of a trusted proposal.
+
+    ``events`` is the tuple of durable events appended in the same transaction
+    (``changeset.proposed`` then ``approval.requested``). It is empty for an
+    idempotent re-proposal of an identical ChangeSet, so the service notifies
+    subscribers only for genuinely new state.
+    """
+
+    changeset: ChangeSet
+    state: ChangeSetState
+    approval: ApprovalRecord
+    events: tuple[EventRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionResult:
+    """The committed outcome of an approve/reject decision.
+
+    ``outcome`` is the resulting :class:`ApprovalDecision` (``Approved``,
+    ``Rejected``, or ``Expired``). The ``Expired`` outcome carries the
+    committed expiry transition and its events; the service reports it as the
+    ``approval.expired`` error only after subscribers have been notified.
+    """
+
+    outcome: ApprovalDecision
+    approval: ApprovalRecord
+    changeset_state: ChangeSetState
+    events: tuple[EventRecord, ...]
 
 
 # --------------------------------------------------------------------------
@@ -644,6 +676,27 @@ def _approval_already_consumed() -> AgentException:
     return _err("approval.already_consumed", "The approval is not available for consumption.")
 
 
+def _approval_required() -> AgentException:
+    return _err(
+        "approval.required",
+        "The ChangeSet has not been proposed for approval.",
+    )
+
+
+def _changeset_proposal_conflict() -> AgentException:
+    return _err(
+        "changeset.proposal_conflict",
+        "The ChangeSet conflicts with an existing proposal.",
+    )
+
+
+def _approval_binding_unavailable() -> AgentException:
+    return _err(
+        "bridge.capability_unavailable",
+        "The current scene binding is not available.",
+    )
+
+
 def _cas_conflict() -> AgentException:
     return _err(
         "runtime.state_conflict",
@@ -747,8 +800,18 @@ class ChangeSetRepository:
     and a failed transaction leaves all affected rows unchanged.
     """
 
-    def __init__(self, database: RuntimeDatabase) -> None:
+    def __init__(
+        self,
+        database: RuntimeDatabase,
+        *,
+        events: "EventStore | None" = None,
+    ) -> None:
         self._database = database
+        # Optional EventStore used only by the combined proposal/decision
+        # primitives so the matching durable events commit in the SAME
+        # transaction as the changeset/approval mutation. The plain
+        # insert/get/update/consume primitives never touch the events table.
+        self._events = events
 
     # --- workspace manifests ---------------------------------------------
 
@@ -1158,6 +1221,348 @@ class ChangeSetRepository:
             _decode_row(row, "payload_json", "digest", _decode_receipt) for row in rows
         )
 
+    # --- combined transactional proposal/decision primitives -------------
+    #
+    # These mutate the ChangeSet/Approval rows AND append the matching durable
+    # events inside ONE write_transaction (sharing the connection-scoped
+    # EventStore append helper), so a coupled state change and its event either
+    # commit together or roll back together. They never notify subscribers;
+    # that is the service layer's post-commit responsibility.
+
+    async def propose(
+        self,
+        changeset: ChangeSet,
+        approval: ApprovalRecord,
+    ) -> ProposalResult:
+        """Atomically persist a proposed ChangeSet and request its approval.
+
+        One transaction inserts the ChangeSet in ``Proposed``, the exact-digest
+        ``Pending`` ApprovalRecord, transitions the ChangeSet to
+        ``AwaitingApproval``, and appends the bounded ``changeset.proposed`` and
+        ``approval.requested`` events. Re-proposing the same ``change_id`` with
+        an identical digest is idempotent (no new rows or events); the same
+        ``change_id`` with a different digest is rejected as a proposal
+        conflict.
+        """
+        if type(changeset) is not ChangeSet:
+            raise TypeError("changeset must be an exact ChangeSet")
+        if type(approval) is not ApprovalRecord:
+            raise TypeError("approval must be an exact ApprovalRecord")
+        if approval.decision is not ApprovalDecision.PENDING:
+            raise ValueError("proposal approval must be Pending")
+        if approval.change_id != changeset.change_id:
+            raise ValueError("approval must reference the proposed ChangeSet")
+        events_store = self._events
+        if events_store is None:
+            raise TypeError("ChangeSetRepository.propose requires an EventStore")
+        digest = _storage_digest(changeset)
+        if approval.changeset_digest != digest:
+            raise _approval_digest_mismatch()
+        payload = canonical_json_dumps(changeset.to_dict())
+        approval_payload = canonical_json_dumps(approval.to_dict())
+        approval_digest = _storage_digest(approval)
+        cid = changeset.change_id
+        async with self._database.write_transaction() as conn:
+            existing = await _fetch_stored_changeset(conn, cid)
+            if existing is not None:
+                # Idempotent re-proposal: identical digest is a no-op; a
+                # different digest for the same change_id is a conflict.
+                if existing.changeset.digest != digest:
+                    raise _changeset_proposal_conflict()
+                existing_approval = await _fetch_approval_record(conn, cid)
+                if existing_approval is None:
+                    raise _approval_required()
+                return ProposalResult(
+                    existing.changeset, existing.state, existing_approval, ()
+                )
+            await self._require_session(conn, changeset.session_id)
+            await self._require_run(conn, changeset.run_id)
+            await conn.execute(
+                f"INSERT INTO changesets({_CHANGESET_COLUMNS}) VALUES "
+                "(?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    cid,
+                    changeset.session_id,
+                    changeset.run_id,
+                    changeset.workspace_id,
+                    digest,
+                    ChangeSetState.PROPOSED.value,
+                    changeset.created_at.isoformat(),
+                    payload,
+                    changeset.schema_version,
+                ),
+            )
+            duplicate_approval = await (
+                await conn.execute(
+                    "SELECT 1 FROM approvals WHERE change_id = ?", (cid,)
+                )
+            ).fetchone()
+            if duplicate_approval is not None:
+                raise _approval_exists()
+            await conn.execute(
+                f"INSERT INTO approvals({_APPROVAL_COLUMNS}) VALUES "
+                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    approval.approval_id,
+                    cid,
+                    approval.changeset_digest,
+                    approval.decision.value,
+                    approval.decided_by,
+                    approval.requested_at.isoformat(),
+                    approval.decided_at.isoformat()
+                    if approval.decided_at is not None
+                    else None,
+                    approval.expires_at.isoformat(),
+                    approval.approved_instance_id,
+                    approval.approved_scene_epoch,
+                    _approval_updated_at(approval),
+                    approval_digest,
+                    approval_payload,
+                    approval.schema_version,
+                ),
+            )
+            await self._transition_state_conn(
+                conn, cid, ChangeSetState.PROPOSED, ChangeSetState.AWAITING_APPROVAL
+            )
+            sid = changeset.session_id
+            rid = changeset.run_id
+            proposed_event = await events_store._append_conn(
+                conn,
+                session_id=sid,
+                run_id=rid,
+                event_type="changeset.proposed",
+                payload=_proposed_payload(changeset, ChangeSetState.AWAITING_APPROVAL),
+                retention_class=RetentionClass.DURABLE,
+            )
+            requested_event = await events_store._append_conn(
+                conn,
+                session_id=sid,
+                run_id=rid,
+                event_type="approval.requested",
+                payload=_requested_payload(approval),
+                retention_class=RetentionClass.DURABLE,
+            )
+            return ProposalResult(
+                changeset,
+                ChangeSetState.AWAITING_APPROVAL,
+                approval,
+                (proposed_event, requested_event),
+            )
+
+    async def decide(
+        self,
+        change_id: str,
+        *,
+        changeset_digest: str,
+        decision: ApprovalDecision,
+        now: datetime,
+        approved_binding: SceneBinding | None = None,
+    ) -> DecisionResult:
+        """Atomically approve, reject, or expire a pending approval.
+
+        Requires the persisted ChangeSet to be ``AwaitingApproval`` with a
+        ``Pending`` approval and the exact canonical digest, then in one
+        transaction transitions the approval and the ChangeSet together and
+        appends the matching durable events. An expired pending approval
+        transitions to ``Expired`` exactly once and is returned as the
+        ``Expired`` outcome (the service surfaces it as ``approval.expired``
+        after notifying subscribers). A consumed, rejected, or expired record
+        cannot be decided again.
+        """
+        if type(changeset_digest) is not str:
+            raise TypeError("changeset_digest must be a string")
+        if type(decision) is not ApprovalDecision:
+            raise TypeError("decision must be an exact ApprovalDecision")
+        if decision not in (ApprovalDecision.APPROVED, ApprovalDecision.REJECTED):
+            raise ValueError("decision must be Approved or Rejected")
+        if decision is ApprovalDecision.APPROVED:
+            if type(approved_binding) is not SceneBinding:
+                raise _approval_binding_unavailable()
+        events_store = self._events
+        if events_store is None:
+            raise TypeError("ChangeSetRepository.decide requires an EventStore")
+        cid = _require_id_value(change_id, IdKind.CHANGE)
+        now_utc = _require_utc_datetime(now, "now")
+
+        async with self._database.write_transaction() as conn:
+            stored = await _fetch_stored_changeset(conn, cid)
+            if stored is None:
+                raise _changeset_not_found()
+            approval = await _fetch_approval_record(conn, cid)
+            if approval is None:
+                raise _approval_required()
+            canonical_digest = stored.changeset.digest
+            if changeset_digest != canonical_digest:
+                raise _approval_digest_mismatch()
+            if approval.changeset_digest != canonical_digest:
+                raise _approval_digest_mismatch()
+
+            current_decision = approval.decision
+            if current_decision is not ApprovalDecision.PENDING:
+                if current_decision is ApprovalDecision.EXPIRED:
+                    raise _approval_expired()
+                raise _approval_already_consumed()
+
+            sid = stored.changeset.session_id
+            rid = stored.changeset.run_id
+            expires_at = approval.expires_at
+
+            if now_utc > expires_at:
+                expired_approval = ApprovalRecord(
+                    schema_version=approval.schema_version,
+                    approval_id=approval.approval_id,
+                    change_id=approval.change_id,
+                    changeset_digest=approval.changeset_digest,
+                    decision=ApprovalDecision.EXPIRED,
+                    decided_by=None,
+                    requested_at=approval.requested_at,
+                    decided_at=now_utc,
+                    expires_at=approval.expires_at,
+                    approved_instance_id=None,
+                    approved_scene_epoch=None,
+                )
+                await self._write_approval_conn(
+                    conn, expired_approval, expected_decision=ApprovalDecision.PENDING
+                )
+                await self._transition_state_conn(
+                    conn,
+                    cid,
+                    ChangeSetState.AWAITING_APPROVAL,
+                    ChangeSetState.EXPIRED,
+                )
+                events = (
+                    await events_store._append_conn(
+                        conn,
+                        session_id=sid,
+                        run_id=rid,
+                        event_type="approval.expired",
+                        payload=_decided_payload(expired_approval),
+                        retention_class=RetentionClass.DURABLE,
+                    ),
+                    await events_store._append_conn(
+                        conn,
+                        session_id=sid,
+                        run_id=rid,
+                        event_type="changeset.state_changed",
+                        payload=_state_changed_payload(
+                            cid,
+                            ChangeSetState.AWAITING_APPROVAL,
+                            ChangeSetState.EXPIRED,
+                        ),
+                        retention_class=RetentionClass.DURABLE,
+                    ),
+                )
+                return DecisionResult(
+                    ApprovalDecision.EXPIRED,
+                    expired_approval,
+                    ChangeSetState.EXPIRED,
+                    events,
+                )
+
+            if decision is ApprovalDecision.APPROVED:
+                decided_approval = ApprovalRecord(
+                    schema_version=approval.schema_version,
+                    approval_id=approval.approval_id,
+                    change_id=approval.change_id,
+                    changeset_digest=approval.changeset_digest,
+                    decision=ApprovalDecision.APPROVED,
+                    decided_by="local_user",
+                    requested_at=approval.requested_at,
+                    decided_at=now_utc,
+                    expires_at=approval.expires_at,
+                    approved_instance_id=approved_binding.instance_id,
+                    approved_scene_epoch=approved_binding.scene_epoch,
+                )
+                await self._write_approval_conn(
+                    conn, decided_approval, expected_decision=ApprovalDecision.PENDING
+                )
+                await self._transition_state_conn(
+                    conn,
+                    cid,
+                    ChangeSetState.AWAITING_APPROVAL,
+                    ChangeSetState.APPROVED,
+                )
+                events = (
+                    await events_store._append_conn(
+                        conn,
+                        session_id=sid,
+                        run_id=rid,
+                        event_type="approval.approved",
+                        payload=_approved_payload(decided_approval),
+                        retention_class=RetentionClass.DURABLE,
+                    ),
+                    await events_store._append_conn(
+                        conn,
+                        session_id=sid,
+                        run_id=rid,
+                        event_type="changeset.state_changed",
+                        payload=_state_changed_payload(
+                            cid,
+                            ChangeSetState.AWAITING_APPROVAL,
+                            ChangeSetState.APPROVED,
+                        ),
+                        retention_class=RetentionClass.DURABLE,
+                    ),
+                )
+                return DecisionResult(
+                    ApprovalDecision.APPROVED,
+                    decided_approval,
+                    ChangeSetState.APPROVED,
+                    events,
+                )
+
+            # decision is REJECTED
+            decided_approval = ApprovalRecord(
+                schema_version=approval.schema_version,
+                approval_id=approval.approval_id,
+                change_id=approval.change_id,
+                changeset_digest=approval.changeset_digest,
+                decision=ApprovalDecision.REJECTED,
+                decided_by="local_user",
+                requested_at=approval.requested_at,
+                decided_at=now_utc,
+                expires_at=approval.expires_at,
+                approved_instance_id=None,
+                approved_scene_epoch=None,
+            )
+            await self._write_approval_conn(
+                conn, decided_approval, expected_decision=ApprovalDecision.PENDING
+            )
+            await self._transition_state_conn(
+                conn,
+                cid,
+                ChangeSetState.AWAITING_APPROVAL,
+                ChangeSetState.REJECTED,
+            )
+            events = (
+                await events_store._append_conn(
+                    conn,
+                    session_id=sid,
+                    run_id=rid,
+                    event_type="approval.rejected",
+                    payload=_decided_payload(decided_approval),
+                    retention_class=RetentionClass.DURABLE,
+                ),
+                await events_store._append_conn(
+                    conn,
+                    session_id=sid,
+                    run_id=rid,
+                    event_type="changeset.state_changed",
+                    payload=_state_changed_payload(
+                        cid,
+                        ChangeSetState.AWAITING_APPROVAL,
+                        ChangeSetState.REJECTED,
+                    ),
+                    retention_class=RetentionClass.DURABLE,
+                ),
+            )
+            return DecisionResult(
+                ApprovalDecision.REJECTED,
+                decided_approval,
+                ChangeSetState.REJECTED,
+                events,
+            )
+
     # --- shared internal helpers -----------------------------------------
 
     @staticmethod
@@ -1174,6 +1579,78 @@ class ChangeSetRepository:
         if await cursor.fetchone() is None:
             raise _run_not_found()
 
+    @staticmethod
+    async def _transition_state_conn(
+        conn,
+        change_id: str,
+        from_state: ChangeSetState,
+        to_state: ChangeSetState,
+    ) -> None:
+        """Connection-scoped CAS ChangeSet state transition (no event)."""
+        cursor = await conn.execute(
+            "SELECT state FROM changesets WHERE change_id = ?", (change_id,)
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise _changeset_not_found()
+        current = ChangeSetState(row["state"])
+        if current is not from_state:
+            raise _cas_conflict()
+        if to_state not in _TRANSITIONS[current]:
+            raise _invalid_changeset_transition(current, to_state)
+        await conn.execute(
+            "UPDATE changesets SET state = ? WHERE change_id = ?",
+            (to_state.value, change_id),
+        )
+
+    @staticmethod
+    async def _write_approval_conn(
+        conn,
+        approval: ApprovalRecord,
+        *,
+        expected_decision: ApprovalDecision,
+    ) -> None:
+        """Connection-scoped CAS approval update (identity/digest/transition safe)."""
+        cursor = await conn.execute(
+            "SELECT approval_id, decision FROM approvals WHERE change_id = ?",
+            (approval.change_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            raise _approval_not_found()
+        # approval_id is the immutable row identity: refuse to swap it.
+        if approval.approval_id != row["approval_id"]:
+            raise _approval_identity_mismatch()
+        current_decision = ApprovalDecision(row["decision"])
+        if current_decision is not expected_decision:
+            raise _cas_conflict()
+        if approval.decision not in _APPROVAL_TRANSITIONS[current_decision]:
+            raise _invalid_approval_transition(current_decision, approval.decision)
+        payload = canonical_json_dumps(approval.to_dict())
+        digest = _storage_digest(approval)
+        await conn.execute(
+            "UPDATE approvals SET changeset_digest = ?, decision = ?, decided_by = ?, "
+            "requested_at = ?, decided_at = ?, expires_at = ?, "
+            "approved_instance_id = ?, approved_scene_epoch = ?, updated_at = ?, "
+            "digest = ?, payload_json = ? WHERE change_id = ?",
+            (
+                approval.changeset_digest,
+                approval.decision.value,
+                approval.decided_by,
+                approval.requested_at.isoformat(),
+                approval.decided_at.isoformat()
+                if approval.decided_at is not None
+                else None,
+                approval.expires_at.isoformat(),
+                approval.approved_instance_id,
+                approval.approved_scene_epoch,
+                _approval_updated_at(approval),
+                digest,
+                payload,
+                approval.change_id,
+            ),
+        )
+
 
 def _stored_from_row(row) -> StoredChangeSet:
     _verify_payload(row["payload_json"], row["digest"])
@@ -1186,3 +1663,88 @@ def _stored_from_row(row) -> StoredChangeSet:
 def _decode_row(row, payload_key: str, digest_key: str, decoder):
     _verify_payload(row[payload_key], row[digest_key])
     return decoder(_loads_canonical(row[payload_key]))
+
+
+# --------------------------------------------------------------------------
+# connection-scoped reads + bounded event payloads (combined primitives)
+# --------------------------------------------------------------------------
+
+
+async def _fetch_stored_changeset(conn, change_id: str) -> StoredChangeSet | None:
+    cursor = await conn.execute(
+        f"SELECT {_CHANGESET_COLUMNS} FROM changesets WHERE change_id = ?",
+        (change_id,),
+    )
+    row = await cursor.fetchone()
+    if row is None:
+        return None
+    return _stored_from_row(row)
+
+
+async def _fetch_approval_record(conn, change_id: str) -> ApprovalRecord | None:
+    cursor = await conn.execute(
+        f"SELECT {_APPROVAL_COLUMNS} FROM approvals WHERE change_id = ?",
+        (change_id,),
+    )
+    row = await cursor.fetchone()
+    if row is None:
+        return None
+    _verify_payload(row["payload_json"], row["digest"])
+    return _decode_approval(_loads_canonical(row["payload_json"]))
+
+
+def _state_changed_payload(
+    change_id: str, from_state: ChangeSetState, to_state: ChangeSetState
+) -> dict[str, object]:
+    return {
+        "change_id": change_id,
+        "from": from_state.value,
+        "to": to_state.value,
+    }
+
+
+def _proposed_payload(
+    changeset: ChangeSet, state: ChangeSetState
+) -> dict[str, object]:
+    # Bounded proposal facts: IDs, the canonical digest, the resulting state,
+    # the permission mode, and the already-bounded risk summary. No full DTO,
+    # operations, or parameter values are emitted in the event.
+    return {
+        "change_id": changeset.change_id,
+        "session_id": changeset.session_id,
+        "run_id": changeset.run_id,
+        "changeset_digest": changeset.digest,
+        "state": state.value,
+        "required_permission": changeset.required_permission.value,
+        "risk_summary": changeset.risk_summary.to_dict(),
+    }
+
+
+def _requested_payload(approval: ApprovalRecord) -> dict[str, object]:
+    return {
+        "approval_id": approval.approval_id,
+        "change_id": approval.change_id,
+        "changeset_digest": approval.changeset_digest,
+        "expires_at": approval.expires_at.isoformat(),
+    }
+
+
+def _approved_payload(approval: ApprovalRecord) -> dict[str, object]:
+    return {
+        "approval_id": approval.approval_id,
+        "change_id": approval.change_id,
+        "changeset_digest": approval.changeset_digest,
+        "approved_instance_id": approval.approved_instance_id,
+        "approved_scene_epoch": approval.approved_scene_epoch,
+        "decided_at": approval.decided_at.isoformat(),
+    }
+
+
+def _decided_payload(approval: ApprovalRecord) -> dict[str, object]:
+    # Rejection and expiry carry the same bounded decision facts (no binding).
+    return {
+        "approval_id": approval.approval_id,
+        "change_id": approval.change_id,
+        "changeset_digest": approval.changeset_digest,
+        "decided_at": approval.decided_at.isoformat(),
+    }
