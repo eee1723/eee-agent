@@ -491,11 +491,17 @@ class RuntimeWebSocketServer:
     async def _do_subscribe(
         self, ctx: _ClientContext, req: str, session_id: str, last_seq: int
     ) -> None:
-        # Duplicate subscribe on the same connection: no duplicate events.
+        # Duplicate subscribe on the same connection: no duplicate events and no
+        # re-replay. Report the subscription's actual last_delivered — never the
+        # caller's (possibly stale or bogus) last_seq.
         if session_id in ctx.subscriptions:
+            existing = ctx.subscriptions[session_id]
             self._put(
                 ctx,
-                success_response(req, {"session_id": session_id, "last_seq": last_seq}),
+                success_response(
+                    req,
+                    {"session_id": session_id, "last_seq": existing.last_delivered},
+                ),
             )
             return
 
@@ -527,20 +533,25 @@ class RuntimeWebSocketServer:
                 session_id, after_seq=boundary, limit=_SUBSCRIBE_LIMIT
             )
             if replay.snapshot_required:
-                # Gap: re-establish the boundary from a fresh snapshot, then
-                # re-replay with after_seq=N. The first replay's events (which
-                # overlap the snapshot) are discarded; only seq>N events are
-                # sent. Re-snapshot if the second replay still reports a gap.
+                # Retention gap: a snapshot establishes a recovery point, then
+                # we re-replay with after_seq=snapshot_seq so only events after
+                # the snapshot are delivered. The first replay's events (which
+                # overlap the snapshot) are discarded. Re-snapshot while a gap
+                # is still reported. The snapshot_seq is only the RECOVERY point
+                # used to re-replay — it is NOT the final boundary.
                 while replay.snapshot_required:
                     snap = await self._service.snapshot(session_id)
-                    boundary = snap.snapshot_seq
                     snapshot_to_send = snap
                     replay = await self._service.replay(
-                        session_id, after_seq=boundary, limit=_SUBSCRIBE_LIMIT
+                        session_id, after_seq=snap.snapshot_seq,
+                        limit=_SUBSCRIBE_LIMIT,
                     )
-            else:
-                boundary = replay.last_seq
-            # replay.snapshot_required is now False; replay.events are seq > boundary.
+            # The final replay is always gap-free (snapshot_required is False),
+            # so its last_seq is the authoritative final boundary. In the gap
+            # path this may be GREATER than the snapshot_seq: the re-replay can
+            # return newer events, and that advanced boundary is what dedups the
+            # overlapping buffered entries against the replayed ones.
+            boundary = replay.last_seq
             if ctx.slow_consumer:
                 return  # init aborted; finally cleans up
             # Response first, then snapshot (if gap), then replay events.

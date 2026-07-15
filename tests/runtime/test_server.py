@@ -769,6 +769,75 @@ def test_gap_subscribe_concurrent_event_sent_once(service, identity) -> None:
     _run(scenario())
 
 
+def test_gap_subscribe_advances_final_replay_boundary_and_deduplicates_overlap(
+    service, identity
+) -> None:
+    # Retention gap where the second replay (after_seq=snapshot_seq) returns a
+    # NEWER event than the snapshot boundary: first replay reports a gap with
+    # last_seq=6; snapshot_seq=6; second replay returns events=(seq7,) with
+    # last_seq=7. The init buffer concurrently holds both seq7 (overlaps the
+    # second replay) and seq8 (buffer-only). The final boundary must be the
+    # second replay's last_seq (7) — NOT the snapshot boundary (6) — so seq7 is
+    # delivered exactly once and seq8 is not lost.
+    from eee_agent.runtime.service import SessionSnapshot
+    service.snapshot_result = SessionSnapshot(
+        session=_session(last_seq=6), runs=(), active_run=None,
+        snapshot_seq=6, has_earlier_runs=False, earliest_included_run_id=None,
+        version_report={"eee_agent": "x"},
+    )
+
+    def replay_for(after_seq: int):
+        if after_seq <= 1:
+            return ReplayResult(
+                events=(_event(6),), replay_floor_seq=5, last_seq=6,
+                snapshot_required=True,
+            )
+        # second replay with after_seq=6 (the snapshot boundary)
+        return ReplayResult(
+            events=(_event(7),), replay_floor_seq=6, last_seq=7,
+            snapshot_required=False,
+        )
+
+    service.replay_result = replay_for
+    original_snapshot = service.snapshot
+
+    async def snapshot_with_emit(sid):
+        result = await original_snapshot(sid)
+        # Buffer both seq7 (overlaps the second replay) and seq8 (buffer-only)
+        # during init; seq7 must be deduped against the replay event, seq8 must
+        # still be delivered.
+        service.emit(_event(7))
+        service.emit(_event(8))
+        return result
+
+    service.snapshot = snapshot_with_emit
+
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(_uri(s), additional_headers=_headers(identity), compression=None) as ws:
+                await ws.send(encode_envelope(_cmd("r1", "session.subscribe", {"session_id": SID, "last_seq": 1})))
+                resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                assert resp["ok"] is True
+                # final boundary is the second replay's last_seq (7), NOT the
+                # snapshot boundary (6).
+                assert resp["result"]["last_seq"] == 7
+                snap = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                assert snap["type"] == "session.snapshot"
+                assert snap["seq"] is None
+                assert snap["payload"]["snapshot_seq"] == 6
+                e7 = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                assert e7["seq"] == 7
+                e8 = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                assert e8["seq"] == 8  # seq8 from the init buffer, not lost
+                # seq7 appears exactly once — nothing else follows seq8.
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(ws.recv(), timeout=0.3)
+        # the two replays are after_seq=1 (gap detection) then after_seq=6.
+        replay_calls = [c["after_seq"] for n, c in service.calls if n == "replay"]
+        assert replay_calls == [1, 6]
+    _run(scenario())
+
+
 def test_subscribe_replay_agent_exception_cleans_up(service, identity) -> None:
     service.replay_result = ReplayResult(
         events=(), replay_floor_seq=0, last_seq=0, snapshot_required=False,
@@ -966,6 +1035,43 @@ def test_duplicate_subscribe_no_duplicate_events(service, identity) -> None:
                 service.emit(_event(2))
                 ev = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
                 assert ev["seq"] == 2
+    _run(scenario())
+
+
+def test_duplicate_subscribe_reports_actual_last_delivered(
+    service, identity
+) -> None:
+    # A duplicate subscribe on the same connection must report the existing
+    # subscription's actual last_delivered — never the caller's (possibly bogus)
+    # last_seq — and must neither re-replay, register a second callback, nor
+    # resend any events.
+    service.replay_result = ReplayResult(
+        events=(_event(1),), replay_floor_seq=0, last_seq=1, snapshot_required=False,
+    )
+
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(_uri(s), additional_headers=_headers(identity), compression=None) as ws:
+                await ws.send(encode_envelope(_cmd("r1", "session.subscribe", {"session_id": SID, "last_seq": 0})))
+                resp = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                assert resp["ok"] is True
+                e1 = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                assert e1["seq"] == 1  # replay event advances last_delivered to 1
+                service.emit(_event(2))
+                e2 = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                assert e2["seq"] == 2  # live event advances last_delivered to 2
+                # duplicate subscribe carries a bogus last_seq; the response must
+                # report the subscription's actual last_delivered (2), never the
+                # caller's value (999).
+                resp2 = await _request(ws, "r3", "session.subscribe", {"session_id": SID, "last_seq": 999})
+                assert resp2["ok"] is True
+                assert resp2["result"]["last_seq"] == 2
+                # the duplicate must not resend any events
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(ws.recv(), timeout=0.3)
+                # checked while connected: cleanup discards callbacks on close
+                assert len([n for n, _ in service.calls if n == "replay"]) == 1
+                assert len(service._callbacks) == 1
     _run(scenario())
 
 
