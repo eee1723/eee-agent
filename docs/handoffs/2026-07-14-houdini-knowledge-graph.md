@@ -70,17 +70,28 @@ etc. as locked on Foundation).
 
 ## Verified evidence (final run, 2026-07-15)
 
-Commands actually run (machine B, `D:\houdini`):
+Commands actually run (PowerShell, machine B, `D:\houdini`). The single final
+production build below (`--out $out`) is the sole source of the final hashes,
+counts and evaluator metrics recorded in this handoff — nothing is mixed from a
+different HFS/input snapshot:
 
-```
+```powershell
 uv lock --check
 uv run python -m eee_agent.knowledge.build --selftest
 uv run --extra eval pytest -q
-EEE_RUN_HOUDINI_KB_TESTS=true EEE_HFS='D:\houdini' \
-  uv run --extra eval pytest tests/knowledge/test_hfs_contract.py -m houdini_kb -v
-uv run python -m eee_agent.knowledge.build --hfs 'D:\houdini' --out <tmp>.sqlite3
-uv run --extra eval python -c "...validate_cache(Path('<tmp>.sqlite3'))..."
-uv run --extra eval python eval/knowledge/run_eval.py --kb <tmp>.sqlite3
+
+$env:EEE_RUN_HOUDINI_KB_TESTS = 'true'
+$env:EEE_HFS = 'D:\houdini'
+uv run --extra eval pytest tests/knowledge/test_hfs_contract.py -m houdini_kb -v
+Remove-Item Env:EEE_RUN_HOUDINI_KB_TESTS
+Remove-Item Env:EEE_HFS -ErrorAction SilentlyContinue
+
+$out = Join-Path $env:TEMP 'eee-houdini-kb-final-doc-audit.sqlite3'
+Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
+uv run python -m eee_agent.knowledge.build --hfs 'D:\houdini' --out $out
+uv run python -c "from pathlib import Path; from eee_agent.knowledge.writer import validate_cache; validate_cache(Path(r'$out')); print('valid')"
+uv run --extra eval python eval/knowledge/run_eval.py --kb $out
+Remove-Item -LiteralPath $out -Force
 ```
 
 - **`uv lock --check`:** in sync — `Resolved 66 packages`.
@@ -93,9 +104,11 @@ uv run --extra eval python eval/knowledge/run_eval.py --kb <tmp>.sqlite3
 - **Focused counts:** Task 13 contract `32 passed`; Task 15 evaluator `23 passed`.
 - **Default HFS skip:** `pytest tests/knowledge/test_hfs_contract.py -v` →
   **11 skipped** (reason: `set EEE_RUN_HOUDINI_KB_TESTS=true`).
-- **Explicit HFS contract:** `EEE_RUN_HOUDINI_KB_TESTS=true EEE_HFS='D:\houdini'
-  pytest -m houdini_kb -v` → **11 passed**.
-- **Production-style temp build + `validate_cache`:** → `valid`.
+- **Explicit HFS contract** (PowerShell:
+  `$env:EEE_RUN_HOUDINI_KB_TESTS='true'`; `$env:EEE_HFS='D:\houdini'`;
+  `pytest tests/knowledge/test_hfs_contract.py -m houdini_kb -v`): **11 passed**.
+- **Final production build + `validate_cache`:** → `valid` (this is the build the
+  hashes/counts/metrics below are read from).
 
 ### Corpus facts (21.0.440)
 
@@ -115,6 +128,12 @@ uv run --extra eval python eval/knowledge/run_eval.py --kb <tmp>.sqlite3
 
 ### Final hashes (final verified build command)
 
+Read directly from the single final production build above (`--out $out`,
+then `validate_cache` → `valid`, then `run_eval.py --kb $out`). The entity/edge/
+unresolved/ambiguous counts above and the evaluator metrics below come from this
+same build. Determinism was confirmed by running the build a second time — both
+builds produced identical hashes:
+
 - **manifest_sha256:** `e4c6e29d0699808cb10053e01dd37be75894781bb3f72b873ce2807a5824e295`
 - **node_inventory_sha256:** `7d3e4a9492f45b0dff54b5bdae5dd3c1ae35e6a3ba8ea5ae6811c1a0d1a26b1f`
 
@@ -129,23 +148,28 @@ uv run --extra eval python eval/knowledge/run_eval.py --kb <tmp>.sqlite3
 | ambiguity_correctness | **1.0** | =100% ✓ |
 | caps_ok | **True** | ✓ |
 | max_response_chars | **3364** | — |
-| p95_latency_ms | **~0.49–0.59 s** | reported (no threshold) |
+| p95_latency_ms | **510.4 ms (≈ 0.51 s)** | reported (no threshold) |
 | passes | **True** (exit 0) | — |
 
-Zero recall / top-1 / ambiguity misses. p95 is dominated by the service's
-per-query `PRAGMA integrity_check` (Stage 5 design, not modifiable here) and is
-reported, not gated.
+Zero recall / top-1 / ambiguity misses. p95 is run-dependent and is dominated by
+the service's per-query `PRAGMA integrity_check` (Stage 5 design, not modifiable
+here); it is reported, not gated.
 
 ## Qualifications
 
-- **Official-body example-path qualification:** the cache stores ONLY logical
+- **Official-body example-path qualification:** entity source paths, edge
+  provenance, metadata, service provenance and error output contain ONLY logical
   POSIX source paths (`sop/boolean.txt`, `hou/Node.txt`,
-  `skills/vex-patterns/SKILL.md`, …) — never absolute machine paths, and no
+  `skills/vex-patterns/SKILL.md`, …) — never build-machine absolute paths, and no
   source absolute path is stored in entities, edges, metadata, provenance or
-  error output. No official SideFX document body is committed to git or shipped;
-  bodies live only in the machine-local, gitignored, rebuildable SQLite cache.
-  The golden YAML and evaluator output carry only request metadata, expected
-  entity IDs and metrics — never document bodies.
+  error output. Note: official SideFX document *bodies* (held only inside the
+  cache) may legitimately contain example Windows paths such as `C:/temp/...` —
+  that is official body content, not build-machine provenance, and it is never
+  indexed or reported as a source path. No official SideFX document body is
+  committed to git or shipped as a source artifact; bodies live only in the
+  machine-local, gitignored, rebuildable SQLite cache. The golden YAML and
+  evaluator output carry only request metadata, expected entity IDs and metrics
+  — never document bodies.
 - **Stale-checker scope qualification:** the lazy service's stale checker
   re-fingerprints ONLY the three HFS source archives (`nodes/hom/vex.zip`) and
   reports `kb_stale` on a sha256 mismatch with the stored manifest. It does NOT
