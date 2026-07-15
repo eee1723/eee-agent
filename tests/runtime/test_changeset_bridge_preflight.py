@@ -23,6 +23,7 @@ from eee_agent.changesets import (
     ChangeSet,
     CheckpointPlan,
     ConnectInput,
+    CreateNode,
     NodeIdentityEquals,
     NodeRef,
     OwnedNodeRef,
@@ -1660,3 +1661,182 @@ async def test_preflight_wrong_created_by_run_rejected(tmp_path: Path) -> None:
         ud["eee.created_by_run"] = f"run_{'3' * 32}"  # disagrees with the manifest
 
     await _expect_stale_after_mirror_mutation(tmp_path, mutate)
+
+
+# ==========================================================================
+# 12. review follow-up #2: independent ownership (gap A) + create fail-closed (gap B)
+#
+# Gap A: when a workspace manifest is supplied, the resolved owned node must
+# belong to that workspace even if the NodeRef omits expected_workspace_id —
+# otherwise an external node that mirrors the same stable id reuses a manifest
+# id/path and passes preflight.
+# Gap B: a CreateNode must fail closed if it would reuse an existing stable
+# node_id OR collide with an existing node at the derived create path, even
+# without a manifest (ProjectChange). A genuinely absent target is accepted.
+# ==========================================================================
+
+
+@async_test
+async def test_preflight_owned_node_omitting_ws_id_rejects_workspace_drift(
+    tmp_path: Path,
+) -> None:
+    # Gap A (RED before fix): the NodeRef omits expected_workspace_id, a manifest
+    # is supplied, and the scene node mirrors the right node_id but a DIFFERENT
+    # workspace_id. Independent ownership enforcement must fail closed.
+    spy: list = []
+    nodes = _standard_nodes(spy)
+    ud = dict(nodes["/obj/ws/geo1"].user_data)
+    ud["eee.workspace_id"] = f"ws_{'9' * 32}"  # disagrees with the manifest WS
+    nodes["/obj/ws/geo1"].user_data = ud
+    harness = _Harness()
+    port = await harness.start(tmp_path, nodes=nodes)
+    try:
+        client = BridgeClient(host="127.0.0.1", port=port, identity=harness.identity)
+        await client.open()
+        assert harness.adapter is not None
+        # expected_workspace_id omitted; ownership must be enforced via the manifest
+        target = _noderef("n_child", "/obj/ws/geo1", "geo", workspace_id=None)
+        request = _preflight_for(
+            harness.adapter,
+            operations=(SetParm(op_id="op1", target=target, parm_name="tx", value=0, expected_old_value=0),),
+            affected=(target,),
+        )
+        with pytest.raises(BridgeClientError) as exc:
+            await client.preflight(request)
+        assert exc.value.code == "changeset.stale"
+        await client.close()
+    finally:
+        await harness.stop()
+
+
+@async_test
+async def test_preflight_owned_node_omitting_ws_id_accepts_valid(tmp_path: Path) -> None:
+    # Gap A (preserve valid paths): the NodeRef omits expected_workspace_id, a
+    # manifest is supplied, and the scene node belongs to that workspace. The
+    # valid path is accepted — ownership is enforced via the manifest, not skipped.
+    harness = _Harness()
+    port = await harness.start(tmp_path)
+    try:
+        client = BridgeClient(host="127.0.0.1", port=port, identity=harness.identity)
+        await client.open()
+        assert harness.adapter is not None
+        target = _noderef("n_child", "/obj/ws/geo1", "geo", workspace_id=None)
+        request = _preflight_for(
+            harness.adapter,
+            operations=(SetParm(op_id="op1", target=target, parm_name="tx", value=0, expected_old_value=0),),
+            affected=(target,),
+        )
+        result = await client.preflight(request)
+        assert isinstance(result, PreflightResult)
+        assert len(result.node_facts) == 1
+        assert result.node_facts[0].exists is True
+        assert result.node_facts[0].workspace_id == WS
+        await client.close()
+    finally:
+        await harness.stop()
+
+
+def _create_op(
+    *,
+    node_id: str,
+    node_name: str,
+    parent: NodeRef | None = None,
+) -> CreateNode:
+    parent = parent if parent is not None else _noderef("n_root", "/obj/ws", "subnet")
+    return CreateNode(
+        op_id="op_create",
+        parent=parent,
+        node_id=node_id,
+        node_type="geo",
+        node_name=node_name,
+        workspace_id=WS,
+        capability="modeling",
+        role="member",
+    )
+
+
+@async_test
+async def test_preflight_create_reusing_existing_node_id_rejected(tmp_path: Path) -> None:
+    # Gap B (RED before fix): a CreateNode reuses a stable node_id already
+    # mirrored in the scene at a DIFFERENT path. Preflight must fail closed even
+    # without a manifest, because a duplicate stable id is invalid.
+    spy: list = []
+    harness = _Harness()
+    port = await harness.start(tmp_path)
+    try:
+        client = BridgeClient(host="127.0.0.1", port=port, identity=harness.identity)
+        await client.open()
+        assert harness.adapter is not None
+        create = _create_op(node_id="n_child", node_name="newgeo")  # n_child is at /obj/ws/geo1
+        request = _preflight_for(
+            harness.adapter,
+            operations=(create,),
+            affected=(create.parent,),
+            affected_paths=("/obj/ws/newgeo",),
+        )
+        with pytest.raises(BridgeClientError) as exc:
+            await client.preflight(request)
+        assert exc.value.code == "changeset.stale"
+        await client.close()
+    finally:
+        await harness.stop()
+    assert spy == [], f"create preflight performed writes: {spy!r}"
+
+
+@async_test
+async def test_preflight_create_colliding_at_existing_path_rejected(tmp_path: Path) -> None:
+    # Gap B (RED before fix): a CreateNode uses a brand-new stable id, but its
+    # DERIVED create path is already occupied by an existing external node.
+    # Preflight must fail closed even without a manifest.
+    spy: list = []
+    harness = _Harness()
+    port = await harness.start(tmp_path)
+    try:
+        client = BridgeClient(host="127.0.0.1", port=port, identity=harness.identity)
+        await client.open()
+        assert harness.adapter is not None
+        # new id, but node_name "geo1" derives the occupied path /obj/ws/geo1
+        create = _create_op(node_id="n_brand_new", node_name="geo1")
+        request = _preflight_for(
+            harness.adapter,
+            operations=(create,),
+            affected=(create.parent,),
+            affected_paths=("/obj/ws/geo1",),
+        )
+        with pytest.raises(BridgeClientError) as exc:
+            await client.preflight(request)
+        assert exc.value.code == "changeset.stale"
+        await client.close()
+    finally:
+        await harness.stop()
+    assert spy == [], f"create preflight performed writes: {spy!r}"
+
+
+@async_test
+async def test_preflight_create_absent_target_accepted(tmp_path: Path) -> None:
+    # Gap B (genuinely absent target): a CreateNode whose stable id is not
+    # mirrored and whose derived path is unoccupied targets an absent node, so
+    # preflight accepts it and reports the create target as absent.
+    spy: list = []
+    harness = _Harness()
+    port = await harness.start(tmp_path)
+    try:
+        client = BridgeClient(host="127.0.0.1", port=port, identity=harness.identity)
+        await client.open()
+        assert harness.adapter is not None
+        create = _create_op(node_id="n_brand_new", node_name="brandnew")
+        request = _preflight_for(
+            harness.adapter,
+            operations=(create,),
+            affected=(create.parent,),
+            affected_paths=("/obj/ws/brandnew",),
+        )
+        result = await client.preflight(request)
+        assert isinstance(result, PreflightResult)
+        absent = [f for f in result.node_facts if f.requested.node_id == "n_brand_new"]
+        assert len(absent) == 1
+        assert absent[0].exists is False
+        await client.close()
+    finally:
+        await harness.stop()
+    assert spy == [], f"create preflight performed writes: {spy!r}"

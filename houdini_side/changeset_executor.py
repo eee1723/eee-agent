@@ -174,12 +174,16 @@ class ChangeSetPreflightAdapter:
             facts[identity] = fact
             extras[identity] = (schema_version, created_by_run)
 
-        # Pass 2: verify each existing-required reference against current facts.
+        # Pass 2: verify references against current facts. Existing-required refs
+        # must match; a create target must instead be ABSENT — no existing node may
+        # reuse its stable id and no node may already occupy its derived create
+        # path. A genuinely absent create target is accepted.
         for ref in refs:
             identity = _identity(ref)
             if identity in create_targets:
-                continue  # a node this ChangeSet creates: absence is expected
-            self._verify_existing(ref, facts[identity], extras[identity], workspace, owned_by_id)
+                self._verify_create_target(hou, ref, facts[identity])
+            else:
+                self._verify_existing(ref, facts[identity], extras[identity], workspace, owned_by_id)
 
         parm_facts = self._gather_parm_facts(hou, changeset, facts)
         wire_facts = self._gather_wire_facts(hou, changeset, facts)
@@ -363,8 +367,20 @@ class ChangeSetPreflightAdapter:
             raise _stale(
                 "The resolved node does not mirror the expected stable node id."
             )
-        if ref.expected_workspace_id is not None and (
-            fact.workspace_id is None or fact.workspace_id != ref.expected_workspace_id
+        # Workspace ownership is an identity fact, not an optional hint. When a
+        # WorkspaceManifest is supplied, the resolved node must belong to that
+        # workspace even when the NodeRef omits expected_workspace_id — otherwise
+        # an external node that happens to mirror the same stable id could reuse
+        # a manifest id/path and pass preflight. The request's explicit
+        # expected_workspace_id still governs when present (it may name a
+        # workspace other than the manifest's).
+        expected_workspace_id = (
+            ref.expected_workspace_id
+            if ref.expected_workspace_id is not None
+            else (workspace.workspace_id if workspace is not None else None)
+        )
+        if expected_workspace_id is not None and (
+            fact.workspace_id is None or fact.workspace_id != expected_workspace_id
         ):
             raise _stale(
                 "The resolved node does not belong to the expected workspace."
@@ -401,6 +417,28 @@ class ChangeSetPreflightAdapter:
                 raise _stale(
                     "The resolved node no longer matches the workspace manifest facts."
                 )
+
+    def _verify_create_target(
+        self, hou: object, ref: NodeRef, fact: PreflightNodeFact
+    ) -> None:
+        """Fail closed unless a created node targets a genuinely absent slot.
+
+        A CreateNode must not reuse a stable node id already mirrored anywhere
+        in the scene (``fact.exists`` — the create ref resolves by node id) and
+        must not collide with a node already occupying the derived create path
+        (``ref.path``). Both checks hold even without a workspace manifest
+        (ProjectChange): a duplicate stable id and an occupied create path are
+        invalid regardless of ownership. A genuinely absent target is accepted.
+        Reads are confined to this queue callable; nothing is mutated.
+        """
+        if fact.exists:
+            raise _stale(
+                "The node to be created already exists with the given stable id."
+            )
+        if hou.node(ref.path) is not None:  # type: ignore[union-attr]
+            raise _stale(
+                "The node to be created already exists at the target path."
+            )
 
     # --------------------------------------------------------------- parm facts
 
