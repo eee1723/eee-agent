@@ -368,3 +368,104 @@ def test_validate_raises_on_foreign_key_violation(tmp_path: Path) -> None:
         conn.commit()
     with pytest.raises(CacheIntegrityError):
         validate_cache(path)
+
+
+# --- hardened self-checks -------------------------------------------------
+
+def _set_metadata(path: Path, key: str, value_json: str) -> None:
+    with _connect(path) as conn:
+        conn.execute(
+            "UPDATE kb_metadata SET value_json=? WHERE key=?", (value_json, key)
+        )
+        conn.commit()
+
+
+def _delete_metadata(path: Path, key: str) -> None:
+    with _connect(path) as conn:
+        conn.execute("DELETE FROM kb_metadata WHERE key=?", (key,))
+        conn.commit()
+
+
+def test_validate_raises_when_edge_count_metadata_missing(tmp_path: Path) -> None:
+    path = write_fixture_cache(tmp_path)
+    _delete_metadata(path, "edge_count_by_predicate")
+    with pytest.raises(CacheIntegrityError):
+        validate_cache(path)
+
+
+def test_validate_raises_when_edge_count_empty(tmp_path: Path) -> None:
+    path = write_fixture_cache(tmp_path)
+    _set_metadata(path, "edge_count_by_predicate", "{}")
+    with pytest.raises(CacheIntegrityError):
+        validate_cache(path)
+
+
+def test_validate_raises_when_edge_count_not_object(tmp_path: Path) -> None:
+    path = write_fixture_cache(tmp_path)
+    _set_metadata(path, "edge_count_by_predicate", "[]")
+    with pytest.raises(CacheIntegrityError):
+        validate_cache(path)
+
+
+def test_validate_raises_when_edge_count_invalid_json(tmp_path: Path) -> None:
+    path = write_fixture_cache(tmp_path)
+    _set_metadata(path, "edge_count_by_predicate", "not json")
+    with pytest.raises(CacheIntegrityError):
+        validate_cache(path)
+
+
+def test_validate_raises_when_entity_count_empty(tmp_path: Path) -> None:
+    path = write_fixture_cache(tmp_path)
+    _set_metadata(path, "entity_count_by_kind", "{}")
+    with pytest.raises(CacheIntegrityError):
+        validate_cache(path)
+
+
+def test_validate_raises_on_resolved_edge_with_null_target(tmp_path: Path) -> None:
+    path = write_fixture_cache(tmp_path)
+    with _connect(path) as conn:
+        conn.execute("UPDATE edges SET target_id=NULL WHERE resolved=1")
+        conn.commit()
+    with pytest.raises(CacheIntegrityError):
+        validate_cache(path)
+
+
+def test_validate_raises_on_unresolved_edge_with_target(tmp_path: Path) -> None:
+    path = write_fixture_cache(tmp_path)
+    with _connect(path) as conn:
+        conn.execute(
+            "UPDATE edges SET target_id='vex_function:intersect' WHERE resolved=0"
+        )
+        conn.commit()
+    with pytest.raises(CacheIntegrityError):
+        validate_cache(path)
+
+
+def test_validate_raises_on_invalid_resolved_value(tmp_path: Path) -> None:
+    path = write_fixture_cache(tmp_path)
+    with _connect(path) as conn:
+        conn.execute("UPDATE edges SET resolved=2 WHERE resolved=0")
+        conn.commit()
+    with pytest.raises(CacheIntegrityError):
+        validate_cache(path)
+
+
+def test_writer_rejects_invalid_graph_bundle(tmp_path: Path) -> None:
+    from eee_agent.knowledge.graph import GraphError
+    from eee_agent.knowledge.models import EdgeDraft, EntityDraft
+
+    entity = EntityDraft(
+        entity_id="vex_function:x", kind=EntityKind.VEX_FUNCTION, subtype="",
+        canonical_name="x", title="X", summary="",
+        authority=Authority.OFFICIAL_HOUDINI_DOCS, source_path="functions/x.txt",
+        source_anchor=None, is_current=True, attributes={}, body="", sections=(),
+    )
+    # A resolved edge with no target violates a graph invariant.
+    bad_edge = EdgeDraft(
+        source_id="vex_function:x", predicate="references", target_id=None,
+        target_raw="Vex:ghost", target_anchor=None, resolved=True,
+        source_location="functions/x.txt:1",
+    )
+    bundle = GraphBundle((entity,), (), (bad_edge,))
+    with pytest.raises(GraphError):
+        write_cache(tmp_path / "bad.sqlite3", bundle, _manifest(bundle))

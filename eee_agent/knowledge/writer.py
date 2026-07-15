@@ -16,6 +16,7 @@ from pathlib import Path
 
 from eee_agent.knowledge.manifest import BuildManifest
 from eee_agent.knowledge.models import EdgeDraft, EntityDraft, GraphBundle
+from eee_agent.knowledge.graph import validate_graph
 from eee_agent.knowledge.schema import KB_SCHEMA_VERSION, create_schema, verify_fts5
 
 __all__ = ["CacheIntegrityError", "validate_cache", "write_cache"]
@@ -98,6 +99,9 @@ def write_cache(path: Path, bundle: GraphBundle, manifest: BuildManifest) -> Non
     All SQL is parameterized.
     """
     path = Path(path)
+    # Refuse to materialize a graph that violates its invariants (e.g. a
+    # resolved edge with no target); validate before touching the database.
+    validate_graph(bundle)
     conn = sqlite3.connect(str(path))
     try:
         conn.execute("PRAGMA foreign_keys = ON")
@@ -196,19 +200,83 @@ def write_cache(path: Path, bundle: GraphBundle, manifest: BuildManifest) -> Non
         conn.close()
 
 
-def _metadata(conn: sqlite3.Connection, key: str) -> object | None:
+def _require_metadata(conn: sqlite3.Connection, key: str):
+    """Read and JSON-decode a required metadata value as CacheIntegrityError."""
     row = conn.execute(
         "SELECT value_json FROM kb_metadata WHERE key=?", (key,)
     ).fetchone()
-    return json.loads(row[0]) if row is not None else None
+    if row is None:
+        raise CacheIntegrityError(f"missing metadata key: {key}")
+    try:
+        return json.loads(row[0])
+    except ValueError as exc:  # includes json.JSONDecodeError
+        raise CacheIntegrityError(f"invalid JSON for metadata key: {key}") from exc
+
+
+def _check_count_metadata(
+    conn: sqlite3.Connection, key: str, table: str, column: str
+) -> None:
+    """Validate a count metadata mapping against the actual GROUP BY counts.
+
+    ``table`` and ``column`` are fixed schema identifiers (never user input).
+    The stored mapping must be a non-empty object of non-negative integers and
+    must match the actual row counts exactly (same keys and values).
+    """
+    stored = _require_metadata(conn, key)
+    if not isinstance(stored, dict) or not stored:
+        raise CacheIntegrityError(f"{key} must be a non-empty object")
+    for name, count in stored.items():
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise CacheIntegrityError(f"{key} has an invalid count for {name}")
+    actual = {
+        str(row[0]): int(row[1])
+        for row in conn.execute(
+            f"SELECT {column}, COUNT(*) FROM {table} GROUP BY {column}"
+        )
+    }
+    stored_normalized = {str(name): int(count) for name, count in stored.items()}
+    if actual != stored_normalized:
+        raise CacheIntegrityError(f"{key} does not match actual {table} counts")
+
+
+def _check_edges(conn: sqlite3.Connection) -> None:
+    """Validate the resolved flag and target integrity of every edge."""
+    bad = conn.execute(
+        "SELECT COUNT(*) FROM edges WHERE resolved NOT IN (0,1)"
+    ).fetchone()[0]
+    if bad:
+        raise CacheIntegrityError(f"{bad} edge(s) have an invalid resolved value")
+    null_target = conn.execute(
+        "SELECT COUNT(*) FROM edges WHERE resolved=1 AND target_id IS NULL"
+    ).fetchone()[0]
+    if null_target:
+        raise CacheIntegrityError(
+            f"{null_target} resolved edge(s) have no target_id"
+        )
+    stray_target = conn.execute(
+        "SELECT COUNT(*) FROM edges WHERE resolved=0 AND target_id IS NOT NULL"
+    ).fetchone()[0]
+    if stray_target:
+        raise CacheIntegrityError(
+            f"{stray_target} unresolved edge(s) carry a target_id"
+        )
+    dangling = conn.execute(
+        "SELECT COUNT(*) FROM edges WHERE resolved=1 AND target_id IS NOT NULL "
+        "AND target_id NOT IN (SELECT entity_id FROM entities)"
+    ).fetchone()[0]
+    if dangling:
+        raise CacheIntegrityError(
+            f"{dangling} resolved edge(s) target an unknown entity"
+        )
 
 
 def validate_cache(path: Path) -> None:
     """Run the build self-checks against the cache at ``path``.
 
-    Raises :class:`CacheIntegrityError` if the schema version is wrong, the
-    integrity or foreign-key checks fail, the recorded entity/edge counts do not
-    match the rows, or any resolved edge dangles.
+    Raises :class:`CacheIntegrityError` (never a raw ``sqlite3``/``JSONDecodeError``
+    exception) if the schema version is wrong, the integrity or foreign-key
+    checks fail, the recorded entity/edge counts do not match the rows exactly,
+    or any edge violates the resolved/target invariants.
     """
     path = Path(path)
     if not path.is_file():
@@ -229,9 +297,7 @@ def validate_cache(path: Path) -> None:
         } <= tables:
             raise CacheIntegrityError("cache is missing required tables")
 
-        version = _metadata(conn, "kb_schema_version")
-        if version is None:
-            raise CacheIntegrityError("missing kb_schema_version metadata")
+        version = _require_metadata(conn, "kb_schema_version")
         try:
             version_int = int(version)  # type: ignore[arg-type]
         except (TypeError, ValueError) as exc:
@@ -244,37 +310,14 @@ def validate_cache(path: Path) -> None:
         if conn.execute("PRAGMA foreign_key_check").fetchall():
             raise CacheIntegrityError("foreign_key_check reported violations")
 
-        entity_counts = _metadata(conn, "entity_count_by_kind")
-        if not isinstance(entity_counts, dict):
-            raise CacheIntegrityError("missing or invalid entity_count_by_kind")
-        for kind, count in entity_counts.items():
-            actual = conn.execute(
-                "SELECT COUNT(*) FROM entities WHERE kind=?", (str(kind),)
-            ).fetchone()[0]
-            if actual != int(count):
-                raise CacheIntegrityError(
-                    f"entity count mismatch for {kind}: {actual} != {count}"
-                )
-
-        edge_counts = _metadata(conn, "edge_count_by_predicate")
-        if isinstance(edge_counts, dict):
-            for predicate, count in edge_counts.items():
-                actual = conn.execute(
-                    "SELECT COUNT(*) FROM edges WHERE predicate=?",
-                    (str(predicate),),
-                ).fetchone()[0]
-                if actual != int(count):
-                    raise CacheIntegrityError(
-                        f"edge count mismatch for {predicate}: {actual} != {count}"
-                    )
-
-        dangling = conn.execute(
-            "SELECT edge_id FROM edges WHERE resolved=1 AND target_id IS NOT NULL "
-            "AND target_id NOT IN (SELECT entity_id FROM entities)"
-        ).fetchall()
-        if dangling:
-            raise CacheIntegrityError(
-                f"{len(dangling)} resolved edge(s) point to an unknown entity"
-            )
+        _check_count_metadata(conn, "entity_count_by_kind", "entities", "kind")
+        _check_count_metadata(conn, "edge_count_by_predicate", "edges", "predicate")
+        _check_edges(conn)
+    except CacheIntegrityError:
+        raise
+    except Exception as exc:  # never leak raw sqlite/JSON exceptions or tracebacks
+        raise CacheIntegrityError(
+            f"cache self-check failed: {type(exc).__name__}"
+        ) from exc
     finally:
         conn.close()
