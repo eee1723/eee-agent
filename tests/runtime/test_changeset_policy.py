@@ -1174,3 +1174,56 @@ def test_parent_matching_created_node_is_internal() -> None:
     decision = evaluate_policy(cs, workspace=_manifest())
     assert decision.allowed is True
     assert decision.denial_codes == ()
+
+
+# --------------------------------------------------------------------------
+# F8: stable node id uniqueness is not a permission-mode privilege. When a
+# manifest is supplied, any CreateNode reusing a manifest id is rejected
+# regardless of the requested permission mode.
+# --------------------------------------------------------------------------
+
+
+def test_project_change_denies_create_reusing_manifest_node_id() -> None:
+    # n_child is already owned by the supplied manifest; switching to
+    # ProjectChange must not make the id reusable.
+    create = CreateNode(
+        op_id="op_create",
+        parent=_noderef(node_id="n_root", path="/obj/ws", expected_type="geo"),
+        node_id="n_child",
+        node_type="geo",
+        node_name="new",
+        workspace_id=WS,
+        capability="modeling",
+        role="member",
+    )
+    cs = _changeset(
+        (create,),
+        affected=(_noderef(node_id="n_child", path="/obj/ws/new"),),
+        affected_paths=("/obj/ws/new",),
+        permission=PermissionMode.PROJECT_CHANGE,
+    )
+    decision = evaluate_policy(cs, workspace=_manifest())
+    assert decision.allowed is False
+    assert "policy.node_id_reused" in decision.denial_codes
+
+
+def test_project_change_allows_create_with_new_node_id() -> None:
+    create = CreateNode(
+        op_id="op_create",
+        parent=_noderef(node_id="n_root", path="/obj/ws", expected_type="geo"),
+        node_id="n_new",
+        node_type="geo",
+        node_name="new",
+        workspace_id=WS,
+        capability="modeling",
+        role="member",
+    )
+    cs = _changeset(
+        (create,),
+        affected=(_noderef(node_id="n_new", path="/obj/ws/new"),),
+        affected_paths=("/obj/ws/new",),
+        permission=PermissionMode.PROJECT_CHANGE,
+    )
+    decision = evaluate_policy(cs, workspace=_manifest())
+    assert decision.allowed is True
+    assert decision.denial_codes == ()

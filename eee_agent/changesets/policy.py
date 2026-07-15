@@ -213,6 +213,14 @@ def evaluate_policy(
     if risk.touches_external_nodes != derived_touches_external:
         denial_codes.add(_EFFECT_CONTRADICTION)
 
+    # F8 (any supplied manifest): a CreateNode must not reuse a manifest-owned
+    # stable node id. This is an identity invariant, not a permission-mode
+    # privilege, so it runs before the mode dispatch.
+    if workspace is not None:
+        for op in create_ops:
+            if op.node_id in owned_by_id:
+                denial_codes.add(_NODE_ID_REUSED)
+
     mode = changeset.required_permission
     if mode is PermissionMode.OWNED_WORKSPACE:
         _evaluate_owned(
@@ -278,8 +286,6 @@ def _evaluate_owned(
             denial_codes.add(_OWNERSHIP_MISMATCH)
 
     for op in create_ops:
-        if op.node_id in owned_by_id:
-            denial_codes.add(_NODE_ID_REUSED)
         if op.workspace_id != workspace.workspace_id:
             denial_codes.add(_OWNERSHIP_MISMATCH)
 
