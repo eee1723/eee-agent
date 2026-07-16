@@ -18,6 +18,10 @@ from eee_agent.modeling.bootstrap import (
     BootstrapFinalizeError,
     derive_bootstrap_manifest,
 )
+from eee_agent.modeling.golden_cases import (
+    GoldenCase,
+    houdini_21_minimal_golden_cases,
+)
 from eee_agent.modeling.contracts import (
     Axis,
     BriefConstraint,
@@ -61,6 +65,7 @@ __all__ = [
     "ComponentSpec",
     "EvidenceRef",
     "FrontAxis",
+    "GoldenCase",
     "InputBinding",
     "MAX_MODELING_JSON_BYTES",
     "ModelingBrief",
@@ -89,6 +94,7 @@ __all__ = [
     "derive_bootstrap_manifest",
     "houdini_21_minimal_catalog",
     "houdini_21_minimal_quality_profile",
+    "houdini_21_minimal_golden_cases",
     "parse_modeling_brief",
     "parse_procedural_spec",
     "parse_quality_profile",

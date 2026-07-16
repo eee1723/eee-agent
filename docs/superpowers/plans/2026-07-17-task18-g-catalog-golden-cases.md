@@ -1,5 +1,9 @@
 # Task 18-G Catalog Expansion and Golden Cases Plan
 
+Status: existing core SOP batch and three deterministic Golden Cases (box chain, grid
+chain, merged sources) are implemented and replayed successfully in Houdini
+21.0.440 hython. Surface/assembly/boolean batches remain.
+
 ## Catalog batches
 
 1. Bootstrap/object: `geo` and verified SOP root behavior.
@@ -24,4 +28,3 @@ Unsupported/file/source/expression fields remain absent.
 - parameter sensitivity with scene restoration.
 
 Every batch is independently committed after offline and hython gates.
-
