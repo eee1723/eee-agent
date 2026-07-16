@@ -38,6 +38,7 @@ _DISCOVERY_FIELDS = frozenset(
 _SESSION_ID_RE = re.compile(r"^ses_[0-9a-f]{32}$")
 _RUN_ID_RE = re.compile(r"^run_[0-9a-f]{32}$")
 _CHANGE_ID_RE = re.compile(r"^chg_[0-9a-f]{32}$")
+_WORKSPACE_ID_RE = re.compile(r"^wsp_[0-9a-f]{32}$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _PANEL_COMMANDS = frozenset(
     {
@@ -52,6 +53,9 @@ _PANEL_COMMANDS = frozenset(
         "changeset.list",
         "changeset.approve",
         "changeset.reject",
+        "workspace.create",
+        "workspace.bind",
+        "workspace.inspect",
     }
 )
 
@@ -210,6 +214,10 @@ def _valid_id(value: object, pattern: re.Pattern[str]) -> bool:
     return type(value) is str and pattern.fullmatch(value) is not None
 
 
+def _valid_nullable_epoch(value: object) -> bool:
+    return value is None or (type(value) is int and value >= 1)
+
+
 def _validate_panel_payload(command_type: str, payload: dict) -> None:
     valid = False
     if command_type == "runtime.ping":
@@ -269,6 +277,40 @@ def _validate_panel_payload(command_type: str, payload: dict) -> None:
             and _valid_id(payload["change_id"], _CHANGE_ID_RE)
             and type(payload["changeset_digest"]) is str
             and _DIGEST_RE.fullmatch(payload["changeset_digest"]) is not None
+        )
+    elif command_type == "workspace.create":
+        valid = (
+            _exact_keys(payload, {"session_id", "expected_scene_epoch"})
+            and _valid_id(payload["session_id"], _SESSION_ID_RE)
+            and _valid_nullable_epoch(payload["expected_scene_epoch"])
+        )
+    elif command_type == "workspace.bind":
+        valid = (
+            _exact_keys(
+                payload,
+                {
+                    "session_id",
+                    "workspace_id",
+                    "expected_manifest_revision",
+                    "expected_scene_epoch",
+                },
+            )
+            and _valid_id(payload["session_id"], _SESSION_ID_RE)
+            and _valid_id(payload["workspace_id"], _WORKSPACE_ID_RE)
+            and type(payload["expected_manifest_revision"]) is str
+            and _DIGEST_RE.fullmatch(payload["expected_manifest_revision"])
+            is not None
+            and _valid_nullable_epoch(payload["expected_scene_epoch"])
+        )
+    elif command_type == "workspace.inspect":
+        valid = (
+            _exact_keys(payload, {"session_id", "workspace_id", "expected_scene_epoch"})
+            and _valid_id(payload["session_id"], _SESSION_ID_RE)
+            and (
+                payload["workspace_id"] is None
+                or _valid_id(payload["workspace_id"], _WORKSPACE_ID_RE)
+            )
+            and _valid_nullable_epoch(payload["expected_scene_epoch"])
         )
     if not valid:
         raise PanelClientError("Runtime command payload is invalid.")

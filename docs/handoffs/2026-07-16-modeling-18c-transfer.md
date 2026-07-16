@@ -23,12 +23,19 @@
 - Production `runtime serve` wiring for the opt-in modeling runner and
   verified catalog. The model can propose a typed ChangeSet through the
   existing trusted proposal/approval service seam; it cannot Apply.
+- The Runtime panel now exposes bounded `WORKSPACE` controls for create from
+  the current selection, inspect, and bind/refresh using the exact manifest
+  revision. These commands are lifecycle operations already present in the
+  Runtime protocol; they do not expose Apply or raw Houdini writes.
 
 ## Deliberately deferred
 
 No Apply command, raw operation upload, VEX/source execution, panel modeling
 editor, automatic approval, or model-controlled Houdini mutation was added.
 The proposal path remains approval-gated and Workspace/SceneBinding-bound.
+Workspace creation still requires a selected graph whose nodes already carry
+EEE ownership metadata; a clean empty scene cannot bootstrap ownership. That
+bootstrap/apply slice is intentionally the next design boundary.
 
 ## Manual Houdini gate (required next)
 
@@ -55,4 +62,3 @@ and ProceduralSpec payload. Confirm:
 Also verify that a stale/unavailable Workspace produces a bounded failure and
 does not mutate the scene. Record any Runtime/Houdini behavior here before
 accepting Task 18-C.
-

@@ -9,6 +9,7 @@ directly.
 from __future__ import annotations
 
 import itertools
+import json
 import sys
 import threading
 from pathlib import Path
@@ -556,6 +557,67 @@ class RuntimeObserverClient(QtCore.QObject):
             "changeset.list",
         )
 
+    def create_workspace(self, expected_scene_epoch: int | None = None) -> None:
+        session_id = self._current_session_id
+        if session_id is None:
+            self.commandFailed.emit(
+                "workspace.create",
+                "runtime.session_required",
+                "Create or select a Session before creating a Workspace.",
+                True,
+                False,
+            )
+            return
+        self._send(
+            "workspace.create",
+            {
+                "session_id": session_id,
+                "expected_scene_epoch": expected_scene_epoch,
+            },
+            "workspace.create",
+        )
+
+    def bind_workspace(
+        self,
+        workspace_id: str,
+        expected_manifest_revision: str,
+        expected_scene_epoch: int | None = None,
+    ) -> None:
+        session_id = self._current_session_id
+        if session_id is None:
+            self.commandFailed.emit(
+                "workspace.bind",
+                "runtime.session_required",
+                "Create or select a Session before binding a Workspace.",
+                True,
+                False,
+            )
+            return
+        self._send(
+            "workspace.bind",
+            {
+                "session_id": session_id,
+                "workspace_id": workspace_id,
+                "expected_manifest_revision": expected_manifest_revision,
+                "expected_scene_epoch": expected_scene_epoch,
+            },
+            "workspace.bind",
+        )
+
+    def inspect_workspace(self, workspace_id: str | None = None) -> None:
+        session_id = self._current_session_id
+        if session_id is None:
+            return
+        self._send(
+            "workspace.inspect",
+            {
+                "session_id": session_id,
+                "workspace_id": workspace_id,
+                "expected_scene_epoch": None,
+            },
+            "workspace.inspect",
+        )
+
     def _schedule(self, delay_ms: int | None = None) -> None:
         if self._stopping or self._timer.isActive():
             return
@@ -744,6 +806,9 @@ class RuntimeObserverClient(QtCore.QObject):
             "run.force_stop",
             "changeset.approve",
             "changeset.reject",
+            "workspace.create",
+            "workspace.bind",
+            "workspace.inspect",
         ):
             self.commandSucceeded.emit(purpose, result)
             if purpose.startswith("run."):
@@ -929,6 +994,7 @@ class RuntimePanel(QtWidgets.QWidget):
         self.tabs.addTab(self._build_run_tab(), "RUN")
         self.tabs.addTab(self._build_approvals_tab(), "APPROVALS")
         self.tabs.addTab(self._build_scene_tab(), "SCENE")
+        self.tabs.addTab(self._build_workspace_tab(), "WORKSPACE")
         layout.addWidget(self.tabs, 1)
 
         self.last_event = QtWidgets.QLabel("No Runtime events observed")
@@ -1151,6 +1217,55 @@ class RuntimePanel(QtWidgets.QWidget):
         layout.addWidget(self.selection_stack, 1)
         return tab
 
+    def _build_workspace_tab(self) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(9)
+
+        title = QtWidgets.QLabel("TRUSTED WORKSPACE")
+        title.setObjectName("Kicker")
+        layout.addWidget(title)
+        self.workspace_status = QtWidgets.QLabel("NO WORKSPACE INSPECTED")
+        self.workspace_status.setObjectName("RunState")
+        layout.addWidget(self.workspace_status)
+
+        note = QtWidgets.QLabel(
+            "Create reads the current Houdini selection. The selection must "
+            "already contain EEE-owned nodes; an empty scene cannot bootstrap "
+            "a Workspace yet. Bind refreshes the selected owned graph."
+        )
+        note.setObjectName("Meta")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        actions = QtWidgets.QHBoxLayout()
+        self.create_workspace_button = QtWidgets.QPushButton("Create from selection")
+        self.create_workspace_button.clicked.connect(self._create_workspace)
+        actions.addWidget(self.create_workspace_button)
+        self.inspect_workspace_button = QtWidgets.QPushButton("Inspect")
+        self.inspect_workspace_button.clicked.connect(self._inspect_workspace)
+        actions.addWidget(self.inspect_workspace_button)
+        layout.addLayout(actions)
+
+        self.workspace_id_edit = QtWidgets.QLineEdit()
+        self.workspace_id_edit.setPlaceholderText("Workspace ID: wsp_...")
+        layout.addWidget(self.workspace_id_edit)
+        self.workspace_revision_edit = QtWidgets.QLineEdit()
+        self.workspace_revision_edit.setPlaceholderText("Manifest revision (64 hex)")
+        layout.addWidget(self.workspace_revision_edit)
+        self.bind_workspace_button = QtWidgets.QPushButton("Bind / refresh selection")
+        self.bind_workspace_button.clicked.connect(self._bind_workspace)
+        layout.addWidget(self.bind_workspace_button)
+
+        self.workspace_summary = QtWidgets.QPlainTextEdit()
+        self.workspace_summary.setReadOnly(True)
+        self.workspace_summary.setPlaceholderText(
+            "Workspace lifecycle and health summaries will appear here."
+        )
+        layout.addWidget(self.workspace_summary, 1)
+        return tab
+
     def _rail_item(self, layout, column, key, value, attr) -> None:
         key_label = QtWidgets.QLabel(key)
         key_label.setObjectName("RailKey")
@@ -1214,6 +1329,32 @@ class RuntimePanel(QtWidgets.QWidget):
             )
         )
         dialog.open()
+
+    @QtCore.Slot()
+    def _create_workspace(self) -> None:
+        self.create_workspace_button.setEnabled(False)
+        self.workspace_status.setText("CREATING WORKSPACE")
+        self._client.create_workspace()
+
+    @QtCore.Slot()
+    def _inspect_workspace(self) -> None:
+        self.inspect_workspace_button.setEnabled(False)
+        self.workspace_status.setText("INSPECTING WORKSPACE")
+        workspace_id = self.workspace_id_edit.text().strip() or None
+        self._client.inspect_workspace(workspace_id)
+
+    @QtCore.Slot()
+    def _bind_workspace(self) -> None:
+        workspace_id = self.workspace_id_edit.text().strip()
+        revision = self.workspace_revision_edit.text().strip()
+        if not workspace_id or not revision:
+            self.workspace_status.setText(
+                "Enter Workspace ID and manifest revision before binding."
+            )
+            return
+        self.bind_workspace_button.setEnabled(False)
+        self.workspace_status.setText("BINDING WORKSPACE")
+        self._client.bind_workspace(workspace_id, revision)
 
     def _submit_new_session(self, title: str) -> None:
         if title:
@@ -1447,7 +1588,30 @@ class RuntimePanel(QtWidgets.QWidget):
         )
 
     @QtCore.Slot(str, object)
-    def _command_succeeded(self, purpose: str, _result) -> None:
+    def _command_succeeded(self, purpose: str, result) -> None:
+        if purpose.startswith("workspace."):
+            self.create_workspace_button.setEnabled(True)
+            self.inspect_workspace_button.setEnabled(True)
+            self.bind_workspace_button.setEnabled(True)
+            if type(result) is dict:
+                workspace = result.get("workspace")
+                if type(workspace) is dict:
+                    workspace_id = workspace.get("workspace_id")
+                    revision = workspace.get("revision")
+                    if type(workspace_id) is str:
+                        self.workspace_id_edit.setText(workspace_id)
+                    if type(revision) is str:
+                        self.workspace_revision_edit.setText(revision)
+                self.workspace_summary.setPlainText(
+                    json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True)
+                )
+                if purpose == "workspace.inspect":
+                    self.workspace_status.setText(
+                        f"WORKSPACE {str(result.get('status', 'Unknown')).upper()}"
+                    )
+                else:
+                    self.workspace_status.setText("WORKSPACE READY")
+            return
         if purpose == "session.create":
             self.new_session_button.setEnabled(True)
             self.status_text.setText("Session created")
@@ -1481,6 +1645,12 @@ class RuntimePanel(QtWidgets.QWidget):
                 "GATE / ACTION REQUIRED" if requires_action else "GATE / BLOCKED"
             )
             self.gate_state.setStyleSheet(f"color:{RED};")
+        if purpose.startswith("workspace."):
+            self.create_workspace_button.setEnabled(True)
+            self.inspect_workspace_button.setEnabled(True)
+            self.bind_workspace_button.setEnabled(True)
+            self.workspace_status.setText("WORKSPACE BLOCKED")
+            self.workspace_summary.setPlainText(message)
         self._update_run_controls()
 
     def _update_run_controls(self) -> None:

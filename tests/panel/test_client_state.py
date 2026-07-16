@@ -119,6 +119,34 @@ def test_build_command_is_canonical_and_bounded() -> None:
     with pytest.raises(PanelClientError):
         build_command("req_6", "workspace.create", {})
 
+    sid = "ses_" + "a" * 32
+    wid = "wsp_" + "b" * 32
+    digest = "d" * 64
+    assert '"type":"workspace.create"' in build_command(
+        "req_7",
+        "workspace.create",
+        {"session_id": sid, "expected_scene_epoch": None},
+    )
+    assert '"type":"workspace.bind"' in build_command(
+        "req_8",
+        "workspace.bind",
+        {
+            "session_id": sid,
+            "workspace_id": wid,
+            "expected_manifest_revision": digest,
+            "expected_scene_epoch": 1,
+        },
+    )
+    assert '"type":"workspace.inspect"' in build_command(
+        "req_9",
+        "workspace.inspect",
+        {
+            "session_id": sid,
+            "workspace_id": None,
+            "expected_scene_epoch": None,
+        },
+    )
+
 
 @pytest.mark.parametrize(
     ("command_type", "payload"),

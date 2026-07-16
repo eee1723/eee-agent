@@ -46,7 +46,6 @@ def test_runtime_panel_keeps_client_only_import_boundary() -> None:
     assert imported.isdisjoint(forbidden)
     for forbidden_text in (
         "changeset.apply",
-        "workspace.create",
         "hou.selectedNodes",
         "asyncio.run",
         "eval(",
@@ -73,6 +72,10 @@ def test_runtime_panel_keeps_client_only_import_boundary() -> None:
     assert 'addTab(self._build_run_tab(), "RUN")' in source
     assert 'addTab(self._build_approvals_tab(), "APPROVALS")' in source
     assert 'addTab(self._build_scene_tab(), "SCENE")' in source
+    assert 'addTab(self._build_workspace_tab(), "WORKSPACE")' in source
+    assert '"workspace.create"' in source
+    assert '"workspace.bind"' in source
+    assert '"workspace.inspect"' in source
 
 
 def test_runtime_panel_bootstraps_snapshot_before_live_subscription() -> None:
