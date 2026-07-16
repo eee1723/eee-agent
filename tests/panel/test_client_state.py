@@ -178,12 +178,19 @@ def test_parse_runtime_message_rejects_duplicate_and_incompatible() -> None:
         )
 
 
-def _session(session_id: str, updated_at: str, *, status: str = "active") -> dict:
+def _session(
+    session_id: str,
+    updated_at: str,
+    *,
+    status: str = "active",
+    last_seq: int = 0,
+) -> dict:
     return {
         "session_id": session_id,
         "title": session_id,
         "status": status,
         "updated_at": updated_at,
+        "last_seq": last_seq,
     }
 
 
@@ -202,6 +209,24 @@ def test_choose_active_session_tie_breaks_by_session_id() -> None:
     timestamp = "2026-07-16T10:00:00+00:00"
     chosen = choose_active_session(
         [_session("ses_a", timestamp), _session("ses_b", timestamp)]
+    )
+    assert chosen["session_id"] == "ses_b"
+
+
+def test_choose_active_session_prefers_highest_activity_boundary() -> None:
+    chosen = choose_active_session(
+        [
+            _session(
+                "ses_a",
+                "2026-07-16T12:00:00+00:00",
+                last_seq=1,
+            ),
+            _session(
+                "ses_b",
+                "2026-07-16T10:00:00+00:00",
+                last_seq=368,
+            ),
+        ]
     )
     assert chosen["session_id"] == "ses_b"
 

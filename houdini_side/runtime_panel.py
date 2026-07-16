@@ -50,6 +50,9 @@ DIM = "#9097A1"
 AMBER = "#FF7A1A"
 CYAN = "#63C7C9"
 RED = "#E45B55"
+_SETTINGS_ORGANIZATION = "EEEAgent"
+_SETTINGS_APPLICATION = "RuntimePanel"
+_PREFERRED_SESSION_KEY = "preferred_session_id"
 
 _QSS = f"""
 QWidget#EEEAgentRuntimePanel {{
@@ -167,7 +170,7 @@ QTabBar::tab:selected {{
     color: {CYAN};
     background: {INSET};
 }}
-QComboBox, QPlainTextEdit {{
+QComboBox, QLineEdit, QPlainTextEdit {{
     background: {INSET};
     color: {TEXT};
     border: 1px solid {IRON};
@@ -185,6 +188,17 @@ QComboBox QAbstractItemView {{
 }}
 QPlainTextEdit {{
     padding: 7px;
+    font-family: "Segoe UI";
+}}
+QDialog#SessionTitleDialog {{
+    background: {GRAPHITE};
+    color: {TEXT};
+}}
+QDialog#SessionTitleDialog QLabel {{
+    color: {TEXT};
+}}
+QLineEdit {{
+    padding: 6px 8px;
     font-family: "Segoe UI";
 }}
 QFrame#RunLane {{
@@ -232,6 +246,87 @@ QPushButton {{
 QPushButton:hover {{ background: #26383C; }}
 QPushButton:disabled {{ color: {DIM}; border-color: {IRON}; }}
 """
+
+
+def _configure_ime(widget, *, multiline: bool) -> None:
+    """Make Qt input-method support explicit inside Houdini's Python Panel."""
+    widget.setAttribute(
+        QtCore.Qt.WidgetAttribute.WA_InputMethodEnabled, True
+    )
+    hints = (
+        QtCore.Qt.InputMethodHint.ImhMultiLine
+        if multiline
+        else QtCore.Qt.InputMethodHint.ImhNone
+    )
+    widget.setInputMethodHints(hints)
+    widget.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
+
+
+def _load_preferred_session_id() -> str | None:
+    value = QtCore.QSettings(
+        _SETTINGS_ORGANIZATION, _SETTINGS_APPLICATION
+    ).value(_PREFERRED_SESSION_KEY, "")
+    return value if type(value) is str and value else None
+
+
+def _save_preferred_session_id(session_id: str) -> None:
+    settings = QtCore.QSettings(
+        _SETTINGS_ORGANIZATION, _SETTINGS_APPLICATION
+    )
+    settings.setValue(_PREFERRED_SESSION_KEY, session_id)
+    settings.sync()
+
+
+class SessionTitleDialog(QtWidgets.QDialog):
+    """Owned Session-title dialog with explicit Windows IME support."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("SessionTitleDialog")
+        self.setWindowTitle("New Runtime Session")
+        self.setModal(True)
+        self.setMinimumWidth(360)
+        self.setStyleSheet(_QSS)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+        label = QtWidgets.QLabel(
+            "Short Session title (for example: 17B smoke).\n"
+            "Enter the Run request in the editor after creating the Session."
+        )
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        self.title_edit = QtWidgets.QLineEdit()
+        self.title_edit.setMaxLength(200)
+        self.title_edit.setPlaceholderText("Session title")
+        _configure_ime(self.title_edit, multiline=False)
+        layout.addWidget(self.title_edit)
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel
+            | QtWidgets.QDialogButtonBox.StandardButton.Ok
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        ok = buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok)
+        ok.setEnabled(False)
+        self.title_edit.textChanged.connect(
+            lambda text: ok.setEnabled(bool(text.strip()))
+        )
+        self.title_edit.returnPressed.connect(
+            lambda: self.accept() if self.title_edit.text().strip() else None
+        )
+        QtCore.QTimer.singleShot(0, self._focus_editor)
+
+    def _focus_editor(self) -> None:
+        self.activateWindow()
+        self.title_edit.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+        QtGui.QGuiApplication.inputMethod().update(
+            QtCore.Qt.InputMethodQuery.ImQueryAll
+        )
+
+    def title(self) -> str:
+        return self.title_edit.text().strip()
 
 
 class SelectionQueryWorker(QtCore.QObject):
@@ -328,7 +423,7 @@ class RuntimeObserverClient(QtCore.QObject):
         self._cursors = RuntimeCursorBook()
         self._runtime_state = RuntimePanelState()
         self._sessions: dict[str, dict] = {}
-        self._preferred_session_id: str | None = None
+        self._preferred_session_id = _load_preferred_session_id()
         self._current_session_id: str | None = None
         self._current_session_title = ""
         self._attempt = 0
@@ -369,6 +464,7 @@ class RuntimeObserverClient(QtCore.QObject):
         if session is None:
             return
         self._preferred_session_id = session_id
+        _save_preferred_session_id(session_id)
         if session_id != self._current_session_id:
             # A connection has no unsubscribe command. Reconnect so switching
             # Sessions never leaves hidden live subscriptions behind.
@@ -564,6 +660,7 @@ class RuntimeObserverClient(QtCore.QObject):
         if purpose == "session.create":
             if type(result) is dict and type(result.get("session_id")) is str:
                 self._preferred_session_id = result["session_id"]
+                _save_preferred_session_id(result["session_id"])
             self.commandSucceeded.emit(purpose, result)
             self.reconnect_now()
             return
@@ -643,6 +740,7 @@ class RuntimeObserverClient(QtCore.QObject):
         session_id = selected["session_id"]
         title = selected["title"]
         self._preferred_session_id = session_id
+        _save_preferred_session_id(session_id)
         self._current_session_id = session_id
         self._current_session_title = title
         # Bootstrap from one bounded snapshot, then subscribe from that exact
@@ -733,6 +831,7 @@ class RuntimePanel(QtWidgets.QWidget):
         self._active_run_status = ""
         self._changesets = ()
         self._decision_busy = False
+        self._session_title_dialog: SessionTitleDialog | None = None
         self._selection_worker = SelectionQueryWorker(self)
         self._selection_worker.queryStarted.connect(self._selection_started)
         self._selection_worker.querySucceeded.connect(self._selection_succeeded)
@@ -842,6 +941,7 @@ class RuntimePanel(QtWidgets.QWidget):
         )
         self.run_prompt.setMaximumBlockCount(120)
         self.run_prompt.setFixedHeight(76)
+        _configure_ime(self.run_prompt, multiline=True)
         layout.addWidget(self.run_prompt)
 
         actions = QtWidgets.QHBoxLayout()
@@ -1059,20 +1159,40 @@ class RuntimePanel(QtWidgets.QWidget):
 
     @QtCore.Slot()
     def _new_session(self) -> None:
-        title, accepted = QtWidgets.QInputDialog.getText(
-            self,
-            "New Runtime Session",
-            "Short Session title (for example: 17B smoke).\n"
-            "Enter the Run request in the editor below.",
+        existing = self._session_title_dialog
+        if existing is not None:
+            existing.raise_()
+            existing.activateWindow()
+            existing.title_edit.setFocus(
+                QtCore.Qt.FocusReason.OtherFocusReason
+            )
+            return
+        dialog = SessionTitleDialog(self)
+        self._session_title_dialog = dialog
+        dialog.accepted.connect(
+            lambda current=dialog: self._submit_new_session(current.title())
         )
-        if accepted and title.strip():
+        dialog.finished.connect(
+            lambda _result, current=dialog: self._release_session_dialog(
+                current
+            )
+        )
+        dialog.open()
+
+    def _submit_new_session(self, title: str) -> None:
+        if title:
             self.new_session_button.setEnabled(False)
             self.status_text.setText("Creating Runtime Session...")
             self.run_state_label.setText("CREATING SESSION")
             self.run_meta_label.setText(
                 "Waiting for Runtime to create and select the Session."
             )
-            self._client.create_session(title.strip())
+            self._client.create_session(title)
+
+    def _release_session_dialog(self, dialog: SessionTitleDialog) -> None:
+        if self._session_title_dialog is dialog:
+            self._session_title_dialog = None
+        dialog.deleteLater()
 
     @QtCore.Slot()
     def _start_run(self) -> None:
@@ -1504,4 +1624,10 @@ def open_panel():
     return pane_tab
 
 
-__all__ = ["RuntimeObserverClient", "RuntimePanel", "create_panel", "open_panel"]
+__all__ = [
+    "RuntimeObserverClient",
+    "RuntimePanel",
+    "SessionTitleDialog",
+    "create_panel",
+    "open_panel",
+]

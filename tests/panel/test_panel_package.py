@@ -59,6 +59,10 @@ def test_runtime_panel_keeps_client_only_import_boundary() -> None:
     assert '"changeset.reject"' in source
     assert "textMessageReceived.connect(self._on_text_message)" in source
     assert "binaryMessageReceived.connect(self._on_binary_message)" in source
+    assert "SessionTitleDialog" in source
+    assert "QInputDialog.getText" not in source
+    assert "WA_InputMethodEnabled" in source
+    assert "QSettings" in source
     assert 'addTab(self._build_run_tab(), "RUN")' in source
     assert 'addTab(self._build_approvals_tab(), "APPROVALS")' in source
     assert 'addTab(self._build_scene_tab(), "SCENE")' in source

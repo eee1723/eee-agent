@@ -323,7 +323,7 @@ def snapshot_boundary(
 def choose_active_session(
     sessions: list[object], preferred_session_id: str | None = None
 ) -> Mapping[str, object] | None:
-    """Choose the preferred active Session, otherwise the latest active one."""
+    """Choose the preferred active Session, otherwise the most active one."""
     if type(sessions) is not list:
         raise PanelClientError("Runtime Session list is invalid.")
     active: list[dict[str, object]] = []
@@ -334,11 +334,14 @@ def choose_active_session(
         title = item.get("title")
         status = item.get("status")
         updated_at = item.get("updated_at")
+        last_seq = item.get("last_seq")
         if (
             type(session_id) is not str
             or type(title) is not str
             or type(status) is not str
             or type(updated_at) is not str
+            or type(last_seq) is not int
+            or last_seq < 0
         ):
             raise PanelClientError("Runtime Session list is invalid.")
         try:
@@ -356,6 +359,7 @@ def choose_active_session(
     chosen = max(
         active,
         key=lambda item: (
+            item["last_seq"],
             datetime.fromisoformat(item["updated_at"]),
             item["session_id"],
         ),
