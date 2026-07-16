@@ -4,7 +4,7 @@
 
 This is the detailed repository-owned history for Tasks 10-16. The current
 short-form cross-computer entrypoint is
-`2026-07-16-runtime-d1-transfer.md`, which supersedes the restore instructions
+`2026-07-16-runtime-b2b3-transfer.md`, which supersedes the restore instructions
 and resume prompt below. `2026-07-14-runtime-migration.md` remains the detailed
 history for Tasks 1-9.
 

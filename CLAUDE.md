@@ -7,16 +7,16 @@ don't re-discover them). Mirrors the auto-memory; kept in-repo so it travels wit
 ## Current development handoff
 
 The current cross-computer source of truth is
-`docs/handoffs/2026-07-16-runtime-d1-transfer.md`. The active development branch
-is `feature/runtime`. Task 16-D1 is Codex-accepted at `39f7346` after 513 focused
-and 1872 full offline tests (one existing optional WSL skip) plus a real Houdini
-21.0.440 transactional created-chain smoke. Task 16-B2b has an accepted design
-at `e135088` and executable plan at `28b5dd9`; its B2b-1 implementation is the
-active slice. Task 16-E and Task 17 have not started and require separate
-bounded plans. Codex may implement a bounded slice directly; Claude Code is an
-optional worker only when the user explicitly chooses it and has quota. Do not
-merge `main` or weaken the typed ChangeSet/single-FIFO write boundary while
-resuming work.
+`docs/handoffs/2026-07-16-runtime-b2b3-transfer.md`. The active development
+branch is `feature/runtime`. Task 16-B2b is Codex-accepted through `b2a1b80`
+after 325 focused, 621 cross-slice, and 2018 full offline tests plus a real
+Houdini 21.0.440 Workspace lifecycle smoke. Task 16-D1 remains accepted at
+`39f7346`. Task 16-E and Task 17 have not started and require separate bounded
+plans. Codex may implement a bounded slice directly; Claude Code is an optional
+worker only when the user explicitly chooses it and has quota. The current user
+preference is direct Codex implementation without Claude. Do not merge `main`
+or weaken the trusted Workspace, typed ChangeSet, approval, preflight,
+transactional Apply, or single-FIFO write boundaries while resuming work.
 
 ## Golden rule
 **Verify, don't guess.** The user insists: when unsure about a Houdini/hou/deepagents
@@ -145,11 +145,18 @@ rollback path. It does **not** replace the Secure HoudiniBridge (deferred).
   `checkpoints.sqlite` (LangGraph), `runtime.lock`, `runtime.json` (discovery —
   host/port/pid/nonce + a token FINGERPRINT only), `runtime.token` (the full
   bearer token — the only place it ever lives).
-- **Read-only Houdini boundary (v1)**: the Runtime agent uses an exact read-only
+- **Read-only Houdini agent boundary (v1)**: the Runtime agent uses an exact read-only
   tool allowlist (`hou_status`, `find_nodes`, `describe_node_type`,
   `geometry_stats`, `validate_geometry`, `work_status`, `anchor_graph`) — no
   write/save/export, no implicit general-purpose subagent. Checkpoint continuity
   uses `thread_id = session_id`.
+- **Trusted Workspace lifecycle (Task 16-B2b)**: Runtime exposes exactly
+  `workspace.create`, `workspace.bind`, `workspace.switch`, and
+  `workspace.inspect`. Workspace is trusted scene context, never write
+  permission. Create/bind may use exact selection facts; switch ignores
+  selection and proves the stored complete manifest. Only nodes already carrying
+  all six EEE executor ownership mirrors can enter a Workspace. See
+  `docs/superpowers/reviews/2026-07-16-task16-b2b-review-result.md`.
 - **Offline tests**: the full Runtime suite — including a real-subprocess
   restart E2E (`tests/runtime/runtime_process_fixture.py`) — runs with NO live
   LLM and NO Houdini. GLM-5.2 and Houdini read-only smokes are MANUAL only (plan
@@ -158,7 +165,7 @@ rollback path. It does **not** replace the Secure HoudiniBridge (deferred).
   `runtime.token`, `runtime.json`, `runtime.lock`, logs, `.env`, `.venv` — all
   `.gitignore`d. Approved spec:
   `docs/superpowers/specs/2026-07-14-runtime-design.md`; status:
-  `docs/handoffs/2026-07-16-runtime-d1-transfer.md`.
+  `docs/handoffs/2026-07-16-runtime-b2b3-transfer.md`.
 
 ## Known limitation
 DeepSeek V4 Pro loops on long-horizon tasks (over-iteration). Architecture is proven

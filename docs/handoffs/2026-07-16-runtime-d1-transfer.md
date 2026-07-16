@@ -1,11 +1,16 @@
 # Runtime D1 Cross-Computer Handoff - 2026-07-16
 
+> Historical handoff: the current cross-computer source of truth is
+> `docs/handoffs/2026-07-16-runtime-b2b3-transfer.md`. Keep this file for the
+> accepted D1 history and evidence; do not use its old B2b resume state.
+
 ## Start Here
 
-This is the current short-form handoff for resuming development on another
-computer. It supersedes the restore instructions and resume prompt in
-`2026-07-15-runtime-migration.md`; that file remains the detailed Tasks 10-16
-history. Tasks 1-9 remain documented in `2026-07-14-runtime-migration.md`.
+This is the historical D1 short-form handoff. It previously superseded the
+restore instructions and resume prompt in `2026-07-15-runtime-migration.md`;
+that file remains the detailed Tasks 10-16 history. Tasks 1-9 remain documented
+in `2026-07-14-runtime-migration.md`. Use the B2b-3 handoff named above for a
+new-computer restore.
 
 Repository and branch:
 
@@ -29,7 +34,7 @@ The transfer-document refresh is committed after `2ee9a2e` and is the remote
 branch tip to fetch. Verify the fetched history contains both hashes above and
 this file before starting new work.
 
-Current milestone state:
+Milestone state when this D1 handoff was originally written:
 
 | Slice | State | Accepted tip/evidence |
 | --- | --- | --- |
@@ -39,7 +44,7 @@ Current milestone state:
 | Task 16-A contracts/policy | Complete, Codex accepted | `79f281d` |
 | Task 16-B1 persistence | Complete, Codex accepted | `54f2989` |
 | Task 16-B2a approvals | Complete, Codex accepted | `7b3bff8` |
-| Task 16-B2b workspace lifecycle | Design/plan accepted; B2b-1 implementation active | `e135088`, `28b5dd9` |
+| Task 16-B2b workspace lifecycle | Historical snapshot: design/plan accepted; implementation later completed through B2b-3 | `e135088`, `28b5dd9`; current tip `b2a1b80` |
 | Task 16-C preflight | Complete, Codex accepted | `6050a00` |
 | Task 16-D transactional apply | Complete, Codex accepted | `3435f4b` |
 | Task 16-D1 ordered created refs | Complete, Codex accepted | `39f7346` |
@@ -174,26 +179,12 @@ Read in this order after the clone verifies clean:
 
 ## Resume Prompt
 
-Use this at the start of the next computer session:
+This historical prompt is intentionally retired. Use the current prompt in
+`docs/handoffs/2026-07-16-runtime-b2b3-transfer.md`; do not resume from the
+pre-B2b state below.
 
 ```text
-Resume EEE Agent development from origin/feature/runtime. Read CLAUDE.md and
-docs/handoffs/2026-07-16-runtime-d1-transfer.md first, then verify the clean
-restore baseline before changing files.
-
-Task 16-D1 is Codex-accepted at 39f7346. Its independent gate passed 513
-focused and 1872 full offline tests with one existing optional WSL skip, plus a
-real Houdini 21.0.440 created-parent/created-endpoint transactional smoke.
-Task 16-B2b has an accepted design at e135088 and executable plan at 28b5dd9;
-B2b-1 is the active implementation slice. Task 16-E and Task 17 have not
-started. Do not infer authority to start them. Every new bounded slice still
-requires its own plan, prompt, file scope, and review checklist. Codex may
-implement directly; Claude Code is optional only when the user explicitly
-selects it. Codex always runs the independent acceptance.
-
-Do not merge main, force-push, transfer machine-local state, add arbitrary
-Houdini code/eval/delete surfaces, or weaken the accepted typed ChangeSet and
-single-FIFO transaction boundaries.
+Retired: see docs/handoffs/2026-07-16-runtime-b2b3-transfer.md.
 ```
 
 ## Git Boundary
