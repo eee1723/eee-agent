@@ -347,6 +347,29 @@ class SessionTitleDialog(QtWidgets.QDialog):
         return self.title_edit.text().strip()
 
 
+class RunRequestEdit(QtWidgets.QLineEdit):
+    """Single-line Run request editor resilient to Windows IME confirmation."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMaxLength(16_000)
+        self.setPlaceholderText(
+            "Ask the Runtime to inspect or reason about the current scene..."
+        )
+        _configure_ime(self, multiline=False)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (
+            QtCore.Qt.Key.Key_Return,
+            QtCore.Qt.Key.Key_Enter,
+        ):
+            # Candidate confirmation must not bubble into Houdini or trigger
+            # another panel action. Runs start only from the Start run button.
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
 class SelectionQueryWorker(QtCore.QObject):
     """Runs short-lived Bridge network I/O off the Houdini UI thread."""
 
@@ -953,13 +976,8 @@ class RuntimePanel(QtWidgets.QWidget):
         prompt_label = QtWidgets.QLabel("RUN REQUEST")
         prompt_label.setObjectName("Kicker")
         layout.addWidget(prompt_label)
-        self.run_prompt = QtWidgets.QPlainTextEdit()
-        self.run_prompt.setPlaceholderText(
-            "Ask the Runtime to inspect or reason about the current scene…"
-        )
-        self.run_prompt.setMaximumBlockCount(120)
-        self.run_prompt.setFixedHeight(76)
-        _configure_ime(self.run_prompt, multiline=True)
+        self.run_prompt = RunRequestEdit()
+        self.run_prompt.setFixedHeight(38)
         layout.addWidget(self.run_prompt)
 
         actions = QtWidgets.QHBoxLayout()
@@ -1214,7 +1232,7 @@ class RuntimePanel(QtWidgets.QWidget):
 
     @QtCore.Slot()
     def _start_run(self) -> None:
-        prompt = self.run_prompt.toPlainText().strip()
+        prompt = self.run_prompt.text().strip()
         if not prompt:
             self.run_meta_label.setText("Enter a request before starting a Run.")
             return
@@ -1645,6 +1663,7 @@ def open_panel():
 __all__ = [
     "RuntimeObserverClient",
     "RuntimePanel",
+    "RunRequestEdit",
     "SessionTitleDialog",
     "create_panel",
     "open_panel",
