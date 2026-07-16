@@ -26,6 +26,8 @@ from eee_agent.houdini_bridge.contracts import SceneBinding
 from eee_agent.modeling.compiler import (
     ModelingCompileError,
     NodeCatalog,
+    WorkspaceBootstrapContext,
+    compile_bootstrap_procedural_spec,
     compile_procedural_spec,
 )
 from eee_agent.modeling.contracts import (
@@ -111,19 +113,30 @@ ProposalCallback = Callable[
 class ModelingProposalContext:
     session_id: str
     run_id: str
-    workspace: WorkspaceManifest
+    workspace: WorkspaceManifest | None
     scene_binding: SceneBinding
     catalog: NodeCatalog
     quality_profile: QualityProfile
     propose_callback: ProposalCallback
+    bootstrap: WorkspaceBootstrapContext | None = None
     clock: Callable[[], datetime] = _now_utc
     change_id_factory: Callable[[], str] = lambda: new_id(IdKind.CHANGE)
 
     def __post_init__(self) -> None:
         require_id(self.session_id, IdKind.SESSION)
         require_id(self.run_id, IdKind.RUN)
-        if type(self.workspace) is not WorkspaceManifest:
-            raise TypeError("ModelingProposalContext.workspace must be a WorkspaceManifest")
+        if self.workspace is not None and type(self.workspace) is not WorkspaceManifest:
+            raise TypeError(
+                "ModelingProposalContext.workspace must be a WorkspaceManifest or None"
+            )
+        if self.bootstrap is not None and type(self.bootstrap) is not WorkspaceBootstrapContext:
+            raise TypeError(
+                "ModelingProposalContext.bootstrap must be a WorkspaceBootstrapContext or None"
+            )
+        if (self.workspace is None) == (self.bootstrap is None):
+            raise ValueError(
+                "ModelingProposalContext requires exactly one Workspace mode"
+            )
         if type(self.scene_binding) is not SceneBinding:
             raise TypeError("ModelingProposalContext.scene_binding must be a SceneBinding")
         if type(self.catalog) is not NodeCatalog:
@@ -154,7 +167,17 @@ class ModelingProposalCoordinator:
     ) -> ModelingProposalSummary:
         try:
             brief = ModelingBrief.from_dict(brief_data)
-            spec = ProceduralSpec.from_dict(spec_data)
+            trusted_spec = dict(spec_data)
+            trusted_spec["brief_digest"] = brief.digest
+            trusted_spec["quality_profile_id"] = (
+                self._context.quality_profile.profile_id
+            )
+            trusted_spec["workspace_root_node_id"] = (
+                self._context.workspace.roots[0].node_id
+                if self._context.workspace is not None
+                else "bootstrap_root"
+            )
+            spec = ProceduralSpec.from_dict(trusted_spec)
         except (TypeError, ValueError, KeyError) as exc:
             raise ModelingProposalError(
                 "modeling.proposal_input_invalid",
@@ -165,18 +188,33 @@ class ModelingProposalCoordinator:
         try:
             require_id(change_id, IdKind.CHANGE)
             created_at = self._context.clock()
-            result = compile_procedural_spec(
-                brief=brief,
-                spec=spec,
-                quality_profile=self._context.quality_profile,
-                catalog=self._context.catalog,
-                workspace=self._context.workspace,
-                scene_binding=self._context.scene_binding,
-                session_id=self._context.session_id,
-                run_id=self._context.run_id,
-                change_id=change_id,
-                created_at=created_at,
-            )
+            if self._context.workspace is not None:
+                result = compile_procedural_spec(
+                    brief=brief,
+                    spec=spec,
+                    quality_profile=self._context.quality_profile,
+                    catalog=self._context.catalog,
+                    workspace=self._context.workspace,
+                    scene_binding=self._context.scene_binding,
+                    session_id=self._context.session_id,
+                    run_id=self._context.run_id,
+                    change_id=change_id,
+                    created_at=created_at,
+                )
+            else:
+                assert self._context.bootstrap is not None
+                result = compile_bootstrap_procedural_spec(
+                    brief=brief,
+                    spec=spec,
+                    quality_profile=self._context.quality_profile,
+                    catalog=self._context.catalog,
+                    bootstrap=self._context.bootstrap,
+                    scene_binding=self._context.scene_binding,
+                    session_id=self._context.session_id,
+                    run_id=self._context.run_id,
+                    change_id=change_id,
+                    created_at=created_at,
+                )
             decision = evaluate_policy(
                 result.changeset, workspace=self._context.workspace
             )
@@ -203,8 +241,14 @@ class ModelingProposalCoordinator:
         summary = ModelingProposalSummary(
             change_id=result.changeset.change_id,
             changeset_digest=result.changeset.digest,
-            workspace_id=result.changeset.workspace_id
-            or self._context.workspace.workspace_id,
+            workspace_id=(
+                result.changeset.workspace_id
+                or (
+                    self._context.workspace.workspace_id
+                    if self._context.workspace is not None
+                    else self._context.bootstrap.workspace_id  # type: ignore[union-attr]
+                )
+            ),
             state="AwaitingApproval",
             approval_required=decision.approval_required,
             operation_count=len(result.changeset.operations),
@@ -236,7 +280,9 @@ async def propose_modeling(
 
     This tool creates no scene effect. It compiles strict modeling intent and
     returns only a ChangeSet digest/risk summary; the Runtime must provide the
-    trusted context.
+    trusted context. In ``spec``, Runtime supplies the brief digest, quality
+    profile ID, and Workspace root binding; the model should supply the strict
+    component/node/parameter/input graph rather than inventing scene IDs.
     """
     context = runtime.context
     if type(context) is not ModelingToolContext:
@@ -270,4 +316,3 @@ __all__ = [
     "ModelingToolContext",
     "propose_modeling",
 ]
-

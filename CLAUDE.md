@@ -7,7 +7,7 @@ don't re-discover them). Mirrors the auto-memory; kept in-repo so it travels wit
 ## Current development handoff
 
 The current source of truth is
-`docs/handoffs/2026-07-16-modeling-18c-transfer.md`. The active branch is
+`docs/handoffs/2026-07-17-modeling-18d-transfer.md`. The active branch is
 `feature/runtime`. Task 16-E, Task 17-A, Task 17-B, Task 18-A, and the pure
 Task 18-B proposal seam are accepted. Task 17-B
 was implemented in `13e0782`: the docked panel now creates
@@ -41,7 +41,9 @@ seam is `23379df`, with review
 `docs/superpowers/reviews/2026-07-16-task18-b-review-result.md`; Task 18-C
 Runtime graph integration is implemented locally and reviewed at
 `docs/superpowers/reviews/2026-07-16-task18-c-review-result.md`; real proposal
-testing has not started. Do not
+testing has not started. Task 18-D empty-scene bootstrap is now accepted
+locally at `0afff36` plus its persistence/runtime completion slice; its review
+is `docs/superpowers/reviews/2026-07-17-task18-d-review-result.md`. Do not
 rewrite or discard the accepted Task 16-E/17-A commits, `13e0782`, or
 the Task 17-B hotfixes
 `423a0e4`/`15b6c00`/`73c6214`/`7d8d552`/`5174378`,

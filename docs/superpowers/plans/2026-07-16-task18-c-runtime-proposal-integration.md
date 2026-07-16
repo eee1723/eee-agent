@@ -1,7 +1,9 @@
 # Task 18-C Runtime Proposal Integration Plan
 
-**Status:** Implemented locally; offline acceptance passed. Awaiting the
-manual Houdini gate recorded in
+**Status:** Implemented locally; superseded for modeling flow by Task 18-D.
+The remaining C manual UI gate is deferred. See the D handoff and autonomous
+roadmap.
+The original manual Houdini gate is recorded in
 `docs/handoffs/2026-07-16-modeling-18c-transfer.md`.
 
 **Goal:** Wire the bounded modeling proposal tool into an opt-in Runtime

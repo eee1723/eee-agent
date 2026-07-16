@@ -59,8 +59,10 @@ from eee_agent.houdini_bridge.workspaces import (
     WorkspaceInspectResult,
     WorkspaceInspectionUnavailable,
 )
+from eee_agent.core.ids import IdKind, new_id
 from eee_agent.modeling.catalog import houdini_21_minimal_quality_profile
-from eee_agent.modeling.compiler import NodeCatalog
+from eee_agent.modeling.bootstrap import derive_bootstrap_manifest
+from eee_agent.modeling.compiler import NodeCatalog, WorkspaceBootstrapContext
 from eee_agent.modeling.proposal import (
     ModelingProposalContext,
     ModelingProposalCoordinator,
@@ -251,6 +253,15 @@ class RuntimeService:
             clock=changeset_clock,
             binding_provider=changeset_binding_provider,  # type: ignore[arg-type]
             bridge_provider=changeset_bridge_provider,
+            bootstrap_manifest_factory=(
+                None
+                if modeling_catalog_provider is None
+                else lambda changeset, receipt: (
+                    derive_bootstrap_manifest(changeset, receipt)
+                    if changeset.workspace_id is None and receipt.is_success
+                    else None
+                )
+            ),
         )
         self._workspaces = WorkspaceService(
             changeset_repository,
@@ -990,20 +1001,32 @@ class RuntimeService:
             if type(catalog) is not NodeCatalog:
                 return None
             binding = await self._changesets.current_binding()
-            inspection = await self._workspaces.inspect(
-                session_id,
-                None,
-                expected_scene_epoch=binding.scene_epoch,
-            )
-            if inspection.status is not WorkspaceHealth.HEALTHY:
-                return None
-            manifest = inspection.target_manifest
-            if (
-                manifest.session_id != session_id
-                or manifest.instance_id != binding.instance_id
-                or manifest.scene_epoch != binding.scene_epoch
-            ):
-                return None
+            manifest = None
+            bootstrap = None
+            try:
+                inspection = await self._workspaces.inspect(
+                    session_id,
+                    None,
+                    expected_scene_epoch=binding.scene_epoch,
+                )
+            except AgentException as exc:
+                if exc.error.code != "workspace.not_found":
+                    return None
+                workspace_id = new_id(IdKind.WORKSPACE)
+                bootstrap = WorkspaceBootstrapContext(
+                    workspace_id=workspace_id,
+                    root_name=f"eee_model_{workspace_id[-8:]}",
+                )
+            else:
+                if inspection.status is not WorkspaceHealth.HEALTHY:
+                    return None
+                manifest = inspection.target_manifest
+                if (
+                    manifest.session_id != session_id
+                    or manifest.instance_id != binding.instance_id
+                    or manifest.scene_epoch != binding.scene_epoch
+                ):
+                    return None
 
             async def persist(changeset, decision):
                 return await self.propose_changeset_trusted(changeset, decision)
@@ -1014,6 +1037,7 @@ class RuntimeService:
                         session_id=session_id,
                         run_id=run_id,
                         workspace=manifest,
+                        bootstrap=bootstrap,
                         scene_binding=binding,
                         catalog=catalog,
                         quality_profile=houdini_21_minimal_quality_profile(),

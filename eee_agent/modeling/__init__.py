@@ -14,6 +14,10 @@ from eee_agent.modeling.catalog import (
     houdini_21_minimal_catalog,
     houdini_21_minimal_quality_profile,
 )
+from eee_agent.modeling.bootstrap import (
+    BootstrapFinalizeError,
+    derive_bootstrap_manifest,
+)
 from eee_agent.modeling.contracts import (
     Axis,
     BriefConstraint,
@@ -42,6 +46,7 @@ from eee_agent.modeling.contracts import (
 __all__ = [
     "Axis",
     "BriefConstraint",
+    "BootstrapFinalizeError",
     "CompilationResult",
     "ComponentSpec",
     "FrontAxis",
@@ -65,6 +70,7 @@ __all__ = [
     "WorkspaceBootstrapContext",
     "compile_bootstrap_procedural_spec",
     "compile_procedural_spec",
+    "derive_bootstrap_manifest",
     "houdini_21_minimal_catalog",
     "houdini_21_minimal_quality_profile",
     "parse_modeling_brief",

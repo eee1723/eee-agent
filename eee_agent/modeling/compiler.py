@@ -608,7 +608,9 @@ def compile_procedural_spec(
                 effect_names=effect_names,
                 affected_paths=tuple(ref.path for ref in affected_nodes),
             ),
-            checkpoint_plan=CheckpointPlan(nodes=(), parameters=(), wires=()),
+            checkpoint_plan=CheckpointPlan(
+                nodes=(root_ref,), parameters=(), wires=()
+            ),
             created_at=created_at,
         )
     except (TypeError, ValueError) as exc:
@@ -842,6 +844,9 @@ def compile_bootstrap_procedural_spec(
         *wire_postconditions,
     )
     effect_names = tuple(sorted({operation.effect.value for operation in operations}))
+    base_revision = hashlib.sha256(
+        canonical_json_dumps(scene_binding.to_dict()).encode("utf-8")
+    ).hexdigest()
     try:
         changeset = ChangeSet(
             change_id=change_id,
@@ -849,7 +854,7 @@ def compile_bootstrap_procedural_spec(
             run_id=run_id,
             scene_binding=scene_binding,
             workspace_id=None,
-            base_revision=scene_binding.observed_revision,
+            base_revision=base_revision,
             required_permission=PermissionMode.PROJECT_CHANGE,
             scoped_node_ids=(),
             operations=operations,
@@ -865,7 +870,9 @@ def compile_bootstrap_procedural_spec(
                 effect_names=effect_names,
                 affected_paths=tuple(ref.path for ref in affected_nodes),
             ),
-            checkpoint_plan=CheckpointPlan(nodes=(), parameters=(), wires=()),
+            checkpoint_plan=CheckpointPlan(
+                nodes=(parent_ref,), parameters=(), wires=()
+            ),
             created_at=created_at,
         )
     except (TypeError, ValueError) as exc:

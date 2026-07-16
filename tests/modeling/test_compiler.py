@@ -254,7 +254,8 @@ def test_bootstrap_compile_is_deterministic_project_change() -> None:
     changeset = first.changeset
     assert changeset.workspace_id is None
     assert changeset.required_permission is PermissionMode.PROJECT_CHANGE
-    assert changeset.base_revision == "a" * 64
+    assert len(changeset.base_revision) == 64
+    assert changeset.base_revision != changeset.scene_binding.observed_revision
     assert evaluate_policy(changeset, workspace=None).allowed is True
     assert [type(op) for op in changeset.operations] == [
         CreateNode,
@@ -322,7 +323,14 @@ def test_compile_derives_operations_defaults_conditions_and_risk() -> None:
     assert sum(isinstance(item, ParmValueEquals) for item in changeset.expected_postconditions) == 2
     assert sum(isinstance(item, WireInputEquals) for item in changeset.expected_postconditions) == 1
     assert changeset.checkpoint_plan.to_dict() == {
-        "nodes": [],
+        "nodes": [
+            {
+                "node_id": "n_workspace",
+                "path": "/obj/EEE_WORK",
+                "expected_type": "geo",
+                "expected_workspace_id": WS,
+            }
+        ],
         "parameters": [],
         "wires": [],
     }

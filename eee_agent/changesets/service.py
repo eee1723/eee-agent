@@ -90,6 +90,11 @@ class ChangeSetBridgeProvider(Protocol):
     async def receipt(self, changeset: ChangeSet) -> ChangeReceipt: ...
 
 
+BootstrapManifestFactory = Callable[
+    [ChangeSet, ChangeReceipt], WorkspaceManifest | None
+]
+
+
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -299,6 +304,7 @@ class ChangeSetService:
         clock: Callable[[], datetime] | None = None,
         binding_provider: Callable[[], SceneBinding] | None = None,
         bridge_provider: ChangeSetBridgeProvider | None = None,
+        bootstrap_manifest_factory: BootstrapManifestFactory | None = None,
         approval_ttl_seconds: float = DEFAULT_APPROVAL_TTL_SECONDS,
     ) -> None:
         if type(repository) is not ChangeSetRepository:
@@ -307,6 +313,11 @@ class ChangeSetService:
         self._clock = clock if clock is not None else _now_utc
         self._binding_provider = binding_provider
         self._bridge_provider = bridge_provider
+        if bootstrap_manifest_factory is not None and not callable(
+            bootstrap_manifest_factory
+        ):
+            raise TypeError("bootstrap_manifest_factory must be callable or None")
+        self._bootstrap_manifest_factory = bootstrap_manifest_factory
         if type(approval_ttl_seconds) not in (int, float) or approval_ttl_seconds <= 0:
             raise ValueError("approval_ttl_seconds must be a positive number")
         self._approval_ttl = timedelta(seconds=float(approval_ttl_seconds))
@@ -432,7 +443,7 @@ class ChangeSetService:
             raise ApplyOrchestrationError(
                 exc, started.events + recovered.events
             ) from exc
-        completed = await self._repository.complete_apply(receipt)
+        completed = await self._complete_receipt(started.changeset, receipt)
         return ApplyCompletionResult(
             completed.changeset,
             completed.receipt,
@@ -491,7 +502,7 @@ class ChangeSetService:
                 return await self._commit_critical(
                     changeset, None, "recovery.receipt_invalid"
                 )
-            committed = await self._repository.complete_apply(receipt)
+            committed = await self._complete_receipt(changeset, receipt)
             return _recovery_from_completion(committed)
 
         try:
@@ -527,7 +538,7 @@ class ChangeSetService:
                 scene_may_have_changed=False,
                 completed_at=_require_utc(self._clock()),
             )
-            committed = await self._repository.complete_apply(receipt)
+            committed = await self._complete_receipt(changeset, receipt)
             return _recovery_from_completion(committed)
         return await self._commit_critical(
             changeset, facts, "recovery.state_ambiguous"
@@ -571,8 +582,25 @@ class ChangeSetService:
             scene_may_have_changed=True,
             completed_at=_require_utc(self._clock()),
         )
-        committed = await self._repository.complete_apply(receipt)
+        committed = await self._complete_receipt(changeset, receipt)
         return _recovery_from_completion(committed)
+
+    async def _complete_receipt(
+        self,
+        changeset: ChangeSet,
+        receipt: ChangeReceipt,
+    ) -> ApplyCompletionResult:
+        factory = self._bootstrap_manifest_factory
+        workspace = None if factory is None else factory(changeset, receipt)
+        if workspace is not None and type(workspace) is not WorkspaceManifest:
+            raise TypeError(
+                "bootstrap_manifest_factory must return WorkspaceManifest or None"
+            )
+        if workspace is not None:
+            return await self._repository.complete_bootstrap_apply(
+                receipt, workspace
+            )
+        return await self._repository.complete_apply(receipt)
 
     async def _ensure_write_available(self, change_id: str) -> None:
         blockers = await self._repository.changesets_in_states(

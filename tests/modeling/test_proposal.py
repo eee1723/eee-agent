@@ -14,6 +14,7 @@ from eee_agent.modeling.compiler import (
     NodeCatalog,
     NodeTypeDefinition,
     ParmDefinition,
+    WorkspaceBootstrapContext,
 )
 from eee_agent.modeling.contracts import (
     Axis,
@@ -106,6 +107,21 @@ def _catalog() -> NodeCatalog:
     )
 
 
+def _bootstrap_catalog() -> NodeCatalog:
+    return NodeCatalog(
+        entries=(
+            NodeTypeDefinition(
+                node_type="geo",
+                parameters=(),
+                max_inputs=1,
+                max_output_index=0,
+                can_parent_nodes=True,
+            ),
+            *_catalog().entries,
+        )
+    )
+
+
 def _workspace() -> WorkspaceManifest:
     root = OwnedNodeRef(
         node_id="n_workspace",
@@ -146,6 +162,29 @@ def _context(callback, *, change_id: str = f"chg_{'4' * 32}") -> ModelingProposa
     )
 
 
+def _bootstrap_context(callback) -> ModelingProposalContext:
+    return ModelingProposalContext(
+        session_id=SES,
+        run_id=RUN,
+        workspace=None,
+        bootstrap=WorkspaceBootstrapContext(
+            workspace_id=WS,
+            root_name="eee_model",
+        ),
+        scene_binding=SceneBinding(
+            instance_id="houdini_1",
+            scene_epoch=1,
+            hip_path=None,
+            observed_revision="a" * 64,
+        ),
+        catalog=_bootstrap_catalog(),
+        quality_profile=_profile(),
+        propose_callback=callback,
+        clock=lambda: NOW,
+        change_id_factory=lambda: f"chg_{'8' * 32}",
+    )
+
+
 def _run(coro):
     return asyncio.run(coro)
 
@@ -172,6 +211,30 @@ def test_coordinator_compiles_and_calls_trusted_callback_once() -> None:
     assert calls[0][1].allowed is True
     assert "operations" not in summary.to_dict()
     assert "parameter" not in str(summary.to_dict()).lower()
+
+
+def test_coordinator_compiles_empty_scene_bootstrap_proposal() -> None:
+    calls: list[tuple[object, object]] = []
+
+    async def callback(changeset, decision):
+        calls.append((changeset, decision))
+
+    brief = _brief()
+    spec = _spec(brief).to_dict()
+    spec["workspace_root_node_id"] = "bootstrap_root"
+    summary = _run(
+        ModelingProposalCoordinator(_bootstrap_context(callback)).propose(
+            brief_data=brief.to_dict(),
+            spec_data=spec,
+        )
+    )
+    assert summary.workspace_id == WS
+    assert summary.state == "AwaitingApproval"
+    assert summary.operation_count == 3
+    changeset, decision = calls[0]
+    assert changeset.workspace_id is None
+    assert changeset.operations[0].node_type == "geo"
+    assert decision.allowed is True
 
 
 def test_coordinator_round_trips_model_json_without_returning_raw_changeset() -> None:
@@ -218,7 +281,7 @@ def test_coordinator_rejects_invalid_input_before_callback() -> None:
     assert calls == []
 
 
-def test_coordinator_wraps_compile_failure_and_preserves_bounded_cause_code() -> None:
+def test_coordinator_ignores_model_supplied_trusted_binding_fields() -> None:
     calls: list[object] = []
 
     def callback(changeset, decision):
@@ -227,16 +290,36 @@ def test_coordinator_wraps_compile_failure_and_preserves_bounded_cause_code() ->
     brief = _brief()
     bad = _spec(brief).to_dict()
     bad["brief_digest"] = "f" * 64
-    with pytest.raises(ModelingProposalError) as caught:
-        _run(
-            ModelingProposalCoordinator(_context(callback)).propose(
-                brief_data=brief.to_dict(),
-                spec_data=bad,
-            )
+    bad["quality_profile_id"] = "invented_profile"
+    bad["workspace_root_node_id"] = "invented_root"
+    summary = _run(
+        ModelingProposalCoordinator(_context(callback)).propose(
+            brief_data=brief.to_dict(),
+            spec_data=bad,
         )
-    assert caught.value.code == "modeling.proposal_compile_failed"
-    assert caught.value.cause_code == "modeling.brief_mismatch"
-    assert calls == []
+    )
+    assert summary.workspace_id == WS
+    assert len(calls) == 1
+    assert calls[0].workspace_id == WS
+
+
+def test_coordinator_injects_omitted_trusted_binding_fields() -> None:
+    calls: list[object] = []
+    brief = _brief()
+    model_spec = _spec(brief).to_dict()
+    for field in (
+        "brief_digest",
+        "quality_profile_id",
+        "workspace_root_node_id",
+    ):
+        model_spec.pop(field)
+    summary = _run(
+        ModelingProposalCoordinator(
+            _context(lambda changeset, _decision: calls.append(changeset))
+        ).propose(brief_data=brief.to_dict(), spec_data=model_spec)
+    )
+    assert summary.workspace_id == WS
+    assert len(calls) == 1
 
 
 def test_coordinator_never_retries_persist_callback() -> None:
@@ -329,4 +412,3 @@ def test_proposal_module_has_no_houdini_runtime_or_dynamic_execution_imports() -
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
     assert calls.isdisjoint({"eval", "exec", "open", "__import__"})
-

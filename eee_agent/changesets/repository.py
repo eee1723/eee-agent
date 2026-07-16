@@ -2234,6 +2234,151 @@ class ChangeSetRepository:
                 changeset, receipt, target, (state_event, outcome_event)
             )
 
+    async def complete_bootstrap_apply(
+        self,
+        receipt: ChangeReceipt,
+        workspace: WorkspaceManifest,
+    ) -> ApplyCompletionResult:
+        """Atomically complete a successful first Apply and activate ownership."""
+        if type(receipt) is not ChangeReceipt:
+            raise TypeError("receipt must be an exact ChangeReceipt")
+        if type(workspace) is not WorkspaceManifest:
+            raise TypeError("workspace must be an exact WorkspaceManifest")
+        if not receipt.is_success:
+            raise ValueError("bootstrap receipt must be applied")
+        events_store = self._events
+        if events_store is None:
+            raise TypeError(
+                "ChangeSetRepository.complete_bootstrap_apply requires an EventStore"
+            )
+        cid = receipt.change_id
+        target = ChangeSetState.APPLIED
+        async with self._database.write_transaction() as conn:
+            stored = await _fetch_stored_changeset(conn, cid)
+            if stored is None:
+                raise _changeset_not_found()
+            changeset = stored.changeset
+            if (
+                changeset.workspace_id is not None
+                or changeset.required_permission is not PermissionMode.PROJECT_CHANGE
+                or workspace.session_id != changeset.session_id
+                or workspace.created_by_run != changeset.run_id
+                or workspace.instance_id != receipt.instance_id
+                or workspace.scene_epoch != receipt.scene_epoch
+                or receipt.instance_id != changeset.scene_binding.instance_id
+                or receipt.scene_epoch != changeset.scene_binding.scene_epoch
+            ):
+                raise _approval_binding_mismatch()
+            created_workspace_ids = {
+                operation.workspace_id
+                for operation in changeset.operations
+                if isinstance(operation, CreateNode)
+            }
+            if created_workspace_ids != {workspace.workspace_id}:
+                raise _workspace_identity_conflict()
+
+            existing_receipt = await _fetch_receipt_record(conn, cid)
+            existing_workspace_row = await _fetch_workspace_row(
+                conn, workspace.workspace_id
+            )
+            state_row = await _fetch_workspace_state_row(
+                conn, workspace.session_id
+            )
+            if existing_receipt is not None:
+                if (
+                    _storage_digest(existing_receipt) != _storage_digest(receipt)
+                    or stored.state is not target
+                    or existing_workspace_row is None
+                    or state_row is None
+                ):
+                    raise _record_corrupt()
+                existing_workspace = _manifest_from_row(existing_workspace_row)
+                state = _workspace_state_from_row(state_row)
+                if (
+                    existing_workspace.revision != workspace.revision
+                    or state.active_workspace_id != workspace.workspace_id
+                ):
+                    raise _record_corrupt()
+                return ApplyCompletionResult(
+                    changeset, existing_receipt, target, ()
+                )
+            if stored.state is not ChangeSetState.APPLYING:
+                raise _cas_conflict()
+            if existing_workspace_row is not None or state_row is not None:
+                raise _workspace_active_conflict()
+
+            await self._insert_receipt_conn(conn, receipt)
+            await self._transition_state_conn(
+                conn, cid, ChangeSetState.APPLYING, target
+            )
+            state_event = await events_store._append_conn(
+                conn,
+                session_id=changeset.session_id,
+                run_id=changeset.run_id,
+                event_type="changeset.state_changed",
+                payload=_state_changed_payload(
+                    cid, ChangeSetState.APPLYING, target
+                ),
+                retention_class=RetentionClass.DURABLE,
+            )
+            outcome_event = await events_store._append_conn(
+                conn,
+                session_id=changeset.session_id,
+                run_id=changeset.run_id,
+                event_type=_event_for_receipt(receipt.status),
+                payload=_receipt_event_payload(changeset, receipt, target),
+                retention_class=RetentionClass.DURABLE,
+            )
+
+            payload = canonical_json_dumps(workspace.to_dict())
+            digest = _storage_digest(workspace)
+            await conn.execute(
+                f"INSERT INTO workspaces({_WORKSPACE_COLUMNS}) VALUES "
+                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    workspace.workspace_id,
+                    workspace.session_id,
+                    workspace.instance_id,
+                    workspace.scene_epoch,
+                    workspace.revision,
+                    workspace.created_by_run,
+                    workspace.updated_at.isoformat(),
+                    digest,
+                    payload,
+                    workspace.schema_version,
+                ),
+            )
+            await conn.execute(
+                "INSERT INTO session_workspace_state(session_id, "
+                "active_workspace_id, state_revision, updated_at) "
+                "VALUES (?, ?, 1, ?)",
+                (
+                    workspace.session_id,
+                    workspace.workspace_id,
+                    workspace.updated_at.isoformat(),
+                ),
+            )
+            state = WorkspaceStateRecord(
+                workspace.session_id,
+                workspace.workspace_id,
+                1,
+                workspace.updated_at,
+            )
+            workspace_event = await events_store._append_conn(
+                conn,
+                session_id=workspace.session_id,
+                run_id=workspace.created_by_run,
+                event_type="workspace.created",
+                payload=_workspace_event_payload(workspace, state, active=True),
+                retention_class=RetentionClass.DURABLE,
+            )
+            return ApplyCompletionResult(
+                changeset,
+                receipt,
+                target,
+                (state_event, outcome_event, workspace_event),
+            )
+
     async def recover_to_approved(self, change_id: str) -> ApplyRecoveryResult:
         """Persist a proven no-write recovery without replaying the ChangeSet."""
         events_store = self._events
