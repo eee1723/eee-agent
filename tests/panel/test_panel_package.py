@@ -62,6 +62,9 @@ def test_runtime_panel_keeps_client_only_import_boundary() -> None:
     assert "SessionTitleDialog" in source
     assert "QInputDialog.getText" not in source
     assert "WA_InputMethodEnabled" in source
+    assert "returnPressed.connect" not in source
+    assert "button.setAutoDefault(False)" in source
+    assert "QtCore.Qt.Key.Key_Return" in source
     assert "QSettings" in source
     assert 'addTab(self._build_run_tab(), "RUN")' in source
     assert 'addTab(self._build_approvals_tab(), "APPROVALS")' in source

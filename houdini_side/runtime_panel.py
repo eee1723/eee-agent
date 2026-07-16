@@ -300,6 +300,7 @@ class SessionTitleDialog(QtWidgets.QDialog):
         self.title_edit.setMaxLength(200)
         self.title_edit.setPlaceholderText("Session title")
         _configure_ime(self.title_edit, multiline=False)
+        self.title_edit.installEventFilter(self)
         layout.addWidget(self.title_edit)
         buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Cancel
@@ -309,14 +310,31 @@ class SessionTitleDialog(QtWidgets.QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
         ok = buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok)
+        cancel = buttons.button(
+            QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        for button in (ok, cancel):
+            button.setAutoDefault(False)
+            button.setDefault(False)
         ok.setEnabled(False)
         self.title_edit.textChanged.connect(
             lambda text: ok.setEnabled(bool(text.strip()))
         )
-        self.title_edit.returnPressed.connect(
-            lambda: self.accept() if self.title_edit.text().strip() else None
-        )
         QtCore.QTimer.singleShot(0, self._focus_editor)
+
+    def eventFilter(self, watched, event) -> bool:
+        if (
+            watched is self.title_edit
+            and event.type() == QtCore.QEvent.Type.KeyPress
+            and event.key()
+            in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter)
+        ):
+            # Windows IMEs commonly emit Return after committing a candidate.
+            # Never let that confirmation key activate QDialog's OK/default
+            # path; Session creation requires an explicit button click.
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
 
     def _focus_editor(self) -> None:
         self.activateWindow()
