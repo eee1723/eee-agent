@@ -317,6 +317,60 @@ def test_propose_is_idempotent_for_same_digest(db_path: Path) -> None:
     _run(scenario())
 
 
+def test_panel_summaries_are_bounded_and_exclude_raw_changeset(
+    db_path: Path,
+) -> None:
+    clock = FakeClock(NOW)
+
+    async def scenario() -> None:
+        db, service, _repo, _events = await fresh_service(
+            db_path, clock=clock, binding_provider=lambda: _binding()
+        )
+        try:
+            paths = tuple(f"/obj/ws/node_{index}" for index in range(14))
+            effects = ("node.create", "parm.set", "wire.connect")
+            cs = _changeset(
+                risk_summary=_risk(
+                    changes_wiring=True,
+                    requires_backup=True,
+                    effect_names=effects,
+                    affected_paths=paths,
+                )
+            )
+            proposed = await service.propose(cs, _policy(cs))
+            summaries = await service.list_panel_summaries(SES, limit=50)
+            assert len(summaries) == 1
+            data = summaries[0].to_dict()
+            assert data["change_id"] == cs.change_id
+            assert data["changeset_digest"] == cs.digest
+            assert data["state"] == "AwaitingApproval"
+            assert data["approval"]["approval_id"] == (
+                proposed.approval.approval_id
+            )
+            assert data["approval"]["decision"] == "Pending"
+            assert data["receipt"] is None
+            risk = data["risk"]
+            assert risk["effect_count"] == 3
+            assert risk["effect_names"] == list(effects)
+            assert risk["affected_path_count"] == 14
+            assert len(risk["affected_paths"]) == 12
+            assert risk["affected_paths_truncated"] is True
+            encoded = str(data)
+            for forbidden in (
+                "operations",
+                "checkpoint_plan",
+                "preconditions",
+                "expected_postconditions",
+                "parm_name",
+                "expected_old_value",
+            ):
+                assert forbidden not in encoded
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
 def test_propose_rejects_conflicting_digest(db_path: Path) -> None:
     clock = FakeClock(NOW)
 

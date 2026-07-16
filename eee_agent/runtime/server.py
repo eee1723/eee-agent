@@ -96,6 +96,10 @@ def _is_limit(v: object) -> bool:
     return type(v) is int and 1 <= v <= _SUBSCRIBE_LIMIT
 
 
+def _is_changeset_limit(v: object) -> bool:
+    return type(v) is int and 1 <= v <= 50
+
+
 def _is_change_id(v: object) -> bool:
     # bool is a subclass of int, not str, so exact-str rules out bool/numbers.
     return type(v) is str and _CHANGE_ID_RE.fullmatch(v) is not None
@@ -511,6 +515,20 @@ class RuntimeWebSocketServer:
             _validate(payload, {"run_id": _is_str})
             result = await self._service.stop_run(payload["run_id"], force=True)
             self._put(ctx, success_response(req, result.to_dict()))
+            return
+
+        if ct == "changeset.list":
+            _validate(
+                payload,
+                {"session_id": _is_session_id, "limit": _is_changeset_limit},
+            )
+            result = await self._service.list_changesets(
+                payload["session_id"], limit=payload["limit"]
+            )
+            self._put(
+                ctx,
+                success_response(req, {"changesets": list(result)}),
+            )
             return
 
         if ct == "changeset.approve":

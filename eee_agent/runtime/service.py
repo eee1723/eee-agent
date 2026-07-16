@@ -726,6 +726,15 @@ class RuntimeService:
             change_id, changeset_digest, approve=True
         )
 
+    async def list_changesets(
+        self, session_id: str, *, limit: int
+    ) -> tuple[dict[str, object], ...]:
+        """Return bounded ChangeSet summaries for one panel Session."""
+        summaries = await self._changesets.list_panel_summaries(
+            session_id, limit=limit
+        )
+        return tuple(summary.to_dict() for summary in summaries)
+
     async def reject_changeset(
         self, change_id: str, changeset_digest: str
     ) -> dict[str, object]:

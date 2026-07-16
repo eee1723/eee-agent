@@ -67,6 +67,7 @@ def test_command_types_match_plan() -> None:
             "run.start",
             "run.stop",
             "run.force_stop",
+            "changeset.list",
             "changeset.approve",
             "changeset.reject",
             "workspace.create",

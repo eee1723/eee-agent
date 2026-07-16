@@ -92,16 +92,62 @@ def test_load_runtime_credentials_rejects_duplicate_discovery_keys(tmp_path: Pat
         load_runtime_credentials(state)
 
 
-def test_build_command_is_canonical_and_read_only() -> None:
+def test_build_command_is_canonical_and_bounded() -> None:
     text = build_command("req_1", "runtime.ping", {})
     assert text == (
         '{"kind":"command","payload":{},"protocol":"eee.runtime/1",'
         '"request_id":"req_1","type":"runtime.ping"}'
     )
+    sid = "ses_" + "a" * 32
+    run_id = "run_" + "b" * 32
+    change_id = "chg_" + "c" * 32
+    assert '"type":"run.start"' in build_command(
+        "req_2",
+        "run.start",
+        {"session_id": sid, "user_input": "Inspect the scene"},
+    )
+    assert '"type":"changeset.approve"' in build_command(
+        "req_3",
+        "changeset.approve",
+        {"change_id": change_id, "changeset_digest": "d" * 64},
+    )
+    assert '"type":"run.stop"' in build_command(
+        "req_4", "run.stop", {"run_id": run_id}
+    )
     with pytest.raises(PanelClientError):
-        build_command("req_2", "run.start", {})
+        build_command("req_5", "changeset.apply", {})
     with pytest.raises(PanelClientError):
-        build_command("req_3", "changeset.approve", {})
+        build_command("req_6", "workspace.create", {})
+
+
+@pytest.mark.parametrize(
+    ("command_type", "payload"),
+    [
+        ("session.create", {"title": ""}),
+        ("session.subscribe", {"session_id": "ses_bad", "last_seq": 0}),
+        (
+            "run.start",
+            {"session_id": "ses_" + "a" * 32, "user_input": " "},
+        ),
+        ("run.stop", {"run_id": "run_bad"}),
+        (
+            "changeset.list",
+            {"session_id": "ses_" + "a" * 32, "limit": True},
+        ),
+        (
+            "changeset.approve",
+            {
+                "change_id": "chg_" + "c" * 32,
+                "changeset_digest": "X" * 64,
+            },
+        ),
+    ],
+)
+def test_build_command_rejects_invalid_ui_payloads(
+    command_type: str, payload: dict
+) -> None:
+    with pytest.raises(PanelClientError):
+        build_command("req", command_type, payload)
 
 
 def test_parse_runtime_message_accepts_response_and_event() -> None:

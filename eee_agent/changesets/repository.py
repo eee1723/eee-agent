@@ -137,6 +137,23 @@ class StoredChangeSet:
 
 
 @dataclass(frozen=True, slots=True)
+class ChangeSetView:
+    """One consistent persisted ChangeSet/approval/receipt read."""
+
+    stored: StoredChangeSet
+    approval: ApprovalRecord | None
+    receipt: ChangeReceipt | None
+
+    def __post_init__(self) -> None:
+        if type(self.stored) is not StoredChangeSet:
+            raise TypeError("stored must be an exact StoredChangeSet")
+        if self.approval is not None and type(self.approval) is not ApprovalRecord:
+            raise TypeError("approval must be an exact ApprovalRecord or None")
+        if self.receipt is not None and type(self.receipt) is not ChangeReceipt:
+            raise TypeError("receipt must be an exact ChangeReceipt or None")
+
+
+@dataclass(frozen=True, slots=True)
 class ProposalResult:
     """The committed outcome of a trusted proposal.
 
@@ -1416,6 +1433,44 @@ class ChangeSetRepository:
             )
             rows = list(await cursor.fetchall())
         return tuple(_stored_from_row(row) for row in rows)
+
+    async def list_changeset_views(
+        self, session_id: str, *, limit: int
+    ) -> tuple[ChangeSetView, ...]:
+        """Return newest bounded ChangeSet views from one consistent read."""
+        sid = _require_id_value(session_id, IdKind.SESSION)
+        if type(limit) is not int or not 1 <= limit <= 50:
+            raise ValueError("limit must be an exact integer in 1..50")
+        async with self._database.write_transaction() as conn:
+            await self._require_session(conn, sid)
+            cursor = await conn.execute(
+                f"SELECT {_CHANGESET_COLUMNS} FROM changesets "
+                "WHERE session_id = ? "
+                "ORDER BY created_at DESC, change_id DESC LIMIT ?",
+                (sid, limit),
+            )
+            rows = list(await cursor.fetchall())
+            views: list[ChangeSetView] = []
+            for row in rows:
+                stored = _stored_from_row(row)
+                change_id = stored.changeset.change_id
+                if (
+                    change_id != row["change_id"]
+                    or stored.changeset.session_id != sid
+                ):
+                    raise _record_corrupt()
+                approval = await _fetch_approval_record(conn, change_id)
+                receipt = await _fetch_receipt_record(conn, change_id)
+                if receipt is not None and receipt.change_id != change_id:
+                    raise _record_corrupt()
+                views.append(
+                    ChangeSetView(
+                        stored=stored,
+                        approval=approval,
+                        receipt=receipt,
+                    )
+                )
+        return tuple(views)
 
     async def transition_changeset(
         self,

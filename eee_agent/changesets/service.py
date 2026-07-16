@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+from copy import deepcopy
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -47,6 +48,7 @@ from eee_agent.changesets.repository import (
     ApplyStartResult,
     ChangeSetRepository,
     ChangeSetState,
+    ChangeSetView,
     DecisionResult,
     ProposalResult,
 )
@@ -60,6 +62,7 @@ from eee_agent.runtime.models import EventRecord, canonical_json_dumps
 # per-ChangeSet and explicit; a short window bounds how long a stale approval
 # can be acted on before the clock expires it.
 DEFAULT_APPROVAL_TTL_SECONDS = 300.0
+_PANEL_SUMMARY_ITEM_LIMIT = 12
 
 _TRANSIENT_RECOVERY_CODES = frozenset(
     {
@@ -187,6 +190,80 @@ class ApprovalSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class PanelChangeSetSummary:
+    """Bounded JSON-only ChangeSet state for the docked approval surface."""
+
+    payload: dict[str, object]
+
+    def to_dict(self) -> dict[str, object]:
+        return deepcopy(self.payload)
+
+
+def _approval_panel_summary(approval: ApprovalRecord | None) -> dict | None:
+    if approval is None:
+        return None
+    return {
+        "approval_id": approval.approval_id,
+        "decision": approval.decision.value,
+        "expires_at": approval.expires_at.isoformat(),
+        "decided_at": (
+            approval.decided_at.isoformat()
+            if approval.decided_at is not None
+            else None
+        ),
+        "approved_instance_id": approval.approved_instance_id,
+        "approved_scene_epoch": approval.approved_scene_epoch,
+    }
+
+
+def _receipt_panel_summary(receipt: ChangeReceipt | None) -> dict | None:
+    if receipt is None:
+        return None
+    return {
+        "status": receipt.status.value,
+        "instance_id": receipt.instance_id,
+        "scene_epoch": receipt.scene_epoch,
+        "before_revision": receipt.before_revision,
+        "after_revision": receipt.after_revision,
+        "applied_operation_count": len(receipt.applied_op_ids),
+        "scene_may_have_changed": receipt.scene_may_have_changed,
+        "completed_at": receipt.completed_at.isoformat(),
+    }
+
+
+def _panel_summary(view: ChangeSetView) -> PanelChangeSetSummary:
+    changeset = view.stored.changeset
+    risk = changeset.risk_summary
+    effects = risk.effect_names[:_PANEL_SUMMARY_ITEM_LIMIT]
+    paths = risk.affected_paths[:_PANEL_SUMMARY_ITEM_LIMIT]
+    return PanelChangeSetSummary(
+        {
+            "change_id": changeset.change_id,
+            "run_id": changeset.run_id,
+            "state": view.stored.state.value,
+            "changeset_digest": changeset.digest,
+            "created_at": changeset.created_at.isoformat(),
+            "required_permission": changeset.required_permission.value,
+            "risk": {
+                "operation_count": risk.operation_count,
+                "touches_external_nodes": risk.touches_external_nodes,
+                "changes_wiring": risk.changes_wiring,
+                "requires_backup": risk.requires_backup,
+                "effect_count": len(risk.effect_names),
+                "effect_names": list(effects),
+                "affected_path_count": len(risk.affected_paths),
+                "affected_paths": list(paths),
+                "affected_paths_truncated": (
+                    len(risk.affected_paths) > len(paths)
+                ),
+            },
+            "approval": _approval_panel_summary(view.approval),
+            "receipt": _receipt_panel_summary(view.receipt),
+        }
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class ChangeSetRecoveryResult:
     """One restart/apply reconciliation outcome and its committed events."""
 
@@ -269,6 +346,15 @@ class ChangeSetService:
             approved_scene_epoch=None,
         )
         return await self._repository.propose(changeset, approval)
+
+    async def list_panel_summaries(
+        self, session_id: str, *, limit: int
+    ) -> tuple[PanelChangeSetSummary, ...]:
+        """Return newest bounded approval/receipt summaries for one Session."""
+        views = await self._repository.list_changeset_views(
+            session_id, limit=limit
+        )
+        return tuple(_panel_summary(view) for view in views)
 
     async def approve(
         self,

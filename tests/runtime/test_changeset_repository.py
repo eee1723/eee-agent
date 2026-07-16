@@ -1060,6 +1060,91 @@ def test_list_changesets_scoped_to_session(db_path: Path) -> None:
     _run(scenario())
 
 
+def test_list_changeset_views_is_newest_limited_and_consistent(
+    db_path: Path,
+) -> None:
+    async def scenario() -> None:
+        db, repo = await fresh_repo(db_path)
+        try:
+            older = _changeset(
+                change_id=f"chg_{'a' * 32}",
+                created_at=NOW,
+            )
+            newer = _changeset(
+                change_id=f"chg_{'b' * 32}",
+                created_at=LATER,
+            )
+            await repo.insert_changeset(older)
+            await repo.insert_changeset(
+                newer, state=ChangeSetState.APPLIED
+            )
+            await repo.insert_approval(
+                _approval(
+                    change_id=newer.change_id,
+                    changeset_digest=newer.digest,
+                    decision=ApprovalDecision.CONSUMED,
+                    decided_by="local_user",
+                    decided_at=LATER,
+                    approved_instance_id="hou_instance_1",
+                    approved_scene_epoch=1,
+                )
+            )
+            await repo.insert_receipt(
+                _receipt(change_id=newer.change_id)
+            )
+
+            views = await repo.list_changeset_views(SES, limit=1)
+            assert len(views) == 1
+            assert views[0].stored.changeset.change_id == newer.change_id
+            assert views[0].approval is not None
+            assert views[0].approval.decision is ApprovalDecision.CONSUMED
+            assert views[0].receipt is not None
+            assert views[0].receipt.status is ReceiptStatus.APPLIED
+            with pytest.raises(ValueError):
+                await repo.list_changeset_views(SES, limit=True)
+            with pytest.raises(ValueError):
+                await repo.list_changeset_views(SES, limit=51)
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_list_changeset_views_rejects_cross_identity_receipt_payload(
+    db_path: Path,
+) -> None:
+    async def scenario() -> None:
+        db, repo = await fresh_repo(db_path)
+        try:
+            changeset = _changeset()
+            await repo.insert_changeset(
+                changeset, state=ChangeSetState.APPLIED
+            )
+            await repo.insert_receipt(_receipt())
+            other = _receipt(change_id=f"chg_{'f' * 32}")
+            payload = json.dumps(
+                other.to_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+            async with db.write_transaction() as conn:
+                await conn.execute(
+                    "UPDATE change_receipts SET payload_json = ?, digest = ? "
+                    "WHERE change_id = ?",
+                    (payload, digest, CHG),
+                )
+            with pytest.raises(AgentException) as exc:
+                await repo.list_changeset_views(SES, limit=50)
+            assert exc.value.error.code == "runtime.record_corrupt"
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
 # --------------------------------------------------------------------------
 # restart-safe queries
 # --------------------------------------------------------------------------

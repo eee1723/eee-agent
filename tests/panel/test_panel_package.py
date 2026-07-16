@@ -46,7 +46,6 @@ def test_runtime_panel_keeps_client_only_import_boundary() -> None:
     assert imported.isdisjoint(forbidden)
     for forbidden_text in (
         "changeset.apply",
-        "run.start",
         "workspace.create",
         "hou.selectedNodes",
         "asyncio.run",
@@ -55,6 +54,12 @@ def test_runtime_panel_keeps_client_only_import_boundary() -> None:
     ):
         assert forbidden_text not in source
     assert "query_selection" in source
+    assert '"run.start"' in source
+    assert '"changeset.approve"' in source
+    assert '"changeset.reject"' in source
+    assert 'addTab(self._build_run_tab(), "RUN")' in source
+    assert 'addTab(self._build_approvals_tab(), "APPROVALS")' in source
+    assert 'addTab(self._build_scene_tab(), "SCENE")' in source
 
 
 def test_legacy_chat_panel_remains_present_as_rollback() -> None:
@@ -75,6 +80,7 @@ def test_main_menu_adds_runtime_observer_without_removing_legacy_actions() -> No
         "eee_start_rpc",
     }.issubset(ids)
     text = (ROOT / "MainMenuCommon.xml").read_text(encoding="utf-8")
+    assert "Open Runtime Control" in text
     assert "secure_bridge_host.start()" in text
     assert "runtime_panel.open_panel()" in text
     assert "start_rpc.start()" in text

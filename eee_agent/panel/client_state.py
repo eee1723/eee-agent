@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -34,8 +35,24 @@ _DISCOVERY_FIELDS = frozenset(
         "started_at",
     }
 )
-_READ_ONLY_COMMANDS = frozenset(
-    {"runtime.ping", "session.list", "session.subscribe", "session.snapshot"}
+_SESSION_ID_RE = re.compile(r"^ses_[0-9a-f]{32}$")
+_RUN_ID_RE = re.compile(r"^run_[0-9a-f]{32}$")
+_CHANGE_ID_RE = re.compile(r"^chg_[0-9a-f]{32}$")
+_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_PANEL_COMMANDS = frozenset(
+    {
+        "runtime.ping",
+        "session.list",
+        "session.create",
+        "session.subscribe",
+        "session.snapshot",
+        "run.start",
+        "run.stop",
+        "run.force_stop",
+        "changeset.list",
+        "changeset.approve",
+        "changeset.reject",
+    }
 )
 
 
@@ -158,13 +175,14 @@ def load_runtime_credentials(state_dir: Path | str) -> RuntimeCredentials:
 def build_command(
     request_id: str, command_type: str, payload: Mapping[str, object]
 ) -> str:
-    """Build one canonical Task 17-A read-only Runtime command."""
+    """Build one canonical command from the bounded docked-panel subset."""
     if type(request_id) is not str or not request_id or len(request_id) > 128:
         raise PanelClientError("Runtime request id is invalid.")
-    if command_type not in _READ_ONLY_COMMANDS:
+    if command_type not in _PANEL_COMMANDS:
         raise PanelClientError("Runtime command is not available to this panel.")
     if type(payload) is not dict:
         raise PanelClientError("Runtime command payload is invalid.")
+    _validate_panel_payload(command_type, payload)
     envelope = {
         "protocol": PROTOCOL,
         "kind": "command",
@@ -182,6 +200,78 @@ def build_command(
         )
     except (TypeError, ValueError) as exc:
         raise PanelClientError("Runtime command payload is invalid.") from exc
+
+
+def _exact_keys(payload: dict, keys: set[str]) -> bool:
+    return set(payload) == keys
+
+
+def _valid_id(value: object, pattern: re.Pattern[str]) -> bool:
+    return type(value) is str and pattern.fullmatch(value) is not None
+
+
+def _validate_panel_payload(command_type: str, payload: dict) -> None:
+    valid = False
+    if command_type == "runtime.ping":
+        valid = _exact_keys(payload, set())
+    elif command_type == "session.list":
+        valid = (
+            _exact_keys(payload, set())
+            or (
+                _exact_keys(payload, {"include_archived"})
+                and type(payload["include_archived"]) is bool
+            )
+        )
+    elif command_type == "session.create":
+        title = payload.get("title")
+        valid = (
+            _exact_keys(payload, {"title"})
+            and type(title) is str
+            and bool(title.strip())
+            and len(title) <= 200
+        )
+    elif command_type in ("session.subscribe",):
+        valid = (
+            _exact_keys(payload, {"session_id", "last_seq"})
+            and _valid_id(payload["session_id"], _SESSION_ID_RE)
+            and type(payload["last_seq"]) is int
+            and payload["last_seq"] >= 0
+        )
+    elif command_type == "session.snapshot":
+        valid = (
+            _exact_keys(payload, {"session_id"})
+            and _valid_id(payload["session_id"], _SESSION_ID_RE)
+        )
+    elif command_type == "run.start":
+        text = payload.get("user_input")
+        valid = (
+            _exact_keys(payload, {"session_id", "user_input"})
+            and _valid_id(payload["session_id"], _SESSION_ID_RE)
+            and type(text) is str
+            and bool(text.strip())
+            and len(text) <= 16_000
+        )
+    elif command_type in ("run.stop", "run.force_stop"):
+        valid = (
+            _exact_keys(payload, {"run_id"})
+            and _valid_id(payload["run_id"], _RUN_ID_RE)
+        )
+    elif command_type == "changeset.list":
+        valid = (
+            _exact_keys(payload, {"session_id", "limit"})
+            and _valid_id(payload["session_id"], _SESSION_ID_RE)
+            and type(payload["limit"]) is int
+            and 1 <= payload["limit"] <= 50
+        )
+    elif command_type in ("changeset.approve", "changeset.reject"):
+        valid = (
+            _exact_keys(payload, {"change_id", "changeset_digest"})
+            and _valid_id(payload["change_id"], _CHANGE_ID_RE)
+            and type(payload["changeset_digest"]) is str
+            and _DIGEST_RE.fullmatch(payload["changeset_digest"]) is not None
+        )
+    if not valid:
+        raise PanelClientError("Runtime command payload is invalid.")
 
 
 def parse_runtime_message(raw: str | bytes) -> Mapping[str, object]:

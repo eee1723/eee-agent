@@ -11,6 +11,13 @@ from eee_agent.panel.client_state import (
     runtime_state_dir,
     snapshot_boundary,
 )
+from eee_agent.panel.runtime_state import (
+    RuntimePanelState,
+    approval_is_actionable,
+    changeset_refresh_required,
+    parse_changeset_list,
+    parse_session_snapshot,
+)
 
 __all__ = [
     "PROTOCOL",
@@ -22,4 +29,9 @@ __all__ = [
     "parse_runtime_message",
     "runtime_state_dir",
     "snapshot_boundary",
+    "RuntimePanelState",
+    "approval_is_actionable",
+    "changeset_refresh_required",
+    "parse_changeset_list",
+    "parse_session_snapshot",
 ]

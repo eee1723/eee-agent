@@ -24,8 +24,8 @@ Examples:
 
 Restart Houdini. The **EEE Agent** menu contains:
 
-- **Open Runtime Observer** — starts the authenticated Secure Bridge and opens
-  the dockable read-only Runtime/selection panel
+- **Open Runtime Control** — starts the authenticated Secure Bridge and opens
+  the dockable Session/Run/approval/scene panel
 - **Start Secure Bridge Only**
 - **Stop Secure Bridge**
 - **Open Agent Panel** — legacy path: starts rpyc and opens the old chat panel
@@ -47,18 +47,23 @@ Start Runtime in a terminal at the repository root:
 uv run --frozen --extra eval python -m eee_agent.runtime serve
 ```
 
-Then choose **EEE Agent → Open Runtime Observer** in Houdini.
+Then choose **EEE Agent → Open Runtime Control** in Houdini.
 
-The observer:
+The Runtime control panel:
 
 - authenticates to Runtime through `runtime.json` and `runtime.token`;
 - reconnects with the remembered per-Session `last_seq`;
+- creates/selects Sessions and starts/stops bounded Runtime Runs;
+- restores Run status and output from snapshots plus live events;
+- displays bounded ChangeSet risk, approval, receipt, and recovery evidence;
+- sends only exact `changeset.approve` or `changeset.reject` decisions for
+  trusted proposals;
 - reads selection through typed `workspace.inspect`, then a bound
   `scene.query`;
 - displays HIP, Houdini instance, scene epoch, revision, node path/type, lock
   state, and bounded geometry statistics;
-- does not start Runs, mutate Sessions or Workspaces, approve changes, Apply
-  changes, open SQLite, or modify the Houdini scene.
+- does not expose `changeset.apply`, operation JSON, parameter values, direct
+  HOM, SQLite, or an unrestricted Houdini write route.
 
 The Secure Bridge:
 

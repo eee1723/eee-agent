@@ -7,7 +7,7 @@
     <subMenu id="eee_agent_menu">
       <label>EEE Agent</label>
       <scriptItem id="eee_open_runtime_panel">
-        <label>Open Runtime Observer</label>
+        <label>Open Runtime Control</label>
         <scriptCode><![CDATA[
 import sys, hou
 _root = hou.getenv("EEE_PATH")
@@ -107,8 +107,8 @@ import hou
 root = hou.getenv("EEE_PATH") or "<repo>"
 hou.ui.displayMessage(
     "EEE Agent menu\n\n"
-    "Open Runtime Observer = start the authenticated Secure Bridge + open "
-    "the dockable read-only Runtime/selection panel.\n\n"
+    "Open Runtime Control = start the authenticated Secure Bridge + open "
+    "the dockable Session/Run/approval/scene panel.\n\n"
     "Open Agent Panel = legacy path: start RPC bridge + open the chat panel.\n"
     "Needs: agent venv at <root>/.venv + DEEPSEEK_API_KEY in <root>/.env\n"
     "(or EEE_LLM_PROVIDER=anthropic + ANTHROPIC_API_KEY).\n\n"

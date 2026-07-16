@@ -32,6 +32,7 @@ COMMAND_TYPES = frozenset(
         "run.start",
         "run.stop",
         "run.force_stop",
+        "changeset.list",
         "changeset.approve",
         "changeset.reject",
         "workspace.create",

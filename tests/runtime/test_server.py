@@ -173,6 +173,29 @@ class FakeService:
         }
         self.approve_side_effect: Any = None
         self.reject_side_effect: Any = None
+        self.changeset_list_result: tuple[dict, ...] = (
+            {
+                "change_id": f"chg_{'d' * 32}",
+                "run_id": RID,
+                "state": "AwaitingApproval",
+                "changeset_digest": "a" * 64,
+                "created_at": NOW.isoformat(),
+                "required_permission": "OwnedWorkspace",
+                "risk": {
+                    "operation_count": 1,
+                    "touches_external_nodes": False,
+                    "changes_wiring": False,
+                    "requires_backup": False,
+                    "effect_count": 1,
+                    "effect_names": ["node.create"],
+                    "affected_path_count": 1,
+                    "affected_paths": ["/obj/ws/new"],
+                    "affected_paths_truncated": False,
+                },
+                "approval": None,
+                "receipt": None,
+            },
+        )
         self.workspace_lifecycle_result = _workspace_summary()
         self.workspace_inspection_result = _workspace_inspection()
         self.workspace_side_effect: Any = None
@@ -232,6 +255,12 @@ class FakeService:
             self.approve_side_effect = None
             raise exc
         return self.approve_result
+
+    async def list_changesets(
+        self, session_id: str, *, limit: int
+    ) -> tuple[dict, ...]:
+        self._record("list_changesets", session_id=session_id, limit=limit)
+        return self.changeset_list_result
 
     async def reject_changeset(
         self, change_id: str, changeset_digest: str
@@ -767,6 +796,62 @@ def test_run_force_stop_routing(service, identity) -> None:
 
 _CHG = f"chg_{'d' * 32}"
 _DIGEST = "a" * 64
+
+
+def test_changeset_list_routing(service, identity) -> None:
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(
+                _uri(s),
+                additional_headers=_headers(identity),
+                compression=None,
+            ) as ws:
+                resp = await _request(
+                    ws,
+                    "r1",
+                    "changeset.list",
+                    {"session_id": SID, "limit": 50},
+                )
+                assert resp["ok"] is True
+                assert _last(service, "list_changesets") == {
+                    "session_id": SID,
+                    "limit": 50,
+                }
+                assert resp["result"]["changesets"] == list(
+                    service.changeset_list_result
+                )
+
+    _run(scenario())
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"session_id": SID},
+        {"limit": 50},
+        {"session_id": SID, "limit": 0},
+        {"session_id": SID, "limit": 51},
+        {"session_id": SID, "limit": True},
+        {"session_id": "ses_bad", "limit": 50},
+        {"session_id": SID, "limit": 50, "extra": False},
+    ],
+)
+def test_changeset_list_rejects_invalid_payload(service, identity, payload) -> None:
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(
+                _uri(s),
+                additional_headers=_headers(identity),
+                compression=None,
+            ) as ws:
+                resp = await _request(ws, "r1", "changeset.list", payload)
+                assert resp["ok"] is False
+                assert resp["error"]["code"] == "protocol.invalid_envelope"
+                assert not any(
+                    name == "list_changesets" for name, _ in service.calls
+                )
+
+    _run(scenario())
 
 
 def _approve_payload(**overrides) -> dict:
