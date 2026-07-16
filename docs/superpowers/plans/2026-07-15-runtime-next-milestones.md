@@ -164,9 +164,9 @@ included in its focused local commit. See
 
 **Dependency:** Runtime protocol plus the read-only portion of Task 15. The read-only panel slice may start before Task 16; its write/approval slice must wait for Task 16.
 
-**Current state:** Task 17-A is accepted after its real Houdini
-dock/restart/selection/zero-mutation gate. Task 17-B now has its own bounded
-design and plan and is implemented/offline-accepted in `13e0782`. The panel
+**Current state:** Task 17-A and Task 17-B are accepted after their real
+Houdini gates. Task 17-B has its own bounded design and plan and was
+implemented in `13e0782`. The panel
 creates/selects Sessions, starts/stops Runs, rebuilds bounded Run output and
 activity from snapshots plus ordered events, lists durable bounded ChangeSet
 summaries, and sends exact approve/reject decisions. The approval surface never
@@ -188,8 +188,10 @@ Run Request `QPlainTextEdit` still failed Chinese IME while `QLineEdit` worked;
 editor. The current focused gate passes 174 tests and the full suite passes
 2106 tests with the same single optional WSL skip. Populated Run and approval
 states were also rendered with Houdini
-21.0.440's bundled PySide6 at a narrow dock size. Real Houdini
-Run/reconnect/stop/empty-approval acceptance is the remaining Task 17-B gate.
+21.0.440's bundled PySide6 at a narrow dock size. Real Houdini Chinese IME,
+default Session, Run/reconnect/restart/stop, empty-approval/no-Apply, Scene
+regression, and zero-mutation acceptance all passed. Task 18 remains a separate
+bounded design and plan.
 
 ### 17-A: Read-only selection inspector (earliest Houdini UI test)
 
@@ -209,10 +211,10 @@ Run/reconnect/stop/empty-approval acceptance is the remaining Task 17-B gate.
 
 **Acceptance gate for 17-A:** Houdini UI smoke, reconnect without loss or duplicate, selection path/type parity, scene-epoch display, and no mutation from a read-only inspection session.
 
-**Acceptance gate for 17-B:** real Runtime Run/restart/stop recovery,
-empty-approval state before Task 18, Scene inspector regression, and no scene or
-repository mutation. Approval/stale/receipt branches are covered offline until
-Task 18 can produce trusted proposals.
+**Acceptance gate for 17-B:** passed. Real Runtime Run/restart/stop recovery,
+empty-approval state before Task 18, Scene inspector regression, and no scene
+or repository mutation were confirmed. Approval/stale/receipt branches remain
+covered offline until Task 18 can produce trusted proposals.
 
 ## Task 18: Strict modeling capability
 

@@ -8,8 +8,8 @@ don't re-discover them). Mirrors the auto-memory; kept in-repo so it travels wit
 
 The current source of truth is
 `docs/handoffs/2026-07-16-runtime-17b-transfer.md`. The active branch is
-`feature/runtime`. Task 16-E and Task 17-A are accepted. Task 17-B is
-implemented and offline-accepted in `13e0782`: the docked panel now creates
+`feature/runtime`. Task 16-E, Task 17-A, and Task 17-B are accepted. Task 17-B
+was implemented in `13e0782`: the docked panel now creates
 and selects Sessions, starts/stops Runs, recovers bounded Run state/output,
 lists bounded durable ChangeSet summaries, and sends exact approve/reject
 decisions without exposing Apply. The first real test exposed binary Runtime
@@ -27,9 +27,13 @@ creates the Session. The next real test showed embedded `QPlainTextEdit` still
 failed Chinese input while the title `QLineEdit` worked; `5174378` replaces
 Run Request with an IME-safe 16000-character `QLineEdit` and consumes Enter so
 Runs start only by button. Its full offline baseline is 2106 passed, 1 skipped;
-the focused panel/server gate passes 174 tests.
-Real
-Houdini Run/reconnect/stop/empty-approval acceptance is the next gate. Do not
+the focused panel/server gate passes 174 tests. The complete real Houdini
+21.0.440 gate passed: Chinese IME/default Session behavior, read-only Run,
+high-volume panel reopen, Runtime restart recovery, cooperative Stop to
+Cancelled, empty approvals/no Apply, Scene regression, and zero mutation.
+The acceptance result is
+`docs/superpowers/reviews/2026-07-16-task17-b-review-result.md`. Task 18 has not
+started and requires its own bounded design and plan. Do not
 rewrite or discard the accepted Task 16-E/17-A commits, `13e0782`, or
 the Task 17-B hotfixes
 `423a0e4`/`15b6c00`/`73c6214`/`7d8d552`/`5174378`,

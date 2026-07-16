@@ -1,4 +1,4 @@
-# Runtime Task 17-B Offline Handoff - 2026-07-16
+# Runtime Task 17-B Accepted Handoff - 2026-07-16
 
 ## Current state
 
@@ -14,7 +14,9 @@
 - IME-safe Run Request editor: `5174378`
 - Focused panel/server gate: 174 passed
 - Full offline baseline: 2106 passed, 1 skipped
-- Real Houdini Task 17-B gate: pending
+- Real Houdini Task 17-B gate: passed
+- Acceptance result:
+  `docs/superpowers/reviews/2026-07-16-task17-b-review-result.md`
 
 Do not rewrite the accepted Task 16-E/17-A commits, `13e0782`, `423a0e4`,
 `15b6c00`, `73c6214`, `7d8d552`, or `5174378`, merge `main`, push, or weaken
@@ -175,7 +177,9 @@ Session preference test:  fallback/persist/reopen passed; TEST restored
 The only skipped test is the existing optional WSL/Windows environment probe.
 No live LLM or Houdini scene is required by the offline suite.
 
-## Required real Houdini acceptance
+## Completed real Houdini acceptance checklist
+
+The following checklist was completed with Houdini 21.0.440:
 
 1. Restart Houdini so the corrected Python module reloads.
 2. Start Runtime from the repository:
@@ -207,6 +211,11 @@ No live LLM or Houdini scene is required by the offline suite.
 9. Recheck zero/one/multiple Scene selections and the epoch/node facts.
 10. Confirm no scene or repository file mutation attributable to the panel.
 
-After the user reports the complete checklist, add a Task 17-B review result
-with the exact evidence. Do not start Task 18 as a side effect of acceptance;
-it requires its own bounded design and plan.
+The user reported “全部通过”. Runtime evidence confirms that the final
+cooperative Stop Run `run_fb84a6c998be4c0e81c5fab6cabc49a4` in Session
+`ses_336b418713ad481e9c7d7c6e2c436899` is `Cancelled`, snapshot boundary 1156
+has no active Run, and every test Session has zero ChangeSets. Runtime restart
+recovery used PID `39348` and process nonce `S1A3-yWq62Qh89PRNu0iww`.
+
+Task 17-B is accepted. Do not start Task 18 as a side effect of acceptance; it
+requires its own bounded design and plan.

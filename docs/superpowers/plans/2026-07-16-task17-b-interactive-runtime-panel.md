@@ -1,6 +1,7 @@
 # Task 17-B Interactive Runtime Panel Plan
 
-Status: implemented and offline-accepted in `13e0782`, with Qt WebSocket frame
+Status: accepted after the complete real Houdini 21.0.440 gate. Implemented in
+`13e0782`, with Qt WebSocket frame
 delivery corrected in `423a0e4` and high-volume Session reopen corrected in
 `15b6c00` after the first real tests. Chinese IME and remembered/default
 Session selection are corrected in `73c6214`; `7d8d552` additionally prevents
@@ -8,8 +9,9 @@ IME candidate-confirmation Enter from accepting the Session title dialog.
 `5174378` replaces the embedded Run Request `QPlainTextEdit` with the
 IME-verified single-line editor. The focused panel/server gate passes 174
 tests and the full suite passes 2106 tests with the single existing optional
-WSL skip. Real Houdini
-Run/reconnect/stop/empty-approval acceptance is pending.
+WSL skip. Real Houdini Run/reconnect/stop/empty-approval, Scene regression,
+Chinese IME, default Session, and zero-mutation acceptance all passed. See
+`docs/superpowers/reviews/2026-07-16-task17-b-review-result.md`.
 
 ## Boundary
 
