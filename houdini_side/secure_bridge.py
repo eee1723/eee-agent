@@ -60,6 +60,13 @@ from eee_agent.houdini_bridge.contracts import (
     SelectedNode,
     parse_request,
 )
+from eee_agent.houdini_bridge.workspaces import (
+    WORKSPACE_INSPECT_OPERATION,
+    WORKSPACE_V1,
+    WorkspaceInspectError,
+    WorkspaceInspectResponse,
+    parse_workspace_inspect_request,
+)
 from eee_agent.houdini_bridge.queue import (
     MainThreadReadQueue,
     QueueItemCancelled,
@@ -452,6 +459,13 @@ def _make_executor(adapter: "HoudiniSceneAdapter") -> object:
     return ChangeSetExecutor(adapter)
 
 
+def _make_workspace_inspector(adapter: "HoudiniSceneAdapter") -> object:
+    """Lazily build the read-only stable-ID workspace inspector."""
+    from houdini_side.workspace_inspector import WorkspaceInspector
+
+    return WorkspaceInspector(adapter._hou, binding_provider=adapter.binding)
+
+
 class _QueuedError:
     """A bounded bridge error produced by queue/operation failure.
 
@@ -476,11 +490,11 @@ class BridgeServer:
     Lifecycle is split: identity publication and shutdown are synchronous
     methods owned by this object; the TCP listener is owned by the host process
     (which calls ``asyncio.start_server(server.handle_connection, ...)``). The
-    handler authenticates the first hello frame, parses requests through the
-    frozen ``scene.query``-only :func:`parse_request`, submits the operation to
-    a :class:`MainThreadReadQueue`, awaits its result, and serializes a frozen
-    :class:`BridgeResponse`. It never dispatches arbitrary names, never returns a
-    HOM object, and never mutates the scene.
+    handler authenticates the first hello frame, dispatches only explicit typed
+    scene/workspace/ChangeSet operations, submits every operation to one
+    :class:`MainThreadReadQueue`, awaits its result, and serializes a frozen
+    response DTO. It never dispatches arbitrary names or returns a HOM object;
+    the workspace inspection path never mutates the scene.
     """
 
     def __init__(
@@ -490,7 +504,7 @@ class BridgeServer:
         identity: BridgeIdentity,
         state_dir: Path | str,
         queue: MainThreadReadQueue | None = None,
-        capabilities: tuple[str, ...] = (CHANGESET_V1,),
+        capabilities: tuple[str, ...] = (CHANGESET_V1, WORKSPACE_V1),
     ) -> None:
         if not isinstance(adapter, HoudiniSceneAdapter):
             raise TypeError("adapter must be a HoudiniSceneAdapter")
@@ -506,6 +520,7 @@ class BridgeServer:
         self._queue = queue if queue is not None else MainThreadReadQueue()
         self._preflight = _make_preflight_adapter(adapter)
         self._executor = _make_executor(adapter)
+        self._workspace_inspector = _make_workspace_inspector(adapter)
         self._closed = False
         self._writers: list[object] = []
         self._listener: object | None = None
@@ -696,10 +711,11 @@ class BridgeServer:
     async def _serve(self, frame_bytes: bytes) -> bytes:
         """Strict typed dispatch: route one request frame to its typed handler.
 
-        Only ``scene.query`` and ``changeset.preflight`` are served in this slice.
+        Accepted operations are ``scene.query``, ``workspace.inspect``, and the
+        typed ChangeSet preflight/apply/receipt handlers.
         The operation name is read through strict JSON (rejecting malformed,
         non-UTF-8, and duplicate-key frames) and dispatched explicitly — there is
-        no arbitrary name dispatch surface. Both operations share the single
+        no arbitrary name dispatch surface. All operations share the single
         bounded main-thread FIFO so HOM access never interleaves with a write.
         """
         obj = _loads_object(frame_bytes)
@@ -713,6 +729,18 @@ class BridgeServer:
         operation = obj.get("operation")
         if operation == "scene.query":
             return await self._serve_scene_query(frame_bytes)
+        if operation == WORKSPACE_INSPECT_OPERATION:
+            if WORKSPACE_V1 not in self._capabilities:
+                request_id = obj.get("request_id")
+                if type(request_id) is not str:
+                    request_id = _MALFORMED_REQUEST_ID
+                return self._error_envelope(
+                    request_id,
+                    code="bridge.capability_unavailable",
+                    category="capability",
+                    message_for_user="The bridge does not support workspace inspection.",
+                )
+            return await self._serve_workspace_inspect(frame_bytes)
         if operation == "changeset.preflight":
             # Admission: an old server that does not advertise changeset.v1 must
             # fail closed for preflight BEFORE any HOM access or payload parsing.
@@ -797,6 +825,40 @@ class BridgeServer:
                 retryable=result.retryable,
             )
         response = BridgeResponse(request_id=request_id, result=result, error=None)
+        return response.to_json().encode("utf-8")
+
+    async def _serve_workspace_inspect(self, frame_bytes: bytes) -> bytes:
+        """Parse and serialize one read-only workspace inspection on the FIFO."""
+        try:
+            request = parse_workspace_inspect_request(frame_bytes)
+        except (TypeError, ValueError):
+            return self._error_envelope(
+                _MALFORMED_REQUEST_ID,
+                code="bridge.invalid_request",
+                category="protocol",
+                message_for_user="The workspace inspection request is not valid.",
+            )
+        request_id = request.request_id
+
+        def operation() -> object:
+            return self._workspace_inspector.inspect(request)  # type: ignore[union-attr]
+
+        result = await self._run_on_queue(
+            request_id, request.deadline_ms, operation
+        )
+        if isinstance(result, _QueuedError):
+            return self._error_envelope(
+                request_id,
+                code=result.code,
+                category=result.category,
+                message_for_user=result.message_for_user,
+                retryable=result.retryable,
+            )
+        response = WorkspaceInspectResponse(
+            request_id=request_id,
+            result=result,  # type: ignore[arg-type]
+            error=None,
+        )
         return response.to_json().encode("utf-8")
 
     async def _serve_preflight(self, frame_bytes: bytes) -> bytes:
@@ -946,6 +1008,10 @@ class BridgeServer:
             )
             return await future  # type: ignore[func-returns-value]
         except HoudiniAdapterError as exc:
+            return _QueuedError(
+                exc.code, exc.category, exc.message_for_user, exc.retryable
+            )
+        except WorkspaceInspectError as exc:
             return _QueuedError(
                 exc.code, exc.category, exc.message_for_user, exc.retryable
             )

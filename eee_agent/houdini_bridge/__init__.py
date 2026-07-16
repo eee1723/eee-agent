@@ -56,6 +56,20 @@ _LAZY_PREFLIGHT = {
     "validate_capabilities",
 }
 
+_LAZY_WORKSPACES = {
+    "WORKSPACE_INSPECT_OPERATION",
+    "WORKSPACE_V1",
+    "WorkspaceInspectRequest",
+    "WorkspaceInspectError",
+    "WorkspaceInspectResponse",
+    "WorkspaceInspectResult",
+    "WorkspaceInspectionConflict",
+    "WorkspaceInspectionUnavailable",
+    "WorkspaceNodeObservation",
+    "parse_workspace_inspect_request",
+    "parse_workspace_inspect_response",
+}
+
 __all__ = [
     "APPLY_OPERATION",
     "ApplyRequest",
@@ -90,6 +104,17 @@ __all__ = [
     "parse_request",
     "parse_response",
     "validate_capabilities",
+    "WORKSPACE_INSPECT_OPERATION",
+    "WORKSPACE_V1",
+    "WorkspaceInspectRequest",
+    "WorkspaceInspectError",
+    "WorkspaceInspectResponse",
+    "WorkspaceInspectResult",
+    "WorkspaceInspectionConflict",
+    "WorkspaceInspectionUnavailable",
+    "WorkspaceNodeObservation",
+    "parse_workspace_inspect_request",
+    "parse_workspace_inspect_response",
 ]
 
 
@@ -97,6 +122,12 @@ def __getattr__(name: str) -> object:
     """Lazily resolve additive changeset symbols to avoid an import cycle."""
     if name in _LAZY_PREFLIGHT:
         from eee_agent.houdini_bridge import changesets as _mod
+
+        value = getattr(_mod, name)
+        globals()[name] = value
+        return value
+    if name in _LAZY_WORKSPACES:
+        from eee_agent.houdini_bridge import workspaces as _mod
 
         value = getattr(_mod, name)
         globals()[name] = value

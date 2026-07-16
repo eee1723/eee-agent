@@ -50,6 +50,12 @@ from eee_agent.houdini_bridge.contracts import (
     SceneQueryResult,
     parse_response,
 )
+from eee_agent.houdini_bridge.workspaces import (
+    WORKSPACE_V1,
+    WorkspaceInspectRequest,
+    WorkspaceInspectResult,
+    parse_workspace_inspect_response,
+)
 from eee_agent.runtime.models import canonical_json_dumps
 
 _LOOPBACK_HOST = "127.0.0.1"
@@ -412,6 +418,52 @@ class BridgeClient:
                 retryable=err.retryable,
                 technical_detail_ref=err.technical_detail_ref,
             )
+        return response.result
+
+    async def inspect_workspace(
+        self, request: WorkspaceInspectRequest
+    ) -> WorkspaceInspectResult:
+        """Return bounded live facts for selection or manifest workspace mode."""
+        if type(request) is not WorkspaceInspectRequest:
+            raise TypeError("request must be a WorkspaceInspectRequest")
+        if WORKSPACE_V1 not in self._capabilities:
+            raise _client_error(
+                "bridge.capability_unavailable",
+                "capability",
+                "The bridge does not support workspace inspection.",
+                retryable=False,
+            )
+        if not self._helloed or self._transport is None:
+            raise RuntimeError(
+                "BridgeClient.inspect_workspace() requires a successful open()/hello"
+            )
+        response_bytes = await self._exchange(request.to_json(), request.deadline_ms)
+        try:
+            response = parse_workspace_inspect_response(response_bytes)
+        except (TypeError, ValueError) as exc:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response is not a valid workspace inspection envelope.",
+            ) from exc
+        if response.request_id != request.request_id:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response does not match the request id.",
+            )
+        if response.error is not None:
+            err = response.error
+            raise BridgeClientError(
+                code=err.code,
+                category=err.category,
+                message_for_user=err.message_for_user,
+                retryable=err.retryable,
+                technical_detail_ref=err.technical_detail_ref,
+            )
+        assert response.result is not None
         return response.result
 
     async def apply(self, request: ApplyRequest):  # type: ignore[no-untyped-def]

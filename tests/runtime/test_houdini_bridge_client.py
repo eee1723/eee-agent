@@ -692,3 +692,338 @@ async def test_close_clears_capabilities() -> None:
     assert client.capabilities == ("changeset.v1",)
     await client.close()
     assert client.capabilities == ()
+
+
+# ===========================================================================
+# Task 16-B2b-1: workspace capability and typed inspection
+# ===========================================================================
+
+from eee_agent.houdini_bridge.workspaces import (  # noqa: E402
+    WORKSPACE_V1,
+    WorkspaceInspectRequest,
+    WorkspaceInspectResponse,
+    WorkspaceInspectResult,
+    WorkspaceNodeObservation,
+)
+
+
+def _workspace_request(request_id: str = "req_workspace") -> WorkspaceInspectRequest:
+    return WorkspaceInspectRequest(
+        request_id=request_id,
+        deadline_ms=5000,
+        scene_epoch=1,
+        mode="selection",
+        manifest=None,
+    )
+
+
+def _workspace_result() -> WorkspaceInspectResult:
+    return WorkspaceInspectResult.build(
+        binding=SceneBinding(
+            instance_id="hou_instance_1",
+            scene_epoch=1,
+            hip_path=None,
+            observed_revision="sha256:workspace-scene",
+        ),
+        mode="selection",
+        observations=(
+            WorkspaceNodeObservation(
+                path="/obj/geo1",
+                node_type="geo",
+                parent_path="/obj",
+                is_locked=False,
+                workspace_id=None,
+                node_id=None,
+                capability=None,
+                role=None,
+                schema_version=None,
+                created_by_run=None,
+            ),
+        ),
+    )
+
+
+def _workspace_success_frame(request_id: str = "req_workspace") -> bytes:
+    response = WorkspaceInspectResponse(
+        request_id=request_id,
+        result=_workspace_result(),
+        error=None,
+    )
+    return _frame(response.to_json())
+
+
+@async_test
+async def test_workspace_capability_is_stored_with_existing_capability() -> None:
+    fake = FakeTransport(
+        inbox=_ack_frame(caps=["changeset.v1", "workspace.v1"])
+    )
+    client = _client(fake)
+    await client.open()
+    assert client.capabilities == (CHANGESET_V1, WORKSPACE_V1)
+    await client.close()
+
+
+@async_test
+async def test_workspace_inspect_without_capability_sends_no_request_frame() -> None:
+    fake = FakeTransport(inbox=_ack_frame(caps=["changeset.v1"]))
+    client = _client(fake)
+    await client.open()
+    assert len(_parse_frames(bytes(fake.outbox))) == 1  # hello only
+    with pytest.raises(BridgeClientError) as exc:
+        await client.inspect_workspace(_workspace_request())
+    assert exc.value.code == "bridge.capability_unavailable"
+    assert len(_parse_frames(bytes(fake.outbox))) == 1
+    await client.close()
+
+
+@async_test
+async def test_workspace_inspect_round_trip_returns_typed_result() -> None:
+    fake = FakeTransport(
+        inbox=_ack_frame(caps=["changeset.v1", "workspace.v1"])
+        + _workspace_success_frame()
+    )
+    client = _client(fake)
+    await client.open()
+    result = await client.inspect_workspace(_workspace_request())
+    assert result == _workspace_result()
+    frames = _parse_frames(bytes(fake.outbox))
+    assert json.loads(frames[1])["operation"] == "workspace.inspect"
+    await client.close()
+
+
+@async_test
+async def test_workspace_inspect_request_id_mismatch_aborts_connection() -> None:
+    fake = FakeTransport(
+        inbox=_ack_frame(caps=["changeset.v1", "workspace.v1"])
+        + _workspace_success_frame("other")
+    )
+    client = _client(fake)
+    await client.open()
+    with pytest.raises(BridgeClientError) as exc:
+        await client.inspect_workspace(_workspace_request())
+    assert exc.value.code == "bridge.invalid_request"
+    assert fake.close_count >= 1
+
+
+# ===========================================================================
+# Task 16-B2b-1: production workspace provider over discovered short clients
+# ===========================================================================
+
+from eee_agent.houdini_bridge.workspace_provider import (  # noqa: E402
+    BridgeWorkspaceFactProvider,
+)
+from eee_agent.houdini_bridge.workspaces import (  # noqa: E402
+    WorkspaceInspectionConflict,
+    WorkspaceInspectionUnavailable,
+)
+
+
+class _ProviderClient:
+    def __init__(
+        self,
+        *,
+        result: WorkspaceInspectResult | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        self.result = result or _workspace_result()
+        self.error = error
+        self.requests: list[WorkspaceInspectRequest] = []
+        self.entered = 0
+        self.exited = 0
+
+    async def __aenter__(self) -> "_ProviderClient":
+        self.entered += 1
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:  # type: ignore[no-untyped-def]
+        self.exited += 1
+
+    async def inspect_workspace(
+        self, request: WorkspaceInspectRequest
+    ) -> WorkspaceInspectResult:
+        self.requests.append(request)
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+def test_workspace_provider_selection_uses_one_discovered_short_client(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _ProviderClient()
+    seen: list[Path] = []
+
+    def from_state_dir(state_dir: Path) -> _ProviderClient:
+        seen.append(Path(state_dir))
+        return fake
+
+    monkeypatch.setattr(BridgeClient, "from_state_dir", staticmethod(from_state_dir))
+    provider = BridgeWorkspaceFactProvider(tmp_path, deadline_ms=4321)
+    monkeypatch.setattr(provider, "_handoff_exists", lambda: True)
+    result = asyncio.run(provider.inspect_selection(7))
+    assert result == fake.result
+    assert seen == [tmp_path]
+    assert fake.entered == fake.exited == 1
+    request = fake.requests[0]
+    assert request.mode == "selection"
+    assert request.manifest is None
+    assert request.scene_epoch == 7
+    assert request.deadline_ms == 4321
+
+
+def test_workspace_provider_manifest_carries_exact_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _ProviderClient()
+    monkeypatch.setattr(
+        BridgeClient,
+        "from_state_dir",
+        staticmethod(lambda _state_dir: fake),
+    )
+    from datetime import datetime, timezone
+
+    from eee_agent.changesets import OwnedNodeRef, WorkspaceManifest
+
+    owned = OwnedNodeRef(
+        node_id="node_root",
+        path="/obj/owned",
+        node_type="geo",
+        parent_path="/obj",
+        capability="modeling",
+        role="root",
+    )
+    manifest = WorkspaceManifest.build(
+        workspace_id=f"ws_{'2' * 32}",
+        session_id=f"ses_{'0' * 32}",
+        instance_id="hou_instance_1",
+        scene_epoch=1,
+        roots=(owned,),
+        nodes=(owned,),
+        created_by_run=f"run_{'1' * 32}",
+        updated_at=datetime(2026, 7, 16, tzinfo=timezone.utc),
+    )
+    provider = BridgeWorkspaceFactProvider(tmp_path)
+    monkeypatch.setattr(provider, "_handoff_exists", lambda: True)
+    asyncio.run(provider.inspect_manifest(manifest, None))
+    request = fake.requests[0]
+    assert request.mode == "manifest"
+    assert request.manifest is manifest
+    assert request.scene_epoch is None
+
+
+def test_workspace_provider_missing_handoff_is_ordinary_unavailable(
+    tmp_path: Path,
+) -> None:
+    provider = BridgeWorkspaceFactProvider(tmp_path)
+    with pytest.raises(WorkspaceInspectionUnavailable):
+        asyncio.run(provider.inspect_selection(None))
+
+
+def test_workspace_provider_maps_exact_identity_conflict(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _ProviderClient(
+        error=BridgeClientError(
+            code="workspace.identity_conflict",
+            category="validation",
+            message_for_user="ambiguous",
+            retryable=False,
+        )
+    )
+    monkeypatch.setattr(
+        BridgeClient,
+        "from_state_dir",
+        staticmethod(lambda _state_dir: fake),
+    )
+    provider = BridgeWorkspaceFactProvider(tmp_path)
+    monkeypatch.setattr(provider, "_handoff_exists", lambda: True)
+    with pytest.raises(WorkspaceInspectionConflict):
+        asyncio.run(provider.inspect_selection(None))
+    assert fake.exited == 1
+
+
+def test_workspace_provider_does_not_hide_protocol_corruption(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    original = BridgeClientError(
+        code="bridge.invalid_request",
+        category="protocol",
+        message_for_user="bad response",
+        retryable=False,
+    )
+    fake = _ProviderClient(error=original)
+    monkeypatch.setattr(
+        BridgeClient,
+        "from_state_dir",
+        staticmethod(lambda _state_dir: fake),
+    )
+    provider = BridgeWorkspaceFactProvider(tmp_path)
+    monkeypatch.setattr(provider, "_handoff_exists", lambda: True)
+    with pytest.raises(BridgeClientError) as exc:
+        asyncio.run(provider.inspect_selection(None))
+    assert exc.value is original
+
+
+class _HangingProviderClient(_ProviderClient):
+    async def __aenter__(self) -> "_HangingProviderClient":
+        await asyncio.Event().wait()
+        return self  # pragma: no cover
+
+
+def test_workspace_provider_deadline_covers_open_and_hello(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _HangingProviderClient()
+    monkeypatch.setattr(
+        BridgeClient,
+        "from_state_dir",
+        staticmethod(lambda _state_dir: fake),
+    )
+    provider = BridgeWorkspaceFactProvider(tmp_path, deadline_ms=10)
+    monkeypatch.setattr(provider, "_handoff_exists", lambda: True)
+
+    async def scenario() -> None:
+        with pytest.raises(WorkspaceInspectionUnavailable):
+            await asyncio.wait_for(provider.inspect_selection(None), timeout=0.5)
+
+    asyncio.run(scenario())
+
+
+class _NetworkFailingProviderClient(_ProviderClient):
+    async def __aenter__(self) -> "_NetworkFailingProviderClient":
+        raise OSError("connection refused")
+
+
+def test_workspace_provider_maps_network_oserror_to_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _NetworkFailingProviderClient()
+    monkeypatch.setattr(
+        BridgeClient,
+        "from_state_dir",
+        staticmethod(lambda _state_dir: fake),
+    )
+    provider = BridgeWorkspaceFactProvider(tmp_path)
+    monkeypatch.setattr(provider, "_handoff_exists", lambda: True)
+    with pytest.raises(WorkspaceInspectionUnavailable):
+        asyncio.run(provider.inspect_selection(None))
+
+
+def test_workspace_provider_does_not_hide_malformed_existing_identity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from eee_agent.houdini_bridge.auth import BridgeIdentityError
+
+    malformed = BridgeIdentityError("fingerprint mismatch")
+
+    def fail_identity(_state_dir: Path) -> _ProviderClient:
+        raise malformed
+
+    monkeypatch.setattr(
+        BridgeClient, "from_state_dir", staticmethod(fail_identity)
+    )
+    provider = BridgeWorkspaceFactProvider(tmp_path)
+    monkeypatch.setattr(provider, "_handoff_exists", lambda: True)
+    with pytest.raises(BridgeIdentityError) as exc:
+        asyncio.run(provider.inspect_selection(None))
+    assert exc.value is malformed

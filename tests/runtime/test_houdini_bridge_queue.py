@@ -1039,23 +1039,30 @@ def test_scene_mutation_after_query_does_not_affect_result() -> None:
 
 @async_test
 async def test_single_fifo_serves_mixed_operation_types() -> None:
-    queue = MainThreadReadQueue(capacity=4)
+    queue = MainThreadReadQueue(capacity=5)
     order: list[str] = []
 
-    def query_op() -> str:
-        order.append("scene.query")
-        return "scene.query"
+    def operation(name: str) -> Callable[[], str]:
+        return lambda: order.append(name) or name
 
-    def preflight_op() -> str:
-        order.append("changeset.preflight")
-        return "changeset.preflight"
-
-    fq = queue.submit("q1", query_op, deadline_monotonic=_future_deadline())
-    fp = queue.submit("p1", preflight_op, deadline_monotonic=_future_deadline())
-    assert queue.pump_one() is True
-    assert queue.pump_one() is True
-    assert order == ["scene.query", "changeset.preflight"]
-    assert await fq == "scene.query"
-    assert await fp == "changeset.preflight"
+    names = (
+        "scene.query",
+        "workspace.inspect",
+        "changeset.preflight",
+        "changeset.apply",
+        "changeset.receipt",
+    )
+    futures = [
+        queue.submit(
+            f"mixed-{index}",
+            operation(name),
+            deadline_monotonic=_future_deadline(),
+        )
+        for index, name in enumerate(names)
+    ]
+    for _ in names:
+        assert queue.pump_one() is True
+    assert order == list(names)
+    assert [await future for future in futures] == list(names)
     # Only one item is ever running at a time on the single pump thread.
     assert queue.pending_count == 0

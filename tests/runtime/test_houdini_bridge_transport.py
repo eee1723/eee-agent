@@ -39,6 +39,12 @@ from eee_agent.houdini_bridge.contracts import (
     BridgeRequest,
     SceneQueryResult,
 )
+from eee_agent.houdini_bridge.changesets import CHANGESET_V1
+from eee_agent.houdini_bridge.workspaces import (
+    WORKSPACE_V1,
+    WorkspaceInspectRequest,
+    WorkspaceInspectResult,
+)
 from eee_agent.houdini_bridge.queue import MainThreadReadQueue
 from houdini_side.secure_bridge import BridgeServer, HoudiniSceneAdapter
 
@@ -162,11 +168,13 @@ class _Node:
         *,
         parent: str = "/obj",
         geo: _Geometry | None = None,
+        user_data: dict[str, str] | None = None,
     ) -> None:
         self._path = path
         self._type = type_name
         self._parent = parent
         self._geo = geo
+        self._user_data = dict(user_data or {})
 
     def path(self) -> str:
         return self._path
@@ -190,6 +198,23 @@ class _Node:
         if self._geo is None:
             raise RuntimeError("no geometry")
         return self._geo
+
+    def userData(self, key: str) -> str | None:
+        return self._user_data.get(key)
+
+    def children(self) -> tuple[()]:
+        return ()
+
+
+class _ScanRoot:
+    def __init__(self, nodes: tuple[_Node, ...]) -> None:
+        self._nodes = nodes
+
+    def allSubChildren(self) -> tuple[_Node, ...]:
+        return self._nodes
+
+    def children(self) -> tuple[_Node, ...]:
+        return self._nodes
 
 
 class _HipFile:
@@ -244,6 +269,9 @@ class FakeHou:
 
     def node(self, path: str):
         self.node_calls += 1
+        if path == "/":
+            unique = {node.path(): node for node in (*self._nodes.values(), *self._selected)}
+            return _ScanRoot(tuple(unique.values()))
         return self._nodes.get(path)
 
 
@@ -291,14 +319,19 @@ class _Harness:
         host: str = "127.0.0.1",
         port: int = 0,
         pump: bool = True,
+        capabilities: tuple[str, ...] | None = None,
     ) -> int:
         self.queue = MainThreadReadQueue()
         self.identity = identity if identity is not None else create_bridge_identity()
+        kwargs: dict[str, object] = {}
+        if capabilities is not None:
+            kwargs["capabilities"] = capabilities
         self.server = BridgeServer(
             adapter=adapter,
             identity=self.identity,
             state_dir=state_dir,
             queue=self.queue,
+            **kwargs,  # type: ignore[arg-type]
         )
         self._pump = pump
         self.aio = await asyncio.start_server(self.server.handle_connection, host, port)
@@ -1109,7 +1142,7 @@ async def test_serve_rejects_closed_server(tmp_path: Path) -> None:
 
 
 @async_test
-async def test_success_ack_advertises_changeset_capability(tmp_path: Path) -> None:
+async def test_success_ack_advertises_sorted_bridge_capabilities(tmp_path: Path) -> None:
     adapter, _ = _make_adapter(selected=[_geo_node()])
     harness = _Harness()
     port = await harness.start(tmp_path, adapter=adapter)
@@ -1122,7 +1155,10 @@ async def test_success_ack_advertises_changeset_capability(tmp_path: Path) -> No
         resp = await _read_frame(reader)
         ack = json.loads(resp)
         assert ack["ok"] is True
-        assert ack["capabilities"] == ["changeset.v1"]  # sorted + unique
+        assert ack["capabilities"] == [
+            "changeset.v1",
+            "workspace.v1",
+        ]  # sorted + unique
         writer.close()
     finally:
         await harness.stop()
@@ -1146,3 +1182,106 @@ async def test_failed_auth_ack_has_no_capabilities(tmp_path: Path) -> None:
         writer.close()
     finally:
         await harness.stop()
+
+
+# ===========================================================================
+# Task 16-B2b-1: workspace inspection uses explicit dispatch + shared FIFO
+# ===========================================================================
+
+
+def _workspace_transport_request() -> WorkspaceInspectRequest:
+    return WorkspaceInspectRequest(
+        request_id="req_workspace_transport",
+        deadline_ms=5000,
+        scene_epoch=1,
+        mode="selection",
+        manifest=None,
+    )
+
+
+@async_test
+async def test_workspace_inspect_roundtrip_uses_live_selected_mirrors(
+    tmp_path: Path,
+) -> None:
+    ws = f"ws_{'2' * 32}"
+    run = f"run_{'1' * 32}"
+    node = _Node(
+        "/obj/owned",
+        user_data={
+            "eee.workspace_id": ws,
+            "eee.node_id": "node_owned",
+            "eee.capability": "modeling",
+            "eee.role": "root",
+            "eee.schema_version": "1",
+            "eee.created_by_run": run,
+        },
+    )
+    adapter, _hou = _make_adapter(selected=(node,), nodes={node.path(): node})
+    harness = _Harness()
+    port = await harness.start(tmp_path, adapter=adapter)
+    try:
+        client = BridgeClient(host="127.0.0.1", port=port, identity=harness.identity)
+        await client.open()
+        assert WORKSPACE_V1 in client.capabilities
+        result = await client.inspect_workspace(_workspace_transport_request())
+        assert isinstance(result, WorkspaceInspectResult)
+        assert result.observations[0].node_id == "node_owned"
+        assert result.observations[0].workspace_id == ws
+        await client.close()
+    finally:
+        await harness.stop()
+
+
+@async_test
+async def test_workspace_inspect_is_gated_by_same_queue_pump(tmp_path: Path) -> None:
+    node = _Node("/obj/owned")
+    adapter, _hou = _make_adapter(selected=(node,), nodes={node.path(): node})
+    harness = _Harness()
+    port = await harness.start(tmp_path, adapter=adapter, pump=False)
+    try:
+        client = BridgeClient(host="127.0.0.1", port=port, identity=harness.identity)
+        await client.open()
+        request = WorkspaceInspectRequest(
+            request_id="req_workspace_no_pump",
+            deadline_ms=20,
+            scene_epoch=1,
+            mode="selection",
+            manifest=None,
+        )
+        with pytest.raises(BridgeClientError) as exc:
+            await client.inspect_workspace(request)
+        assert exc.value.code == "bridge.deadline_exceeded"
+    finally:
+        await harness.stop()
+
+
+@async_test
+async def test_server_without_workspace_capability_fails_closed(tmp_path: Path) -> None:
+    node = _Node("/obj/owned")
+    adapter, _hou = _make_adapter(selected=(node,), nodes={node.path(): node})
+    harness = _Harness()
+    port = await harness.start(
+        tmp_path, adapter=adapter, capabilities=(CHANGESET_V1,)
+    )
+    try:
+        client = BridgeClient(host="127.0.0.1", port=port, identity=harness.identity)
+        await client.open()
+        with pytest.raises(BridgeClientError) as exc:
+            await client.inspect_workspace(_workspace_transport_request())
+        assert exc.value.code == "bridge.capability_unavailable"
+    finally:
+        await harness.stop()
+
+
+def test_all_typed_server_handlers_submit_through_the_same_queue_helper() -> None:
+    import inspect
+
+    handlers = (
+        BridgeServer._serve_scene_query,
+        BridgeServer._serve_workspace_inspect,
+        BridgeServer._serve_preflight,
+        BridgeServer._serve_apply,
+        BridgeServer._serve_receipt,
+    )
+    for handler in handlers:
+        assert "_run_on_queue" in inspect.getsource(handler)
