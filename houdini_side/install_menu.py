@@ -1,5 +1,7 @@
-"""Register the EEE Agent Houdini package so the menu bar entry loads and
-``start_rpc`` / ``chat_panel`` are importable. Mirrors Edini's scripts/install.py.
+"""Register the EEE Agent Houdini package and docked Python Panel.
+
+The package makes the Secure Bridge host, Runtime observer, and legacy
+``start_rpc`` / ``chat_panel`` rollback modules importable.
 
 Run once (from a shell or Houdini):
     hython Z:\\EEE_Project\\EEEProceduralModeling\\houdini_side\\install_menu.py
@@ -54,14 +56,13 @@ def install() -> None:
 
     # Houdini package format (same shape as Edini's edini.json):
     #  - path: adds $EEE_PATH to HOUDINI_PATH -> MainMenuCommon.xml at root auto-loads
-    #  - houdini.python3.11libs: makes start_rpc / chat_panel importable
+    #  - houdini.python3.11libs: makes Houdini-side entry modules importable
     with open(package_file, "w", encoding="utf-8") as f:
         json.dump({
             "env": [
                 {"EEE_PATH": root_fwd},
-                # Make start_rpc / chat_panel importable everywhere (belt-and-suspenders
-                # alongside houdini.python3.11libs; the menu scriptCode also bootstraps
-                # sys.path itself so it works even if this isn't honored).
+                # Make Houdini-side entry modules importable everywhere
+                # (belt-and-suspenders alongside houdini.python3.11libs).
                 {"PYTHONPATH": "$EEE_PATH/houdini_side"},
             ],
             "path": "$EEE_PATH",
@@ -72,6 +73,7 @@ def install() -> None:
     print(f"  package file: {package_file}")
     print(f"  project root: {root_fwd}")
     print(f"  menu xml:     {root_fwd}/MainMenuCommon.xml")
+    print(f"  python panel: {root_fwd}/python_panels/EEEAgentRuntime.pypanel")
     print()
     print("Next: restart Houdini -> 'EEE Agent' menu appears in the menu bar.")
 

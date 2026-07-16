@@ -13,6 +13,7 @@ from eee_agent.panel.client_state import (
     choose_active_session,
     load_runtime_credentials,
     parse_runtime_message,
+    snapshot_boundary,
 )
 
 
@@ -173,3 +174,27 @@ def test_cursor_book_is_per_session_monotonic_and_ignores_control_events() -> No
     assert cursors.observe({**persisted, "seq": None}) is False
     assert cursors.last_seq("ses_a") == 2
     assert cursors.last_seq("ses_b") == 1
+
+
+def test_cursor_book_accepts_snapshot_recovery_boundary() -> None:
+    cursors = RuntimeCursorBook()
+    assert cursors.advance("ses_a", 8) is True
+    assert cursors.advance("ses_a", 8) is False
+    assert cursors.advance("ses_a", 7) is False
+    assert cursors.last_seq("ses_a") == 8
+    with pytest.raises(PanelClientError):
+        cursors.advance("ses_a", -1)
+
+
+def test_snapshot_boundary_parses_control_event_and_rejects_bad_seq() -> None:
+    message = parse_runtime_message(
+        '{"protocol":"eee.runtime/1","kind":"event","event_id":null,'
+        '"session_id":"ses_a","run_id":null,"seq":null,'
+        '"timestamp":"2026-07-16T12:00:00+00:00","type":"session.snapshot",'
+        '"payload":{"snapshot_seq":9},"schema_version":1}'
+    )
+    assert snapshot_boundary(message) == ("ses_a", 9)
+    bad = dict(message)
+    bad["payload"] = {"snapshot_seq": True}
+    with pytest.raises(PanelClientError):
+        snapshot_boundary(bad)

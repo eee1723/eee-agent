@@ -7,7 +7,7 @@ parms so a model can be reshaped without rebuilding.
 
 > **Read first each session:** `CLAUDE.md` (full context + gotchas) and the
 > current cross-computer handoff,
-> `docs/handoffs/2026-07-16-runtime-17a1-transfer.md`. This README is the
+> `docs/handoffs/2026-07-16-runtime-17a2-transfer.md`. This README is the
 > orientation map; older handoffs retain milestone history.
 
 ## Architecture (three processes, deps isolated)
@@ -174,7 +174,7 @@ uv run --extra eval python -m eee_agent.runtime serve --help   # options
 | **Foundation milestone** | ✅ done — uv-locked deps, core contracts, provider registry (DeepSeek via official Anthropic endpoint), normalized events, explicit harness (no implicit `task`), `cli versions`. 369 tests pass. See `docs/handoffs/2026-07-13-foundation-migration.md` |
 | **Live end-to-end agent run on current machine** | ⏳ pending — bridge must be started in Houdini, then `selftest` + a `prompt` |
 | Runtime + typed Houdini ChangeSets | Complete through local Task 16-E acceptance on `feature/runtime`: trusted Workspace, ordered created references, transactional Apply, atomic receipts, and no-replay restart recovery. |
-| Docked Runtime panel | Task 17-A1 implemented locally: strict Runtime handoff verification, authenticated Qt WebSocket observer, deterministic active-Session choice, per-Session reconnect cursors, and a real `.pypanel` shell. 17-A2 Secure Bridge host + typed selection inspector remains pending. See `docs/handoffs/2026-07-16-runtime-17a1-transfer.md` |
+| Docked Runtime panel | Task 17-A2 is locally implemented and offline-accepted: authenticated Runtime observer, reconnect/snapshot cursor recovery, Houdini-owned Secure Bridge host, single main-thread FIFO, exact bound selection query, epoch rail, and bounded node/geometry facts. Real docked Houdini UI/restart/zero-mutation acceptance is the next required step. See `docs/handoffs/2026-07-16-runtime-17a2-transfer.md` |
 | B2 — per-component subagents | ⏳ deferred (largest change; after model swap) |
 | Eval framework | ⏳ scaffold (`eval/`), cases minimal |
 

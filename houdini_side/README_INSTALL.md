@@ -1,110 +1,127 @@
-# Houdini side: start the RPC bridge
+# Houdini side: Runtime observer and bridges
 
-> **Fresh machine?** See [`../SETUP.md`](../SETUP.md) for the full clone→run steps
-> (venv build, rpyc pin, .env, menu install). This doc covers the in-Houdini bits.
+> Fresh machine? See [`../SETUP.md`](../SETUP.md) for the full clone-to-run
+> sequence. This document covers the in-Houdini integration.
 
-The agent process (in `.venv`) drives Houdini over an **rpyc** connection. You must
-start the RPC server **inside Houdini** before the agent can do anything.
+The production Runtime path uses an authenticated Secure Bridge and a dockable
+read-only Python Panel. The legacy chat panel still uses the old rpyc bridge and
+remains available as a rollback path.
 
-## 0. Install the menu bar entry (do once)
+## 0. Install the Houdini package
 
-Run once (registers a Houdini package so the menu loads + `start_rpc`/`chat_panel`
-are importable):
+Run once:
 
-```
+```powershell
 & "<houdini>\bin\hython.exe" "<repo>\houdini_side\install_menu.py"
-# <houdini> e.g. C:\Program Files\Side Effects Software\Houdini 21.0.440
-# <repo>     e.g. Z:\EEE_Project\EEEProceduralModeling  (your clone)
 ```
 
-Then **restart Houdini**. An **EEE Agent** menu appears in the menu bar with:
-- **Open Agent Panel** — starts the RPC bridge + opens the chat panel (the one-click path)
+Examples:
+
+```text
+<houdini> = C:\Program Files\Side Effects Software\Houdini 21.0.440
+<repo>    = Z:\EEE_Project\EEEProceduralModeling
+```
+
+Restart Houdini. The **EEE Agent** menu contains:
+
+- **Open Runtime Observer** — starts the authenticated Secure Bridge and opens
+  the dockable read-only Runtime/selection panel
+- **Start Secure Bridge Only**
+- **Stop Secure Bridge**
+- **Open Agent Panel** — legacy path: starts rpyc and opens the old chat panel
 - **Start RPC Bridge Only**
+- **Start Phoenix Tracing Server**
 - **Install / Help**
 
-This writes `eee_agent.json` into `$HOUDINI_USER_PREF_DIR/packages/` (mirrors Edini's
-package registration). The menu's items `import start_rpc, chat_panel` — made
-importable by the package's `houdini.python3.11libs` entry.
+The installer writes `eee_agent.json` into
+`$HOUDINI_USER_PREF_DIR/packages/`. The package adds the repository to
+`HOUDINI_PATH`, so `python_panels/EEEAgentRuntime.pypanel` appears in Houdini's
+Python Panel interface menu. Houdini-side modules are also added through
+`houdini.python3.11libs`.
 
----
+## 1. Start the Runtime observer
 
-## 1. Start the RPC server + open the panel (one line)
+Start Runtime in a terminal at the repository root:
 
-In Houdini, open **Windows ▸ Python Source Editor** and paste this single line:
-
+```powershell
+uv run --frozen --extra eval python -m eee_agent.runtime serve
 ```
+
+Then choose **EEE Agent → Open Runtime Observer** in Houdini.
+
+The observer:
+
+- authenticates to Runtime through `runtime.json` and `runtime.token`;
+- reconnects with the remembered per-Session `last_seq`;
+- reads selection through typed `workspace.inspect`, then a bound
+  `scene.query`;
+- displays HIP, Houdini instance, scene epoch, revision, node path/type, lock
+  state, and bounded geometry statistics;
+- does not start Runs, mutate Sessions or Workspaces, approve changes, Apply
+  changes, open SQLite, or modify the Houdini scene.
+
+The Secure Bridge:
+
+- binds an ephemeral `127.0.0.1` port;
+- uses its own independent `bridge.token`;
+- runs transport I/O on one background asyncio thread;
+- pumps every typed Houdini operation through the accepted single main-thread
+  FIFO;
+- remains running when the panel closes.
+
+You can also create a Python Panel pane and select **EEE Runtime**. If the
+Secure Bridge is not running, Runtime status remains available and the
+selection area reports that inspection is unavailable.
+
+## 2. Manual Secure Bridge controls
+
+From Houdini's Python Source Editor:
+
+```python
+import secure_bridge_host
+
+secure_bridge_host.start()
+print(secure_bridge_host.status())
+secure_bridge_host.stop()
+```
+
+`start()` and `stop()` are idempotent. The full token is never printed by
+`status()`.
+
+## 3. Legacy RPC/chat path
+
+The legacy path is preserved for rollback and existing CLI workflows.
+
+### Start RPC and open the legacy chat panel
+
+In Houdini's Python Source Editor:
+
+```python
 exec(open(r"<repo>\houdini_side\launch.py").read())
 ```
 
-This starts the localhost RPC bridge (idempotent — safe to run again) AND opens
-the chat panel. You should see `[eee] Houdini RPC server listening on 127.0.0.1:18811`
-and the "EEE Procedural Modeling Agent" window.
+This starts the localhost rpyc bridge and opens the old chat panel.
 
-To use a different port, set `HOUDINI_RPC_PORT` in `.env` to match a custom
-`start_rpc.start(port=...)` call.
-
----
-
-## Manual alternative (if you prefer separate steps)
-
-In Houdini, open **Windows ▸ Python Source Editor** and run:
-
-```python
-import sys
-sys.path.insert(0, r"<repo>\houdini_side")
-import start_rpc
-start_rpc.start()          # listens on 127.0.0.1:18811
-```
-
-You should see in the console:
-
-```
-[eee] Houdini RPC server listening on 127.0.0.1:18811
-```
-
-To use a different port: `start_rpc.start(port=18812)` and set `HOUDINI_RPC_PORT`
-in `.env` to match.
-
-> Why not `hrpyc.start_server()`? Verified against Houdini 21.0.440's `hrpyc.py`:
-> it has no `host` kwarg and binds `0.0.0.0` (all interfaces) with **no
-> authentication**. `start_rpc.start()` builds the rpyc server itself and binds
-> **127.0.0.1 only** (loopback) — safe on a workstation.
-
-## 2. Make it a shelf button (optional, convenient)
-
-1. Right-click the shelf ▸ **New Tool…**
-2. **Script** tab, paste the snippet above.
-3. Click the tool to (re)start the bridge anytime.
-
-## 3. Verify from the agent side
-
-In a terminal at the project root:
-
-```powershell
-.\.venv\Scripts\python.exe -m eee_agent.cli selftest
-```
-
-This connects, builds a box, reads its stats (expect **8 points / 6 prims**), and
-exports `output\selftest_box.obj`. If it prints `[PASS]`, the whole bridge works.
-
-## 4. Open the chat panel (Phase 3)
-
-The panel is a thin PySide6 client that spawns the agent in `.venv` and streams
-replies. It uses only Houdini's bundled PySide6 — nothing extra installed.
-
-In Houdini's Python Source Editor (or a shelf tool):
+Manual equivalent:
 
 ```python
 import sys
 sys.path.insert(0, r"<repo>\houdini_side")
 import start_rpc, chat_panel
-start_rpc.start()        # ensure the bridge is up
-chat_panel.open_panel()  # opens the chat window
+
+start_rpc.start()
+chat_panel.open_panel()
 ```
 
-Type a request (e.g. "Build a 3-storey house with windows, export to
-output/house.obj") and watch the agent build it live in the viewport. The panel
-spawns `.venv\Scripts\python.exe -m eee_agent.cli stdio` and talks JSON-lines.
+The rpyc bridge binds `127.0.0.1:18811`. Do not replace it with
+`hrpyc.start_server()`: Houdini 21.0.440's helper binds `0.0.0.0` without
+authentication.
 
-> The agent's LLM provider/model come from `<repo>\.env`
-> (`EEE_LLM_PROVIDER`, `DEEPSEEK_API_KEY` / `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`).
+### Verify the legacy bridge
+
+```powershell
+uv run --frozen --extra eval python -m eee_agent.cli selftest
+```
+
+The self-test creates and exports a disposable box, so it is not part of the
+read-only Runtime observer acceptance.

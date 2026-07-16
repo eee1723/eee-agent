@@ -214,6 +214,22 @@ def parse_runtime_message(raw: str | bytes) -> Mapping[str, object]:
     return MappingProxyType(message)
 
 
+def snapshot_boundary(
+    message: Mapping[str, object],
+) -> tuple[str, int] | None:
+    """Return a validated Session snapshot recovery boundary, if present."""
+    if message.get("kind") != "event" or message.get("type") != "session.snapshot":
+        return None
+    session_id = message.get("session_id")
+    payload = message.get("payload")
+    if type(session_id) is not str or not session_id or type(payload) is not dict:
+        raise PanelClientError("Runtime snapshot is invalid.")
+    snapshot_seq = payload.get("snapshot_seq")
+    if type(snapshot_seq) is not int or snapshot_seq < 0:
+        raise PanelClientError("Runtime snapshot is invalid.")
+    return session_id, snapshot_seq
+
+
 def choose_active_session(
     sessions: list[object], preferred_session_id: str | None = None
 ) -> Mapping[str, object] | None:
@@ -270,6 +286,18 @@ class RuntimeCursorBook:
             raise PanelClientError("Runtime Session id is invalid.")
         return self._last_seq.get(session_id, 0)
 
+    def advance(self, session_id: str, seq: int) -> bool:
+        """Advance one Session to an explicit replay/snapshot boundary."""
+        if type(session_id) is not str or not session_id:
+            raise PanelClientError("Runtime Session id is invalid.")
+        if type(seq) is not int or seq < 0:
+            raise PanelClientError("Runtime sequence boundary is invalid.")
+        previous = self._last_seq.get(session_id, 0)
+        if seq <= previous:
+            return False
+        self._last_seq[session_id] = seq
+        return True
+
     def observe(self, message: Mapping[str, object]) -> bool:
         """Advance from one parsed persisted event; return whether it advanced."""
         if message.get("kind") != "event":
@@ -282,11 +310,7 @@ class RuntimeCursorBook:
             return False
         if type(seq) is not int or seq <= 0:
             raise PanelClientError("Runtime event is invalid.")
-        previous = self._last_seq.get(session_id, 0)
-        if seq <= previous:
-            return False
-        self._last_seq[session_id] = seq
-        return True
+        return self.advance(session_id, seq)
 
     def snapshot(self) -> Mapping[str, int]:
         return MappingProxyType(dict(self._last_seq))

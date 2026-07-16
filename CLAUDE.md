@@ -7,14 +7,15 @@ don't re-discover them). Mirrors the auto-memory; kept in-repo so it travels wit
 ## Current development handoff
 
 The current source of truth is
-`docs/handoffs/2026-07-16-runtime-17a1-transfer.md`. The active branch is
-`feature/runtime`. Task 16-E remains locally accepted in its focused commit.
-Task 17-A now has an approved bounded design/plan, and slice 17-A1 implements
-the pure panel client-state contract plus a dockable Runtime WebSocket observer
-shell. Its full offline baseline is 2055 passed, 1 skipped. Secure Bridge host
-integration and the typed `scene.query` selection inspector are still pending
-in 17-A2; Task 17-B write/approval UI has not started. Do not rewrite or
-discard the 16-E or 17-A1 commits, merge `main`, or weaken the trusted
+`docs/handoffs/2026-07-16-runtime-17a2-transfer.md`. The active branch is
+`feature/runtime`. Task 16-E and Task 17-A1 remain locally accepted in focused
+commits. Task 17-A2 now implements the Houdini-owned Secure Bridge host,
+main-thread single-FIFO pump, bound typed `scene.query` selection inspector,
+snapshot cursor recovery, menu/install integration, and the completed epoch
+rail/node-fact UI. Its full offline baseline is 2066 passed, 1 skipped.
+Task 17-A3 now requires the user's real Houdini docked UI/restart/zero-mutation
+test; Task 17-B write/approval UI has not started. Do not rewrite or discard
+the 16-E, 17-A1, or 17-A2 commits, merge `main`, or weaken the trusted
 Workspace, typed ChangeSet, approval, preflight, transactional Apply, receipt,
 recovery, or single-FIFO boundaries while resuming work.
 

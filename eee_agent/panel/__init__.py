@@ -9,6 +9,7 @@ from eee_agent.panel.client_state import (
     load_runtime_credentials,
     parse_runtime_message,
     runtime_state_dir,
+    snapshot_boundary,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "load_runtime_credentials",
     "parse_runtime_message",
     "runtime_state_dir",
+    "snapshot_boundary",
 ]

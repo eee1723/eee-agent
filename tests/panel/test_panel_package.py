@@ -48,11 +48,33 @@ def test_runtime_panel_keeps_client_only_import_boundary() -> None:
         "changeset.apply",
         "run.start",
         "workspace.create",
+        "hou.selectedNodes",
         "eval(",
         "exec(",
     ):
         assert forbidden_text not in source
+    assert "query_selection" in source
 
 
 def test_legacy_chat_panel_remains_present_as_rollback() -> None:
     assert (ROOT / "houdini_side" / "chat_panel.py").is_file()
+
+
+def test_main_menu_adds_runtime_observer_without_removing_legacy_actions() -> None:
+    root = ElementTree.parse(ROOT / "MainMenuCommon.xml").getroot()
+    ids = {
+        item.attrib["id"]
+        for item in root.findall(".//scriptItem")
+    }
+    assert {
+        "eee_open_runtime_panel",
+        "eee_start_secure_bridge",
+        "eee_stop_secure_bridge",
+        "eee_open_panel",
+        "eee_start_rpc",
+    }.issubset(ids)
+    text = (ROOT / "MainMenuCommon.xml").read_text(encoding="utf-8")
+    assert "secure_bridge_host.start()" in text
+    assert "runtime_panel.open_panel()" in text
+    assert "start_rpc.start()" in text
+    assert "chat_panel.open_panel()" in text

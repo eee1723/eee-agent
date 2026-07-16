@@ -1,5 +1,8 @@
 # Task 17-A Docked Read-Only Panel Plan
 
+Status: slices 17-A1 and 17-A2 are implemented and offline-accepted. Slice
+17-A3 is waiting for the real Houdini dock/restart/zero-mutation acceptance.
+
 ## Boundary
 
 Implement only
