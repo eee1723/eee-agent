@@ -35,6 +35,7 @@ from eee_agent.modeling.contracts import (
     ProceduralSpec,
     QualityProfile,
 )
+from eee_agent.modeling.validation import validate_compilation
 
 _MAX_SUMMARY_BYTES = 16 * 1024
 
@@ -215,6 +216,16 @@ class ModelingProposalCoordinator:
                     change_id=change_id,
                     created_at=created_at,
                 )
+            validation = validate_compilation(
+                brief=brief,
+                spec=spec,
+                quality_profile=self._context.quality_profile,
+                catalog=self._context.catalog,
+                compilation=result,
+            )
+            if validation.hard_failures:
+                first = validation.hard_failures[0]
+                raise ModelingCompileError(first.code, first.message)
             decision = evaluate_policy(
                 result.changeset, workspace=self._context.workspace
             )

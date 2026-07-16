@@ -1,5 +1,7 @@
 # Task 18-E Approval-to-Apply Plan
 
+Status: core approval-to-internal-Apply slice implemented locally in `0e685a8`.
+
 ## Goal
 
 Make one exact user approval trigger the existing trusted Apply task without
@@ -27,4 +29,3 @@ adding a public Apply command or model write tool.
 - exact durable event ordering;
 - real hython success and forced rollback;
 - full offline suite, lock, compileall, and diff checks.
-

@@ -1,5 +1,8 @@
 # Task 18-F Validation and Repair Plan
 
+Status: deterministic pre-Apply report and repair-budget foundation implemented
+locally; typed Bridge post-Apply validators remain the next slice.
+
 ## Goal
 
 Add deterministic post-Apply quality gates and an auditable maximum-two-repair
@@ -24,4 +27,3 @@ Every validator has pass/fail/unavailable/stale tests. Two failed repairs end
 in an explicit exhausted result. Vision never overrides a hard validator.
 Hython verifies cook, geometry, sensitivity, restoration, and failed-cook
 evidence.
-

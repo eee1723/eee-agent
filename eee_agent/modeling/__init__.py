@@ -42,6 +42,13 @@ from eee_agent.modeling.contracts import (
     parse_repair_budget,
     parse_repair_ticket,
 )
+from eee_agent.modeling.validation import (
+    EvidenceRef,
+    ValidationReport,
+    ValidationStatus,
+    ValidatorResult,
+    validate_compilation,
+)
 
 __all__ = [
     "Axis",
@@ -49,6 +56,7 @@ __all__ = [
     "BootstrapFinalizeError",
     "CompilationResult",
     "ComponentSpec",
+    "EvidenceRef",
     "FrontAxis",
     "InputBinding",
     "MAX_MODELING_JSON_BYTES",
@@ -65,6 +73,9 @@ __all__ = [
     "RepairBudget",
     "RepairStatus",
     "RepairTicket",
+    "ValidationReport",
+    "ValidationStatus",
+    "ValidatorResult",
     "UnitSystem",
     "ValidatorKind",
     "WorkspaceBootstrapContext",
@@ -78,6 +89,7 @@ __all__ = [
     "parse_quality_profile",
     "parse_repair_budget",
     "parse_repair_ticket",
+    "validate_compilation",
     "ModelingProposalContext",
     "ModelingProposalCoordinator",
     "ModelingProposalError",
