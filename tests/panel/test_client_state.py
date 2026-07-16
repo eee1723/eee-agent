@@ -120,7 +120,7 @@ def test_build_command_is_canonical_and_bounded() -> None:
         build_command("req_6", "workspace.create", {})
 
     sid = "ses_" + "a" * 32
-    wid = "wsp_" + "b" * 32
+    wid = "ws_" + "b" * 32
     digest = "d" * 64
     assert '"type":"workspace.create"' in build_command(
         "req_7",

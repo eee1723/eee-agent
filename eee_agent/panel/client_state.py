@@ -38,7 +38,7 @@ _DISCOVERY_FIELDS = frozenset(
 _SESSION_ID_RE = re.compile(r"^ses_[0-9a-f]{32}$")
 _RUN_ID_RE = re.compile(r"^run_[0-9a-f]{32}$")
 _CHANGE_ID_RE = re.compile(r"^chg_[0-9a-f]{32}$")
-_WORKSPACE_ID_RE = re.compile(r"^wsp_[0-9a-f]{32}$")
+_WORKSPACE_ID_RE = re.compile(r"^ws_[0-9a-f]{32}$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _PANEL_COMMANDS = frozenset(
     {

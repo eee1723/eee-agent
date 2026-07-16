@@ -1249,7 +1249,7 @@ class RuntimePanel(QtWidgets.QWidget):
         layout.addLayout(actions)
 
         self.workspace_id_edit = QtWidgets.QLineEdit()
-        self.workspace_id_edit.setPlaceholderText("Workspace ID: wsp_...")
+        self.workspace_id_edit.setPlaceholderText("Workspace ID: ws_...")
         layout.addWidget(self.workspace_id_edit)
         self.workspace_revision_edit = QtWidgets.QLineEdit()
         self.workspace_revision_edit.setPlaceholderText("Manifest revision (64 hex)")
