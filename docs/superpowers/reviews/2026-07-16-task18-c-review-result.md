@@ -13,6 +13,9 @@ Offline implementation review: **accepted pending the manual Houdini gate**.
 - `git diff --check` -> passed
 - Local hython verification confirmed the five minimal catalog node types and
   their defaults/bounds.
+- Runtime panel Workspace lifecycle controls were added at `bc30805`; the
+  full suite was rerun after that change with the same `2144 passed, 1 skipped`
+  result.
 
 ## Boundary review
 
@@ -22,5 +25,8 @@ Offline implementation review: **accepted pending the manual Houdini gate**.
 - Proposal persistence uses the existing trusted service callback.
 - Returned tool data is a bounded approval summary; Apply remains unavailable.
 - Workspace/SceneBinding/bridge health failures fail closed.
+- Workspace create/bind/inspect remain protocol-bounded lifecycle commands;
+  the panel does not expose Apply or raw operations.
 
-The remaining acceptance item is the real Houdini test in the 18-C handoff.
+The remaining acceptance items are the real Houdini test in the 18-C handoff
+and the future empty-scene ownership bootstrap design.
