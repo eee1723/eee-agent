@@ -449,7 +449,11 @@ class RuntimeObserverClient(QtCore.QObject):
         self._pending.clear()
         socket.connected.connect(self._on_connected)
         socket.disconnected.connect(self._on_disconnected)
-        socket.textMessageReceived.connect(self._on_message)
+        socket.textMessageReceived.connect(self._on_text_message)
+        # Runtime builds through Task 17-B encoded JSON as binary WebSocket
+        # frames. Accept both frame types so the panel can reconnect to an
+        # already-running pre-fix Runtime while new servers send text frames.
+        socket.binaryMessageReceived.connect(self._on_binary_message)
         socket.errorOccurred.connect(self._on_error)
 
         request = QtNetwork.QNetworkRequest(QtCore.QUrl(credentials.websocket_url))
@@ -497,9 +501,18 @@ class RuntimeObserverClient(QtCore.QObject):
         socket.sendTextMessage(text)
 
     @QtCore.Slot(str)
-    def _on_message(self, raw: str) -> None:
+    def _on_text_message(self, raw: str) -> None:
         if self.sender() is not self._socket:
             return
+        self._process_message(raw)
+
+    @QtCore.Slot(QtCore.QByteArray)
+    def _on_binary_message(self, raw) -> None:
+        if self.sender() is not self._socket:
+            return
+        self._process_message(bytes(raw))
+
+    def _process_message(self, raw: str | bytes) -> None:
         try:
             message = parse_runtime_message(raw)
         except PanelClientError as exc:
@@ -1029,10 +1042,16 @@ class RuntimePanel(QtWidgets.QWidget):
         title, accepted = QtWidgets.QInputDialog.getText(
             self,
             "New Runtime Session",
-            "Session title",
+            "Short Session title (for example: 17B smoke).\n"
+            "Enter the Run request in the editor below.",
         )
         if accepted and title.strip():
             self.new_session_button.setEnabled(False)
+            self.status_text.setText("Creating Runtime Session...")
+            self.run_state_label.setText("CREATING SESSION")
+            self.run_meta_label.setText(
+                "Waiting for Runtime to create and select the Session."
+            )
             self._client.create_session(title.strip())
 
     @QtCore.Slot()

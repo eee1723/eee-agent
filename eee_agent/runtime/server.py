@@ -373,7 +373,13 @@ class RuntimeWebSocketServer:
                         pass
                     return
                 try:
-                    await ctx.connection.send(encode_envelope(item))
+                    # JSON protocol envelopes are text messages. Earlier
+                    # Runtime builds passed the encoded bytes directly, which
+                    # made Qt QWebSocket emit binaryMessageReceived and caused
+                    # text-only panel clients to miss every response/event.
+                    await ctx.connection.send(
+                        encode_envelope(item).decode("utf-8")
+                    )
                 except Exception:
                     return
                 if ctx.slow_consumer:

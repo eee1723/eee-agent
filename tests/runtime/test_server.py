@@ -627,6 +627,24 @@ def test_binary_utf8_command_handled(service, identity) -> None:
     _run(scenario())
 
 
+def test_server_sends_json_as_text_websocket_frame(service, identity) -> None:
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(
+                _uri(s),
+                additional_headers=_headers(identity),
+                compression=None,
+            ) as ws:
+                await ws.send(
+                    encode_envelope(_cmd("r1", "runtime.ping", {}))
+                )
+                raw = await ws.recv()
+                assert type(raw) is str
+                assert json.loads(raw)["ok"] is True
+
+    _run(scenario())
+
+
 def test_invalid_utf8_returns_invalid_json(service, identity) -> None:
     async def scenario():
         async with _server(service, identity) as s:

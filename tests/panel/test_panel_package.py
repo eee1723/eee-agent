@@ -57,6 +57,8 @@ def test_runtime_panel_keeps_client_only_import_boundary() -> None:
     assert '"run.start"' in source
     assert '"changeset.approve"' in source
     assert '"changeset.reject"' in source
+    assert "textMessageReceived.connect(self._on_text_message)" in source
+    assert "binaryMessageReceived.connect(self._on_binary_message)" in source
     assert 'addTab(self._build_run_tab(), "RUN")' in source
     assert 'addTab(self._build_approvals_tab(), "APPROVALS")' in source
     assert 'addTab(self._build_scene_tab(), "SCENE")' in source
