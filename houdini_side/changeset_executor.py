@@ -459,8 +459,12 @@ class ChangeSetPreflightAdapter:
     ) -> list[PreflightParmFact]:  # type: ignore[no-untyped-def]
         targets: list[tuple[NodeRef, str]] = []
         seen: set[tuple[str, str]] = set()
+        # F3: exclude transaction-created targets (they don't exist at preflight).
+        created_ids = {op.node_id for op in changeset.operations if isinstance(op, CreateNode)}
 
         def add(target: NodeRef, name: str) -> None:
+            if target.node_id in created_ids:
+                return  # created node — no parm fact at preflight
             key = (_identity(target), name)
             if key not in seen:
                 seen.add(key)
@@ -518,8 +522,12 @@ class ChangeSetPreflightAdapter:
     ) -> list[PreflightWireFact]:  # type: ignore[no-untyped-def]
         targets: list[tuple[NodeRef, int]] = []
         seen: set[tuple[str, int]] = set()
+        # F3: exclude transaction-created targets (they don't exist at preflight).
+        created_ids = {op.node_id for op in changeset.operations if isinstance(op, CreateNode)}
 
         def add(target: NodeRef, index: int) -> None:
+            if target.node_id in created_ids:
+                return  # created node — no wire fact at preflight
             key = (_identity(target), index)
             if key not in seen:
                 seen.add(key)
@@ -676,15 +684,26 @@ def _parm_equal(actual: object | None, expected: object) -> bool:
 
 
 def _wire_equal(actual: WireRef | None, expected: WireRef | None) -> bool:
+    """Compare wire sources. path/type/output are always required; node_id and
+    workspace match only when the expected ref DECLARES them (non-None)."""
     if expected is None:
         return actual is None
     if actual is None:
         return False
-    return (
-        actual.source.path == expected.source.path
-        and actual.source.expected_type == expected.source.expected_type
-        and actual.source_output_index == expected.source_output_index
-    )
+    if actual.source.path != expected.source.path:
+        return False
+    if actual.source.expected_type != expected.source.expected_type:
+        return False
+    if actual.source_output_index != expected.source_output_index:
+        return False
+    if expected.source.node_id is not None and actual.source.node_id != expected.source.node_id:
+        return False
+    if (
+        expected.source.expected_workspace_id is not None
+        and actual.source.expected_workspace_id != expected.source.expected_workspace_id
+    ):
+        return False
+    return True
 
 
 # ==========================================================================
@@ -852,61 +871,99 @@ def derive_mandatory_preconditions(
     # they get no node.identity_equals precondition (they are proven absent and are
     # brought into being by the create); only pre-existing references do.
     created_ids = {op.node_id for op in operations if isinstance(op, CreateNode)}
+    # Track previously mutated slots in operation order: only the FIRST write to a
+    # pre-existing slot gets a preflight old-value precondition; later expected-old
+    # state is JIT-only (F2).
+    seen_parm_slots: set[tuple[str, str]] = set()
+    seen_wire_slots: set[tuple[str, int]] = set()
     for op in operations:
         if isinstance(op, CreateNode):
             pre.append(NodeAbsent(path=_derive_create_path(op.parent.path, op.node_name), node_id=op.node_id))
-            pre.append(NodeIdentityEquals(node=op.parent))
+            if op.parent.node_id not in created_ids:
+                pre.append(NodeIdentityEquals(node=op.parent))
         elif isinstance(op, SetParm):
-            if op.target.node_id not in created_ids:
+            target_created = op.target.node_id in created_ids
+            parm_key = (_identity(op.target), op.parm_name)
+            first_write = parm_key not in seen_parm_slots
+            seen_parm_slots.add(parm_key)
+            if not target_created and first_write:
                 pre.append(NodeIdentityEquals(node=op.target))
-            pre.append(ParmValueEquals(target=op.target, parm_name=op.parm_name, value=op.expected_old_value))
+                pre.append(ParmValueEquals(target=op.target, parm_name=op.parm_name, value=op.expected_old_value))
+            # Later writes or created targets: identity/old-value are JIT-checked.
         elif isinstance(op, ConnectInput):
-            if op.target.node_id not in created_ids:
+            target_created = op.target.node_id in created_ids
+            wire_key = (_identity(op.target), op.input_index)
+            first_write = wire_key not in seen_wire_slots
+            seen_wire_slots.add(wire_key)
+            if not target_created and first_write:
                 pre.append(NodeIdentityEquals(node=op.target))
+                pre.append(WireInputEquals(target=op.target, input_index=op.input_index, source=op.expected_old_source))
             if op.source.node_id not in created_ids:
                 pre.append(NodeIdentityEquals(node=op.source))
-            pre.append(
-                WireInputEquals(
-                    target=op.target, input_index=op.input_index, source=op.expected_old_source
-                )
-            )
+            # Later writes or created targets: wire old-value is JIT-checked.
     return pre
 
 
 def derive_mandatory_postconditions(operations) -> list[object]:
-    """Mandatory post-write postconditions derived from the operations."""
+    """Mandatory post-write postconditions derived from the operations.
+
+    F2: for repeated writes to the same slot, only the LAST value is emitted
+    (intermediate postconditions would be contradictory at construction).
+    """
     post: list[object] = []
+    # Track the last postcondition per slot; overwrite on repeat.
+    parm_posts: dict[tuple[str, str], int] = {}  # key -> index in post
+    wire_posts: dict[tuple[str, int], int] = {}
     for op in operations:
         if isinstance(op, CreateNode):
             post.append(NodeIdentityEquals(node=_created_ref(op)))
         elif isinstance(op, SetParm):
-            post.append(ParmValueEquals(target=op.target, parm_name=op.parm_name, value=op.value))
+            key = (_identity(op.target), op.parm_name)
+            cond = ParmValueEquals(target=op.target, parm_name=op.parm_name, value=op.value)
+            if key in parm_posts:
+                post[parm_posts[key]] = cond
+            else:
+                parm_posts[key] = len(post)
+                post.append(cond)
         elif isinstance(op, ConnectInput):
-            post.append(
-                WireInputEquals(
-                    target=op.target,
-                    input_index=op.input_index,
-                    source=WireRef(source=op.source, source_output_index=op.source_output_index),
-                )
+            key = (_identity(op.target), op.input_index)
+            cond = WireInputEquals(
+                target=op.target,
+                input_index=op.input_index,
+                source=WireRef(source=op.source, source_output_index=op.source_output_index),
             )
+            if key in wire_posts:
+                post[wire_posts[key]] = cond
+            else:
+                wire_posts[key] = len(post)
+                post.append(cond)
     return post
 
 
 def derive_mandatory_checkpoint(operations) -> tuple[list[NodeRef], list[ParmSnapshot], list[WireSnapshot]]:
-    """Exact before-snapshot coverage derived from the operations (design 4.4)."""
+    """Exact before-snapshot coverage derived from the operations (design 4.4).
+
+    D1: excludes nonexistent created-node state (it cannot be snapshotted before
+    the transaction) while retaining before-state coverage for pre-existing nodes.
+    """
+    created_ids = {op.node_id for op in operations if isinstance(op, CreateNode)}
     nodes: list[NodeRef] = []
     parms: list[ParmSnapshot] = []
     wires: list[WireSnapshot] = []
     for op in operations:
         if isinstance(op, CreateNode):
-            nodes.append(op.parent)
+            if op.parent.node_id not in created_ids:
+                nodes.append(op.parent)
         elif isinstance(op, SetParm):
-            nodes.append(op.target)
-            parms.append(ParmSnapshot(target=op.target, parm_name=op.parm_name))
+            if op.target.node_id not in created_ids:
+                nodes.append(op.target)
+                parms.append(ParmSnapshot(target=op.target, parm_name=op.parm_name))
         elif isinstance(op, ConnectInput):
-            nodes.append(op.target)
-            nodes.append(op.source)
-            wires.append(WireSnapshot(target=op.target, input_index=op.input_index))
+            if op.target.node_id not in created_ids:
+                nodes.append(op.target)
+                wires.append(WireSnapshot(target=op.target, input_index=op.input_index))
+            if op.source.node_id not in created_ids:
+                nodes.append(op.source)
     return nodes, parms, wires
 
 
@@ -998,6 +1055,7 @@ class ChangeSetExecutor:
         self._receipt_cache_max = receipt_cache_max
         self._write_frozen = False
         self._current_run_id: str = ""
+        self._created_identity: dict[str, tuple[str, str]] = {}
 
     @property
     def _hou(self) -> object:
@@ -1099,6 +1157,11 @@ class ChangeSetExecutor:
 
         binding = self.binding()
         self._current_run_id = changeset.run_id
+        # D1: map created node_id -> (capability, role) for JIT identity verification
+        self._created_identity = {
+            op.node_id: (op.capability, op.role)
+            for op in changeset.operations if isinstance(op, CreateNode)
+        }
         index = self._index_scene_by_node_id(hou)
         before = self._snapshot(hou, changeset, index)
         before_revision = self._revision(before)
@@ -1262,6 +1325,9 @@ class ChangeSetExecutor:
         parent = self._resolve_existing(hou, op.parent, index)
         if parent is None:
             raise _apply_failed("The create parent was not found in the scene.")
+        # D1: if the parent is a created node, verify its full identity before use.
+        if op.parent.node_id in self._created_identity:
+            self._verify_created_identity(parent, op.parent)
         created = parent.createNode(op.node_type, op.node_name)  # type: ignore[attr-defined]
         derived_path = _derive_create_path(op.parent.path, op.node_name)
         # Journal the create-inverse immediately: the node now exists, so any
@@ -1293,7 +1359,13 @@ class ChangeSetExecutor:
         node = self._resolve_existing(hou, op.target, index)
         if node is None:
             raise _apply_failed("The parameter target was not found in the scene.")
+        # D1: if target is a created node, verify its full identity before use.
+        if op.target.node_id in self._created_identity:
+            self._verify_created_identity(node, op.target)
         old_value, _existed = self._read_parm_value(node, op.parm_name)
+        # D1 JIT: compare current value to expected_old_value immediately before write.
+        if not _parm_equal(old_value, op.expected_old_value):
+            raise _stale("The current parameter value does not match expected_old_value.")
         # Journal the inverse (captured before-state) BEFORE the mutating call,
         # so a mutate-then-raise still has an exact restoration entry.
         inverses.append(("parm", op.target, op.parm_name, old_value))
@@ -1314,10 +1386,59 @@ class ChangeSetExecutor:
             raise _apply_failed("The wire target was not found in the scene.")
         if source is None:
             raise _apply_failed("The wire source was not found in the scene.")
+        # D1: verify created endpoint identities before use.
+        if op.target.node_id in self._created_identity:
+            self._verify_created_identity(target, op.target)
+        if op.source.node_id in self._created_identity:
+            self._verify_created_identity(source, op.source)
         old_source = self._read_wire_source(target, op.input_index)
+        # D1 JIT: compare current source to expected_old_source immediately before write.
+        if not _wire_equal(old_source, op.expected_old_source):
+            raise _stale("The current wire source does not match expected_old_source.")
+        # D1 JIT: if the expected_old_source is a created node, verify its actual
+        # six-mirror identity too (path/type/workspace/node_id are checked by
+        # _wire_equal, but capability/role/schema/run are not visible there).
+        if (
+            op.expected_old_source is not None
+            and op.expected_old_source.source.node_id in self._created_identity
+        ):
+            actual_old_node = self._resolve_existing(hou, op.expected_old_source.source, index)
+            if actual_old_node is None:
+                raise _stale("The expected old created wire source was not found in the scene.")
+            self._verify_created_identity(actual_old_node, op.expected_old_source.source)
         inverses.append(("wire", op.target, op.input_index, old_source))
         target.setInput(op.input_index, source, op.source_output_index)  # type: ignore[attr-defined]
         applied_op_ids.append(op.op_id)
+
+    def _verify_created_identity(self, node: object, ref: NodeRef) -> None:
+        """D1: verify a created node's current full identity (path, type, and all
+        six mirrored ownership keys) before any transactional use.
+
+        A mismatch or unreadable key raises ``changeset.stale`` (zero current
+        write). If prior ops wrote, the accepted reverse rollback applies.
+        """
+        expected_cap, expected_role = self._created_identity.get(ref.node_id, ("", ""))
+        expected: dict[str, str] = {
+            _NODE_ID_KEY: ref.node_id,
+            _WS_KEY: ref.expected_workspace_id if ref.expected_workspace_id else "",
+            _CAP_KEY: expected_cap,
+            _ROLE_KEY: expected_role,
+            _SCHEMA_KEY: _SUPPORTED_SCHEMA_VERSION,
+            _RUN_KEY: self._current_run_id,
+        }
+        for key, intended in expected.items():
+            value, ok = self._read_user_data_strict(node, key)
+            if not ok or value != intended:
+                raise _stale(f"The created node identity mismatch at {key!r}.")
+        try:
+            if str(node.path()) != ref.path:  # type: ignore[attr-defined]
+                raise _stale("The created node path has changed.")
+            if str(node.type().name()) != ref.expected_type:  # type: ignore[attr-defined]
+                raise _stale("The created node type has changed.")
+        except HoudiniAdapterError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise _stale("The created node identity could not be verified.") from exc
 
     # --------------------------------------------------------------- rollback
 

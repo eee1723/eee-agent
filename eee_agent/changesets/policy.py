@@ -224,7 +224,8 @@ def evaluate_policy(
     mode = changeset.required_permission
     if mode is PermissionMode.OWNED_WORKSPACE:
         _evaluate_owned(
-            changeset, workspace, owned_by_id, owned_by_path, changed_targets, wire_sources, create_ops, denial_codes
+            changeset, workspace, owned_by_id, owned_by_path,
+            changed_targets, wire_sources, create_ops, created_refs, denial_codes,
         )
     elif mode is PermissionMode.SCOPED_PATCH:
         _evaluate_scoped(changeset, bool(create_ops), changed_targets, wire_sources, denial_codes)
@@ -249,6 +250,7 @@ def _evaluate_owned(
     changed_targets: list[NodeRef],
     wire_sources: list[NodeRef],
     create_ops: list[CreateNode],
+    created_refs: frozenset[NodeRef],
     denial_codes: set[str],
 ) -> None:
     if workspace is None:
@@ -264,6 +266,8 @@ def _evaluate_owned(
     read_dep_identities = {_node_identity(ref) for ref in changeset.read_dependencies}
 
     for target in changed_targets:
+        if target in created_refs:
+            continue  # D1: exact earlier-created ref is internal
         if target.node_id is None:
             denial_codes.add(_OWNERSHIP_AMBIGUOUS)
             continue
@@ -275,6 +279,8 @@ def _evaluate_owned(
 
     # External nodes may appear only as read dependencies or unchanged create parents.
     for source in wire_sources:
+        if source in created_refs:
+            continue  # D1: exact earlier-created ref is internal
         if source.node_id is not None:
             owned = owned_by_id.get(source.node_id)
         else:

@@ -995,6 +995,7 @@ def test_owned_denies_affected_node_wrong_path_for_wire_source() -> None:
 
 
 def test_owned_denies_affected_node_wrong_path_for_created_node() -> None:
+    # D1: the contract now rejects this at construction (created id with wrong path).
     create = CreateNode(
         op_id="op_create",
         parent=_noderef(node_id="n_root", path="/obj/ws", expected_type="geo"),
@@ -1005,14 +1006,13 @@ def test_owned_denies_affected_node_wrong_path_for_created_node() -> None:
         capability="modeling",
         role="member",
     )
-    bad = _noderef(node_id="n_new", path="/obj/ws/WRONG")  # derived path is /obj/ws/geo_new
-    cs = _changeset((create,), affected=(bad,), affected_paths=("/obj/ws/geo_new",))
-    decision = evaluate_policy(cs, workspace=_manifest())
-    assert decision.allowed is False
-    assert "policy.affected_target_omitted" in decision.denial_codes
+    bad = _noderef(node_id="n_new", path="/obj/ws/WRONG")
+    with pytest.raises((TypeError, ValueError)):
+        _changeset((create,), affected=(bad,), affected_paths=("/obj/ws/geo_new",))
 
 
 def test_owned_denies_affected_node_wrong_type_for_created_node() -> None:
+    # D1: the contract now rejects this at construction (created id with wrong type).
     create = CreateNode(
         op_id="op_create",
         parent=_noderef(node_id="n_root", path="/obj/ws", expected_type="geo"),
@@ -1024,10 +1024,8 @@ def test_owned_denies_affected_node_wrong_type_for_created_node() -> None:
         role="member",
     )
     bad = _noderef(node_id="n_new", path="/obj/ws/geo_new", expected_type="WRONG")
-    cs = _changeset((create,), affected=(bad,), affected_paths=("/obj/ws/geo_new",))
-    decision = evaluate_policy(cs, workspace=_manifest())
-    assert decision.allowed is False
-    assert "policy.affected_target_omitted" in decision.denial_codes
+    with pytest.raises((TypeError, ValueError)):
+        _changeset((create,), affected=(bad,), affected_paths=("/obj/ws/geo_new",))
 
 
 @pytest.mark.parametrize(
@@ -1102,9 +1100,7 @@ def test_owned_allows_create_with_new_node_id() -> None:
 
 
 def test_conflicting_parent_reusing_created_id_is_external() -> None:
-    # create n_a at /obj/ws/a, then create n_b whose parent claims n_a at a
-    # conflicting path. That parent must count as external, not internal via
-    # the reused created id.
+    # D1: the contract now rejects this at construction (created id with wrong path).
     create_a = CreateNode(
         op_id="c_a",
         parent=_noderef(node_id="n_root", path="/obj/ws", expected_type="geo"),
@@ -1125,18 +1121,16 @@ def test_conflicting_parent_reusing_created_id_is_external() -> None:
         capability="modeling",
         role="member",
     )
-    cs = _changeset(
-        (create_a, create_b),
-        affected=(
-            NodeRef(node_id="n_a", path="/obj/ws/a", expected_type="geo", expected_workspace_id=WS),
-            NodeRef(node_id="n_b", path="/obj/ws/WRONG/b", expected_type="geo", expected_workspace_id=WS),
-        ),
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(
+            (create_a, create_b),
+            affected=(
+                NodeRef(node_id="n_a", path="/obj/ws/a", expected_type="geo", expected_workspace_id=WS),
+                NodeRef(node_id="n_b", path="/obj/ws/WRONG/b", expected_type="geo", expected_workspace_id=WS),
+            ),
         affected_paths=("/obj/ws/a", "/obj/ws/WRONG/b"),
-        touches_external=False,  # the conflicting parent is external -> under-reported
+        touches_external=False,
     )
-    decision = evaluate_policy(cs, workspace=_manifest())
-    assert decision.allowed is False
-    assert "policy.effect_contradiction" in decision.denial_codes
 
 
 def test_parent_matching_created_node_is_internal() -> None:

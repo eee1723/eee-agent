@@ -867,6 +867,223 @@ def test_changeset_accepts_distinct_created_node_ids_and_paths() -> None:
     assert len(cs.operations) == 2
 
 
+# --------------------------------------------------------------------------
+# D1: intra-ChangeSet created-reference forward-sequence validation
+# --------------------------------------------------------------------------
+
+
+def _d1_created_ref(node_id: str = "n_new", name: str = "geo_new", **kw: object) -> NodeRef:
+    """The exact derived NodeRef for a CreateNode with the given fields."""
+    values: dict[str, object] = dict(
+        node_id=node_id, path=f"/obj/ws/{name}",
+        expected_type="geo", expected_workspace_id=WS,
+    )
+    values.update(kw)
+    return NodeRef(**values)  # type: ignore[arg-type]
+
+
+def test_d1_create_then_set_accepted() -> None:
+    create = _create(op_id="op_c", node_id="n_new", node_name="geo_new")
+    ref = _d1_created_ref()
+    setparm = _setparm(target=ref, op_id="op_s")
+    cs = _changeset(operations=(create, setparm))
+    assert len(cs.operations) == 2
+
+
+def test_d1_create_then_connect_target_accepted() -> None:
+    create = _create(op_id="op_c", node_id="n_new", node_name="geo_new")
+    ref = _d1_created_ref()
+    connect = _connect(target=ref, op_id="op_w")
+    cs = _changeset(operations=(create, connect))
+    assert len(cs.operations) == 2
+
+
+def test_d1_create_under_created_parent_accepted() -> None:
+    create_a = _create(op_id="op_a", node_id="n_a", node_name="a")
+    parent_ref = NodeRef(node_id="n_a", path="/obj/ws/a", expected_type="geo", expected_workspace_id=WS)
+    create_b = _create(op_id="op_b", node_id="n_b", node_name="b", parent=parent_ref,
+                       node_type="geo")
+    cs = _changeset(operations=(create_a, create_b))
+    assert len(cs.operations) == 2
+
+
+def test_d1_multi_level_chain_accepted() -> None:
+    create_a = _create(op_id="op_a", node_id="n_a", node_name="a")
+    ref_a = NodeRef(node_id="n_a", path="/obj/ws/a", expected_type="geo", expected_workspace_id=WS)
+    create_b = _create(op_id="op_b", node_id="n_b", node_name="b", parent=ref_a, node_type="geo")
+    ref_b = NodeRef(node_id="n_b", path="/obj/ws/a/b", expected_type="geo", expected_workspace_id=WS)
+    setparm = _setparm(target=ref_b, op_id="op_s")
+    cs = _changeset(operations=(create_a, create_b, setparm))
+    assert len(cs.operations) == 3
+
+
+def test_d1_forward_set_target_rejected() -> None:
+    ref = _d1_created_ref()
+    setparm = _setparm(target=ref, op_id="op_s")
+    create = _create(op_id="op_c", node_id="n_new", node_name="geo_new")
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(operations=(setparm, create))
+
+
+def test_d1_forward_connect_source_rejected() -> None:
+    ref = _d1_created_ref()
+    connect = _connect(source=ref, op_id="op_w")
+    create = _create(op_id="op_c", node_id="n_new", node_name="geo_new")
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(operations=(connect, create))
+
+
+def test_d1_forward_create_parent_rejected() -> None:
+    parent_ref = _d1_created_ref()
+    create_child = _create(op_id="op_child", node_id="n_b", node_name="b", parent=parent_ref,
+                           node_type="geo")
+    create_parent = _create(op_id="op_parent", node_id="n_new", node_name="geo_new")
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(operations=(create_child, create_parent))
+
+
+def test_d1_cycle_rejected() -> None:
+    ref_a = NodeRef(node_id="n_b", path="/obj/ws/b", expected_type="geo", expected_workspace_id=WS)
+    ref_b = NodeRef(node_id="n_a", path="/obj/ws/a", expected_type="geo", expected_workspace_id=WS)
+    create_a = _create(op_id="op_a", node_id="n_a", node_name="a", parent=ref_a, node_type="geo")
+    create_b = _create(op_id="op_b", node_id="n_b", node_name="b", parent=ref_b, node_type="geo")
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(operations=(create_a, create_b))
+
+
+def test_d1_wrong_created_path_rejected() -> None:
+    create = _create(op_id="op_c", node_id="n_new", node_name="geo_new")
+    wrong = NodeRef(node_id="n_new", path="/obj/ws/WRONG", expected_type="geo", expected_workspace_id=WS)
+    setparm = _setparm(target=wrong, op_id="op_s")
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(operations=(create, setparm))
+
+
+def test_d1_wrong_created_type_rejected() -> None:
+    create = _create(op_id="op_c", node_id="n_new", node_name="geo_new")
+    wrong = NodeRef(node_id="n_new", path="/obj/ws/geo_new", expected_type="WRONG", expected_workspace_id=WS)
+    setparm = _setparm(target=wrong, op_id="op_s")
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(operations=(create, setparm))
+
+
+def test_d1_wrong_created_workspace_rejected() -> None:
+    create = _create(op_id="op_c", node_id="n_new", node_name="geo_new")
+    wrong = NodeRef(node_id="n_new", path="/obj/ws/geo_new", expected_type="geo", expected_workspace_id=WS2)
+    setparm = _setparm(target=wrong, op_id="op_s")
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(operations=(create, setparm))
+
+
+def test_d1_created_path_wrong_id_rejected() -> None:
+    create = _create(op_id="op_c", node_id="n_new", node_name="geo_new")
+    wrong = NodeRef(node_id="n_other", path="/obj/ws/geo_new", expected_type="geo", expected_workspace_id=WS)
+    setparm = _setparm(target=wrong, op_id="op_s")
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(operations=(create, setparm))
+
+
+def test_d1_read_deps_wrong_path_for_created_rejected() -> None:
+    create = _create(op_id="op_c", node_id="n_new", node_name="geo_new")
+    wrong = _noderef(node_id="n_new", path="/obj/ws/WRONG")
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(operations=(create,), read_dependencies=(wrong,))
+
+
+def test_d1_precondition_wrong_path_for_created_rejected() -> None:
+    create = _create(op_id="op_c", node_id="n_new", node_name="geo_new")
+    wrong = _noderef(node_id="n_new", path="/obj/ws/WRONG")
+    cond = NodeIdentityEquals(node=wrong)
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(operations=(create,), preconditions=(cond,))
+
+
+def test_d1_checkpoint_wrong_path_for_created_rejected() -> None:
+    create = _create(op_id="op_c", node_id="n_new", node_name="geo_new")
+    wrong = _noderef(node_id="n_new", path="/obj/ws/WRONG")
+    plan = CheckpointPlan(nodes=(wrong,), parameters=(), wires=())
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(operations=(create,), checkpoint_plan=plan)
+
+
+def test_d1_impossible_parm_precondition_for_created_rejected() -> None:
+    create = _create(op_id="op_c", node_id="n_new", node_name="geo_new")
+    ref = _d1_created_ref()
+    cond = ParmValueEquals(target=ref, parm_name="tx", value=0)
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(operations=(create,), preconditions=(cond,))
+
+
+def test_d1_expected_old_source_created_exact_match_accepted() -> None:
+    create = _create(op_id="op_c", node_id="n_new", node_name="geo_new")
+    ref = _d1_created_ref()
+    old_source = WireRef(source=ref, source_output_index=0)
+    connect = _connect(target=ref, expected_old_source=old_source, op_id="op_w")
+    cs = _changeset(operations=(create, connect))
+    assert len(cs.operations) == 2
+
+
+def test_d1_expected_old_source_created_wrong_path_rejected() -> None:
+    create = _create(op_id="op_c", node_id="n_new", node_name="geo_new")
+    wrong = NodeRef(node_id="n_new", path="/obj/ws/WRONG", expected_type="geo", expected_workspace_id=WS)
+    old_source = WireRef(source=wrong, source_output_index=0)
+    connect = _connect(target=_noderef(node_id="n_child"), expected_old_source=old_source, op_id="op_w")
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(operations=(create, connect))
+
+
+def test_d1_expected_old_source_forward_ref_to_later_create_rejected() -> None:
+    """expected_old_source.source pointing forward to a later create is rejected."""
+    create = _create(op_id="op_c", node_id="n_new", node_name="geo_new")
+    ref = _d1_created_ref()
+    old_source = WireRef(source=ref, source_output_index=0)
+    # connect BEFORE create → forward ref through expected_old_source
+    connect = _connect(target=_noderef(node_id="n_child"), expected_old_source=old_source, op_id="op_w")
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(operations=(connect, create))
+
+
+def test_d1_impossible_identity_precondition_for_created_rejected() -> None:
+    create = _create(op_id="op_c", node_id="n_new", node_name="geo_new")
+    ref = _d1_created_ref()
+    cond = NodeIdentityEquals(node=ref)
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(operations=(create,), preconditions=(cond,))
+
+
+def test_d1_impossible_wire_precondition_for_created_rejected() -> None:
+    create = _create(op_id="op_c", node_id="n_new", node_name="geo_new")
+    ref = _d1_created_ref()
+    cond = WireInputEquals(target=ref, input_index=0, source=None)
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(operations=(create,), preconditions=(cond,))
+
+
+def test_d1_impossible_identity_postcondition_for_created_accepted() -> None:
+    """Postconditions CAN reference a created node (it exists after the write)."""
+    create = _create(op_id="op_c", node_id="n_new", node_name="geo_new")
+    ref = _d1_created_ref()
+    cond = NodeIdentityEquals(node=ref)
+    cs = _changeset(operations=(create,), expected_postconditions=(cond,))
+    assert len(cs.operations) == 1
+
+
+def test_d1_impossible_checkpoint_parm_for_created_rejected() -> None:
+    create = _create(op_id="op_c", node_id="n_new", node_name="geo_new")
+    ref = _d1_created_ref()
+    plan = CheckpointPlan(nodes=(), parameters=(ParmSnapshot(target=ref, parm_name="tx"),), wires=())
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(operations=(create,), checkpoint_plan=plan)
+
+
+def test_d1_impossible_checkpoint_wire_for_created_rejected() -> None:
+    create = _create(op_id="op_c", node_id="n_new", node_name="geo_new")
+    ref = _d1_created_ref()
+    plan = CheckpointPlan(nodes=(), parameters=(), wires=(WireSnapshot(target=ref, input_index=0),))
+    with pytest.raises((TypeError, ValueError)):
+        _changeset(operations=(create,), checkpoint_plan=plan)
+
+
 def test_changeset_rejects_duplicate_affected_nodes() -> None:
     target = _noderef()
     with pytest.raises((TypeError, ValueError)):

@@ -1056,6 +1056,170 @@ def _check_unique_created_nodes(items: Sequence[object]) -> None:
         seen_paths.add(derived)
 
 
+# --------------------------------------------------------------------------
+# D1: intra-ChangeSet created-reference forward-sequence validation
+# --------------------------------------------------------------------------
+
+
+def _op_node_refs(op: object) -> list[NodeRef]:
+    """The NodeRefs an operation references (parent / target / source + old source)."""
+    if isinstance(op, CreateNode):
+        return [op.parent]
+    if isinstance(op, SetParm):
+        return [op.target]
+    if isinstance(op, ConnectInput):
+        refs = [op.target, op.source]
+        if op.expected_old_source is not None:
+            refs.append(op.expected_old_source.source)
+        return refs
+    return []
+
+
+def _condition_refs(cond: object) -> list[NodeRef]:
+    """Extract every NodeRef embedded in a condition."""
+    if isinstance(cond, NodeIdentityEquals):
+        return [cond.node]
+    if isinstance(cond, ParmValueEquals):
+        return [cond.target]
+    if isinstance(cond, WireInputEquals):
+        refs = [cond.target]
+        if cond.source is not None:
+            refs.append(cond.source.source)
+        return refs
+    return []
+
+
+def _is_created_ref(ref: NodeRef, created_ids: set[str], created_paths: set[str]) -> bool:
+    """Whether a NodeRef collides with any declared create by ID or path."""
+    return (ref.node_id is not None and ref.node_id in created_ids) or ref.path in created_paths
+
+
+def _check_created_ref(
+    ref: NodeRef,
+    current_index: int,
+    created_by_id: dict[str, tuple[NodeRef, int]],
+    created_by_path: dict[str, tuple[NodeRef, int]],
+) -> None:
+    """Reject a reference that collides with a created identity but does not
+    exactly match its derived NodeRef, or whose producer is not earlier."""
+    if ref.node_id is not None and ref.node_id in created_by_id:
+        derived, producer_index = created_by_id[ref.node_id]
+        if ref != derived:
+            raise ValueError(
+                "ChangeSet.operations: created node id paired with different facts"
+            )
+        if producer_index >= current_index:
+            raise ValueError(
+                "ChangeSet.operations: forward reference to a later created node"
+            )
+        return
+    if ref.path in created_by_path:
+        derived, producer_index = created_by_path[ref.path]
+        if ref != derived:
+            raise ValueError(
+                "ChangeSet.operations: created node path paired with different facts"
+            )
+        if producer_index >= current_index:
+            raise ValueError(
+                "ChangeSet.operations: forward reference to a later created node"
+            )
+
+
+def _reject_impossible_preflight_facts(
+    preconditions: Sequence[object],
+    checkpoint_plan: "CheckpointPlan",
+    created_ids: set[str],
+    created_paths: set[str],
+) -> None:
+    """Reject preconditions/checkpoints that require the state of a node that is
+    only created during this transaction — they cannot be verified at preflight."""
+    for cond in preconditions:
+        if isinstance(cond, (NodeIdentityEquals, ParmValueEquals, WireInputEquals)):
+            for ref in _condition_refs(cond):
+                if _is_created_ref(ref, created_ids, created_paths):
+                    raise ValueError(
+                        "ChangeSet: precondition references a transaction-created "
+                        "node whose state cannot exist at preflight"
+                    )
+    for snap in checkpoint_plan.parameters:
+        if _is_created_ref(snap.target, created_ids, created_paths):
+            raise ValueError(
+                "ChangeSet: checkpoint parameter targets a transaction-created node"
+            )
+    for snap in checkpoint_plan.wires:
+        if _is_created_ref(snap.target, created_ids, created_paths):
+            raise ValueError(
+                "ChangeSet: checkpoint wire targets a transaction-created node"
+            )
+    for ref in checkpoint_plan.nodes:
+        if _is_created_ref(ref, created_ids, created_paths):
+            raise ValueError(
+                "ChangeSet: checkpoint node targets a transaction-created node"
+            )
+
+
+def _validate_created_references(
+    items: Sequence[object],
+    affected: Sequence[NodeRef],
+    read_deps: Sequence[NodeRef],
+    preconditions: Sequence[object],
+    expected_postconditions: Sequence[object],
+    checkpoint_plan: "CheckpointPlan",
+) -> None:
+    """Validate the forward-sequence rule for created-node references (D1).
+
+    Collects every declared create's derived NodeRef and op index, then checks
+    EVERY embedded NodeRef surface: operation refs (including expected_old_source),
+    affected nodes, read dependencies, preconditions, postconditions (including
+    WireRef.source), and checkpoint entries. Ordered operation refs must point to
+    an earlier producer; aggregate refs require exact derived identity.
+
+    Preconditions/checkpoints that require the state of a transaction-created
+    node are impossible at preflight and fail closed at construction.
+    """
+    created_by_id: dict[str, tuple[NodeRef, int]] = {}
+    created_by_path: dict[str, tuple[NodeRef, int]] = {}
+    for index, op in enumerate(items):
+        if isinstance(op, CreateNode):
+            derived_path = _derive_create_path(op.parent.path, op.node_name)
+            ref = NodeRef(
+                node_id=op.node_id,
+                path=derived_path,
+                expected_type=op.node_type,
+                expected_workspace_id=op.workspace_id,
+            )
+            created_by_id[op.node_id] = (ref, index)
+            created_by_path[derived_path] = (ref, index)
+    created_ids = set(created_by_id)
+    created_paths = set(created_by_path)
+    total = len(items)
+
+    # 1. Ordered operation references (forward-reference check applies).
+    for index, op in enumerate(items):
+        for ref in _op_node_refs(op):
+            _check_created_ref(ref, index, created_by_id, created_by_path)
+
+    # 2. Aggregate references — exact match only (all creates are "earlier").
+    for ref in list(affected) + list(read_deps):
+        _check_created_ref(ref, total, created_by_id, created_by_path)
+
+    # 3. Condition references (pre + post) — exact match only.
+    for cond in list(preconditions) + list(expected_postconditions):
+        for ref in _condition_refs(cond):
+            _check_created_ref(ref, total, created_by_id, created_by_path)
+
+    # 4. Checkpoint references — exact match only.
+    for ref in list(checkpoint_plan.nodes):
+        _check_created_ref(ref, total, created_by_id, created_by_path)
+    for snap in list(checkpoint_plan.parameters):
+        _check_created_ref(snap.target, total, created_by_id, created_by_path)
+    for snap in list(checkpoint_plan.wires):
+        _check_created_ref(snap.target, total, created_by_id, created_by_path)
+
+    # 5. Reject impossible preflight facts (created-node state in pre/checkpoint).
+    _reject_impossible_preflight_facts(preconditions, checkpoint_plan, created_ids, created_paths)
+
+
 def _freeze_node_refs(value: object, label: str) -> tuple[NodeRef, ...]:
     return _freeze_typed_sequence(value, label, (NodeRef,))  # type: ignore[return-value]
 
@@ -1114,6 +1278,10 @@ class ChangeSet:
             raise TypeError("ChangeSet.risk_summary must be an exact RiskSummary")
         if type(self.checkpoint_plan) is not CheckpointPlan:
             raise TypeError("ChangeSet.checkpoint_plan must be an exact CheckpointPlan")
+        _validate_created_references(
+            operations, affected, read_deps, preconditions, postconditions,
+            self.checkpoint_plan,
+        )
         object.__setattr__(self, "operations", operations)
         object.__setattr__(self, "affected_nodes", affected)
         object.__setattr__(self, "read_dependencies", read_deps)

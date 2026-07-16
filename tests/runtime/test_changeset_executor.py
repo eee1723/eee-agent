@@ -43,7 +43,9 @@ from eee_agent.houdini_bridge.changesets import ApplyRequest
 from eee_agent.houdini_bridge.queue import MainThreadReadQueue, QueueItemCancelled
 from houdini_side.changeset_executor import (
     ChangeSetExecutor,
+    ChangeSetPreflightAdapter,
     _dedup,
+    _wire_equal,
     derive_mandatory_checkpoint,
     derive_mandatory_postconditions,
     derive_mandatory_preconditions,
@@ -128,9 +130,15 @@ class _Node:
         created_raise_after_setinput_once: bool = False,
         fail_user_data: bool = False, created_fail_user_data: bool = False,
         create_enter_event: object = None, create_release_event: object = None,
+        created_parms: dict[str, object] | None = None,
+        tamper_key: str | None = None, created_tamper_key: str | None = None,
+        created_tamper_path: str | None = None, created_tamper_type: str | None = None,
+        _tamper_path: str | None = None, _tamper_type: str | None = None,
     ) -> None:
         self._scene, self._spy = scene, spy
         self._path, self._type, self._parent = path, type_name, parent
+        self._tamper_path = _tamper_path
+        self._tamper_type = _tamper_type
         self._user_data = dict(user_data or {})
         self._parms = {n: _Parm(self, n, v) for n, v in (parms or {}).items()}
         self._inputs: dict[int, tuple[_Node, int]] = {}
@@ -152,13 +160,18 @@ class _Node:
         self.created_fail_user_data = created_fail_user_data
         self.create_enter_event = create_enter_event
         self.create_release_event = create_release_event
+        self.created_parms = dict(created_parms or {})
+        self.tamper_key = tamper_key
+        self.created_tamper_key = created_tamper_key
+        self.created_tamper_path = created_tamper_path
+        self.created_tamper_type = created_tamper_type
         self._create_count = 0
 
     def _record(self, method: str, *args: object) -> None:
         self._spy.append((method, self._path, *args))
 
     def path(self) -> str:
-        return self._path
+        return self._tamper_path if self._tamper_path is not None else self._path
 
     def name(self) -> str:
         return self._path.rsplit("/", 1)[-1]
@@ -166,7 +179,7 @@ class _Node:
     def type(self) -> _Type:
         if self.fail_type_read:
             raise RuntimeError("type read failed")
-        return _Type(self._type)
+        return _Type(self._tamper_type if self._tamper_type is not None else self._type)
 
     def parent(self) -> _ParentRef:
         return _ParentRef(self._parent)
@@ -180,7 +193,10 @@ class _Node:
         self._record("setUserData", key)
         if self.fail_set_user_data_key is not None and key == self.fail_set_user_data_key:
             raise RuntimeError(f"setUserData({key}) failed")
-        self._user_data[key] = value
+        if self.tamper_key is not None and key == self.tamper_key:
+            self._user_data[key] = "TAMPERED"
+        else:
+            self._user_data[key] = value
 
     def parm(self, name: str) -> _Parm | None:
         return self._parms.get(name)
@@ -206,8 +222,12 @@ class _Node:
         else:
             self._inputs[idx] = (src, out_idx)
         if self.raise_after_setinput_once:
-            self.raise_after_setinput_once = False  # one-shot: rollback restore must succeed
+            self.raise_after_setinput_once = False
             raise RuntimeError("setInput raised after mutating")
+        cb = getattr(self, "_post_setinput_callback", None)
+        if cb is not None:
+            self._post_setinput_callback = None  # one-shot
+            cb(self, idx, src)
 
     def createNode(self, type_name: str, name: str) -> "_Node":
         self._record("createNode", type_name, name)
@@ -228,6 +248,11 @@ class _Node:
             fail_set_user_data_key=self.created_fail_set_user_data_key,
             raise_after_setinput_once=self.created_raise_after_setinput_once,
             fail_user_data=self.created_fail_user_data,
+            parms=dict(self.created_parms),
+            created_parms=dict(self.created_parms),
+            tamper_key=self.created_tamper_key,
+            _tamper_path=self.created_tamper_path,
+            _tamper_type=self.created_tamper_type,
         )
         self._scene[path] = node
         return node
@@ -1067,3 +1092,604 @@ def test_f10_user_data_read_exception_refuses_destroy_and_freezes() -> None:
     assert executor.write_frozen is True
     # The created node was NOT destroyed (identity unprovable).
     assert "/obj/ws/geo_new" in scene
+
+
+# --------------------------------------------------------------------------
+# D1: create-then-set/connect/child — JIT enforcement
+# --------------------------------------------------------------------------
+
+
+def test_d1_create_then_set_applied() -> None:
+    """create a node, then set its parm. The created node has a default tx=0
+    (via created_parms); the JIT reads it, compares to expected_old_value=0,
+    and writes the new value."""
+    spy: list = []
+    scene = _standard_scene(spy)
+    scene["/obj/ws"].created_parms = {"tx": 0}
+    adapter = _adapter(spy, scene)
+    create = CreateNode(
+        op_id="op_c", parent=_noderef("n_root", "/obj/ws", "subnet"), node_id="n_new",
+        node_type="geo", node_name="geo_new", workspace_id=WS, capability="modeling", role="member",
+    )
+    ref = NodeRef(node_id="n_new", path="/obj/ws/geo_new", expected_type="geo", expected_workspace_id=WS)
+    setparm = SetParm(op_id="op_s", target=ref, parm_name="tx", value=5, expected_old_value=0)
+    _cs, req = _complete(adapter, (create, setparm))
+    receipt = ChangeSetExecutor(adapter).apply(req)
+    assert receipt.status.value == "Applied"
+    assert receipt.applied_op_ids == ("op_c", "op_s")
+    assert scene["/obj/ws/geo_new"].parm("tx").eval() == 5
+
+
+def test_d1_create_then_connect_as_target_applied() -> None:
+    """create a node, then connect its input. Created target has no inputs →
+    expected_old_source=None matches → connect writes."""
+    spy: list = []
+    adapter = _adapter(spy)
+    create = CreateNode(
+        op_id="op_c", parent=_noderef("n_root", "/obj/ws", "subnet"), node_id="n_new",
+        node_type="geo", node_name="geo_new", workspace_id=WS, capability="modeling", role="member",
+    )
+    ref = NodeRef(node_id="n_new", path="/obj/ws/geo_new", expected_type="geo", expected_workspace_id=WS)
+    src = _noderef("n_src", "/obj/ws/src1", "xform")
+    connect = ConnectInput(op_id="op_w", target=ref, input_index=0, source=src,
+                           source_output_index=0, expected_old_source=None)
+    _cs, req = _complete(adapter, (create, connect))
+    receipt = ChangeSetExecutor(adapter).apply(req)
+    assert receipt.status.value == "Applied"
+    assert receipt.applied_op_ids == ("op_c", "op_w")
+
+
+def test_d1_create_under_created_parent_applied() -> None:
+    """create parent, then create child under that parent. The executor verifies
+    the parent's full created identity (mirrors + path + type) before the child
+    createNode."""
+    spy: list = []
+    adapter = _adapter(spy)
+    parent = _noderef("n_root", "/obj/ws", "subnet")
+    create_a = CreateNode(op_id="op_a", parent=parent, node_id="n_a", node_type="geo",
+                          node_name="a", workspace_id=WS, capability="modeling", role="member")
+    ref_a = NodeRef(node_id="n_a", path="/obj/ws/a", expected_type="geo", expected_workspace_id=WS)
+    create_b = CreateNode(op_id="op_b", parent=ref_a, node_id="n_b", node_type="geo",
+                          node_name="b", workspace_id=WS, capability="modeling", role="member")
+    _cs, req = _complete(adapter, (create_a, create_b))
+    receipt = ChangeSetExecutor(adapter).apply(req)
+    assert receipt.status.value == "Applied"
+    assert receipt.applied_op_ids == ("op_a", "op_b")
+    assert "/obj/ws/a" in scene_nodes(adapter)
+    assert "/obj/ws/a/b" in scene_nodes(adapter)
+
+
+def scene_nodes(adapter: HoudiniSceneAdapter) -> dict:
+    return adapter._hou._nodes  # type: ignore[attr-defined]
+
+
+def test_d1_jit_parm_stale_mismatch_rolls_back() -> None:
+    """create a node with tx=0, then set tx with expected_old_value=999. The JIT
+    comparison (0 != 999) fails → the set op makes zero writes, the prior create
+    rolls back → RolledBack."""
+    spy: list = []
+    scene = _standard_scene(spy)
+    scene["/obj/ws"].created_parms = {"tx": 0}
+    adapter = _adapter(spy, scene)
+    create = CreateNode(
+        op_id="op_c", parent=_noderef("n_root", "/obj/ws", "subnet"), node_id="n_new",
+        node_type="geo", node_name="geo_new", workspace_id=WS, capability="modeling", role="member",
+    )
+    ref = NodeRef(node_id="n_new", path="/obj/ws/geo_new", expected_type="geo", expected_workspace_id=WS)
+    setparm = SetParm(op_id="op_s", target=ref, parm_name="tx", value=5, expected_old_value=999)
+    _cs, req = _complete(adapter, (create, setparm))
+    receipt = ChangeSetExecutor(adapter).apply(req)
+    assert receipt.status.value == "RolledBack"
+    # the set op was NOT applied
+    assert "op_s" not in receipt.applied_op_ids
+    # the created node was rolled back (destroyed)
+    assert "/obj/ws/geo_new" not in scene_nodes(adapter)
+
+
+def test_d1_jit_wire_stale_mismatch_rolls_back() -> None:
+    """create a node, then connect with a wrong expected_old_source. The JIT
+    comparison fails → connect makes zero writes, prior create rolls back."""
+    spy: list = []
+    adapter = _adapter(spy)
+    create = CreateNode(
+        op_id="op_c", parent=_noderef("n_root", "/obj/ws", "subnet"), node_id="n_new",
+        node_type="geo", node_name="geo_new", workspace_id=WS, capability="modeling", role="member",
+    )
+    ref = NodeRef(node_id="n_new", path="/obj/ws/geo_new", expected_type="geo", expected_workspace_id=WS)
+    src = _noderef("n_src", "/obj/ws/src1", "xform")
+    wrong_old = WireRef(source=_noderef("n_child", "/obj/ws/geo1", "geo"), source_output_index=0)
+    connect = ConnectInput(op_id="op_w", target=ref, input_index=0, source=src,
+                           source_output_index=0, expected_old_source=wrong_old)
+    _cs, req = _complete(adapter, (create, connect))
+    receipt = ChangeSetExecutor(adapter).apply(req)
+    assert receipt.status.value == "RolledBack"
+    assert "op_w" not in receipt.applied_op_ids
+    assert "/obj/ws/geo_new" not in scene_nodes(adapter)
+
+
+def test_d1_created_parent_tampering_rejects_child_create() -> None:
+    """create parent with a tampered mirror (node_id='TAMPERED'), then create child
+    under that parent. The JIT identity verification reads 'TAMPERED' != 'n_a' →
+    child create fails → prior writes roll back (or uncertain recovery)."""
+    spy: list = []
+    scene = _standard_scene(spy)
+    scene["/obj/ws"].created_tamper_key = "eee.node_id"
+    adapter = _adapter(spy, scene)
+    create_a = CreateNode(op_id="op_a", parent=_noderef("n_root", "/obj/ws", "subnet"),
+                          node_id="n_a", node_type="geo", node_name="a",
+                          workspace_id=WS, capability="modeling", role="member")
+    ref_a = NodeRef(node_id="n_a", path="/obj/ws/a", expected_type="geo", expected_workspace_id=WS)
+    create_b = CreateNode(op_id="op_b", parent=ref_a, node_id="n_b", node_type="geo",
+                          node_name="b", workspace_id=WS, capability="modeling", role="member")
+    _cs, req = _complete(adapter, (create_a, create_b))
+    receipt = ChangeSetExecutor(adapter).apply(req)
+    # child create was NOT applied
+    assert receipt.status.value != "Applied"
+    assert "op_b" not in receipt.applied_op_ids
+    # child node does not exist
+    assert "/obj/ws/a/b" not in scene_nodes(adapter)
+
+
+def test_d1_repeated_setparm_on_existing_parm_applied() -> None:
+    """F2: two SetParm ops on the same existing parm (0→1→2) must construct and
+    apply. Only the first gets a preflight old-value precondition; the second's
+    expected-old is JIT-only."""
+    spy: list = []
+    adapter = _adapter(spy)
+    child = _noderef("n_child", "/obj/ws/geo1", "geo")
+    ops = (
+        SetParm(op_id="op_s1", target=child, parm_name="tx", value=1, expected_old_value=0),
+        SetParm(op_id="op_s2", target=child, parm_name="tx", value=2, expected_old_value=1),
+    )
+    _cs, req = _complete(adapter, ops)
+    receipt = ChangeSetExecutor(adapter).apply(req)
+    assert receipt.status.value == "Applied"
+    assert receipt.applied_op_ids == ("op_s1", "op_s2")
+    assert scene_nodes(adapter)["/obj/ws/geo1"].parm("tx").eval() == 2
+
+
+def test_d1_both_created_endpoints_connect_applied() -> None:
+    """F5: connect using both a created target and a created source."""
+    spy: list = []
+    adapter = _adapter(spy)
+    create_a = CreateNode(op_id="op_a", parent=_noderef("n_root", "/obj/ws", "subnet"),
+                          node_id="n_a", node_type="geo", node_name="a",
+                          workspace_id=WS, capability="modeling", role="member")
+    ref_a = NodeRef(node_id="n_a", path="/obj/ws/a", expected_type="geo", expected_workspace_id=WS)
+    create_b = CreateNode(op_id="op_b", parent=ref_a, node_id="n_b", node_type="geo",
+                          node_name="b", workspace_id=WS, capability="modeling", role="member")
+    ref_b = NodeRef(node_id="n_b", path="/obj/ws/a/b", expected_type="geo", expected_workspace_id=WS)
+    connect = ConnectInput(op_id="op_w", target=ref_b, input_index=0, source=ref_a,
+                           source_output_index=0, expected_old_source=None)
+    _cs, req = _complete(adapter, (create_a, create_b, connect))
+    receipt = ChangeSetExecutor(adapter).apply(req)
+    assert receipt.status.value == "Applied"
+    assert receipt.applied_op_ids == ("op_a", "op_b", "op_w")
+
+
+def test_d1_jit_parm_stale_exact_zero_current_write() -> None:
+    """F5: JIT stale on the SECOND SetParm → that op makes zero writes. Prior
+    effects roll back in reverse. Assert exact receipt status and zero-write."""
+    spy: list = []
+    scene = _standard_scene(spy)
+    scene["/obj/ws"].created_parms = {"tx": 0}
+    adapter = _adapter(spy, scene)
+    create = CreateNode(op_id="op_c", parent=_noderef("n_root", "/obj/ws", "subnet"),
+                        node_id="n_new", node_type="geo", node_name="geo_new",
+                        workspace_id=WS, capability="modeling", role="member")
+    ref = NodeRef(node_id="n_new", path="/obj/ws/geo_new", expected_type="geo", expected_workspace_id=WS)
+    set1 = SetParm(op_id="op_s1", target=ref, parm_name="tx", value=1, expected_old_value=0)
+    set2 = SetParm(op_id="op_s2", target=ref, parm_name="tx", value=2, expected_old_value=999)
+    _cs, req = _complete(adapter, (create, set1, set2))
+    receipt = ChangeSetExecutor(adapter).apply(req)
+    assert receipt.status.value == "RolledBack"
+    assert "op_s2" not in receipt.applied_op_ids
+    # op_s2 made ZERO parm.set writes; only op_s1's write + rollback restore appear
+    parm_sets = [m for m in spy if m[0] == "parm.set" and m[1] == "/obj/ws/geo_new"]
+    assert len(parm_sets) == 2  # op_s1 write + rollback restore; NOT op_s2
+    # created node was rolled back
+    assert "/obj/ws/geo_new" not in scene_nodes(adapter)
+
+
+def test_d1_multi_level_create_set_connect_chain() -> None:
+    """F5: combined multi-level create-parent → create-children → set → connect."""
+    spy: list = []
+    scene = _standard_scene(spy)
+    scene["/obj/ws"].created_parms = {"tx": 0}
+    adapter = _adapter(spy, scene)
+    create_sub = CreateNode(op_id="op_c1", parent=_noderef("n_root", "/obj/ws", "subnet"),
+                            node_id="n_sub", node_type="geo", node_name="sub",
+                            workspace_id=WS, capability="modeling", role="member")
+    ref_sub = NodeRef(node_id="n_sub", path="/obj/ws/sub", expected_type="geo", expected_workspace_id=WS)
+    create_a = CreateNode(op_id="op_c2", parent=ref_sub, node_id="n_a", node_type="geo",
+                          node_name="a", workspace_id=WS, capability="modeling", role="member")
+    create_b = CreateNode(op_id="op_c3", parent=ref_sub, node_id="n_b", node_type="geo",
+                          node_name="b", workspace_id=WS, capability="modeling", role="member")
+    ref_a = NodeRef(node_id="n_a", path="/obj/ws/sub/a", expected_type="geo", expected_workspace_id=WS)
+    ref_b = NodeRef(node_id="n_b", path="/obj/ws/sub/b", expected_type="geo", expected_workspace_id=WS)
+    setparm = SetParm(op_id="op_s", target=ref_a, parm_name="tx", value=5, expected_old_value=0)
+    connect = ConnectInput(op_id="op_w", target=ref_b, input_index=0, source=ref_a,
+                           source_output_index=0, expected_old_source=None)
+    ops = (create_sub, create_a, create_b, setparm, connect)
+    _cs, req = _complete(adapter, ops)
+    receipt = ChangeSetExecutor(adapter).apply(req)
+    assert receipt.status.value == "Applied"
+    assert receipt.applied_op_ids == ("op_c1", "op_c2", "op_c3", "op_s", "op_w")
+    assert scene_nodes(adapter)["/obj/ws/sub/a"].parm("tx").eval() == 5
+
+
+# --------------------------------------------------------------------------
+# Fix 1: _wire_equal preserves optional-field semantics
+# --------------------------------------------------------------------------
+
+
+def test_fix1_wire_equal_optional_fields_regression() -> None:
+    """An expected_old_source with node_id=None / workspace=None must match by
+    path/type/output only — the regression that broke existing-scene wires."""
+    actual = WireRef(
+        source=NodeRef(node_id="n_src", path="/obj/ws/src1", expected_type="xform",
+                       expected_workspace_id=WS),
+        source_output_index=0,
+    )
+    expected = WireRef(
+        source=NodeRef(node_id=None, path="/obj/ws/src1", expected_type="xform",
+                       expected_workspace_id=None),
+        source_output_index=0,
+    )
+    assert _wire_equal(actual, expected) is True
+    # Mismatched path still rejects
+    bad = WireRef(
+        source=NodeRef(node_id=None, path="/obj/ws/WRONG", expected_type="xform",
+                       expected_workspace_id=None),
+        source_output_index=0,
+    )
+    assert _wire_equal(actual, bad) is False
+
+
+def test_fix1_wire_equal_declared_fields_enforced() -> None:
+    """When the expected ref DECLARES node_id/workspace, they must match."""
+    actual = WireRef(
+        source=NodeRef(node_id="n_src", path="/obj/ws/src1", expected_type="xform",
+                       expected_workspace_id=WS),
+        source_output_index=0,
+    )
+    expected_exact = WireRef(
+        source=NodeRef(node_id="n_src", path="/obj/ws/src1", expected_type="xform",
+                       expected_workspace_id=WS),
+        source_output_index=0,
+    )
+    assert _wire_equal(actual, expected_exact) is True
+    expected_wrong_id = WireRef(
+        source=NodeRef(node_id="n_other", path="/obj/ws/src1", expected_type="xform",
+                       expected_workspace_id=WS),
+        source_output_index=0,
+    )
+    assert _wire_equal(actual, expected_wrong_id) is False
+
+
+# --------------------------------------------------------------------------
+# Fix 2: created-source → connect → reconnect; tampered old-created-source
+# --------------------------------------------------------------------------
+
+
+def test_fix2_create_source_connect_existing_target_then_reconnect() -> None:
+    """create A → connect existing target slot from None to A → reconnect from A
+    to existing B. The reconnect's expected_old_source is A (created)."""
+    spy: list = []
+    adapter = _adapter(spy)
+    create_a = CreateNode(
+        op_id="op_c", parent=_noderef("n_root", "/obj/ws", "subnet"), node_id="n_new",
+        node_type="geo", node_name="geo_new", workspace_id=WS, capability="modeling", role="member",
+    )
+    ref_a = NodeRef(node_id="n_new", path="/obj/ws/geo_new", expected_type="geo", expected_workspace_id=WS)
+    child = _noderef("n_child", "/obj/ws/geo1", "geo")
+    src = _noderef("n_src", "/obj/ws/src1", "xform")
+    connect1 = ConnectInput(
+        op_id="op_w1", target=child, input_index=1, source=ref_a,
+        source_output_index=0, expected_old_source=None,
+    )
+    old_from_a = WireRef(source=ref_a, source_output_index=0)
+    connect2 = ConnectInput(
+        op_id="op_w2", target=child, input_index=1, source=src,
+        source_output_index=0, expected_old_source=old_from_a,
+    )
+    ops = (create_a, connect1, connect2)
+    _cs, req = _complete(adapter, ops)
+    receipt = ChangeSetExecutor(adapter).apply(req)
+    assert receipt.status.value == "Applied"
+    assert receipt.applied_op_ids == ("op_c", "op_w1", "op_w2")
+
+
+def test_fix2_tampered_old_created_source_reconnect_partial_freeze() -> None:
+    """create A → connect1 wires existing target child input 1 from None to A
+    (desired source). After connect1's setInput, a one-shot callback tampers A's
+    capability mirror. connect2 reconnects the same slot (expected_old_source =
+    A); the JIT resolves the actual old source and calls the six-mirror verifier,
+    which rejects the tampered capability. connect2 makes zero current write.
+    Rollback: wire restore succeeds (one), create destroy is refused (tampered
+    capability mismatch) → Partial + scene_may_have_changed + freeze."""
+    spy: list = []
+    scene = _standard_scene(spy)
+    adapter = _adapter(spy, scene)
+    create_a = CreateNode(
+        op_id="op_c", parent=_noderef("n_root", "/obj/ws", "subnet"), node_id="n_new",
+        node_type="geo", node_name="geo_new", workspace_id=WS, capability="modeling", role="member",
+    )
+    ref_a = NodeRef(node_id="n_new", path="/obj/ws/geo_new", expected_type="geo", expected_workspace_id=WS)
+    child = _noderef("n_child", "/obj/ws/geo1", "geo")
+    src = _noderef("n_src", "/obj/ws/src1", "xform")
+    connect1 = ConnectInput(
+        op_id="op_w1", target=child, input_index=1, source=ref_a,
+        source_output_index=0, expected_old_source=None,
+    )
+    old_from_a = WireRef(source=ref_a, source_output_index=0)
+    connect2 = ConnectInput(
+        op_id="op_w2", target=child, input_index=1, source=src,
+        source_output_index=0, expected_old_source=old_from_a,
+    )
+    ops = (create_a, connect1, connect2)
+    _cs, req = _complete(adapter, ops)
+
+    # After connect1's first successful forward setInput on child input 1,
+    # tamper A's capability mirror so the reconnect's JIT six-mirror check
+    # on the OLD source fails.
+    def _tamper_a_cap(_target, _idx, _src):
+        a_node = scene.get("/obj/ws/geo_new")
+        if a_node is not None:
+            a_node._user_data["eee.capability"] = "TAMPERED"
+    scene["/obj/ws/geo1"]._post_setinput_callback = _tamper_a_cap
+
+    executor = ChangeSetExecutor(adapter)
+    receipt = executor.apply(req)
+    # connect1 was applied; connect2 was NOT
+    assert "op_w1" in receipt.applied_op_ids
+    assert "op_w2" not in receipt.applied_op_ids
+    # connect2 made zero writes: only connect1's forward setInput + the
+    # rollback's restore setInput appear (2 total, NOT 3).
+    setinputs_on_slot = [m for m in spy if m[0] == "setInput" and m[1] == "/obj/ws/geo1" and m[2] == 1]
+    assert len(setinputs_on_slot) == 2  # connect1 forward + rollback restore
+    # Rollback order: wire restore (first inverse reversed), then create (second)
+    assert receipt.status.value == "Partial"
+    assert receipt.scene_may_have_changed is True
+    assert executor.write_frozen is True
+    # Wire restore succeeded; create destroy was refused
+    assert receipt.rollback_results[0].kind == "wire.input_equals"
+    assert receipt.rollback_results[0].passed is True
+    assert receipt.rollback_results[1].kind == "node.absent"
+    assert receipt.rollback_results[1].passed is False  # tampered cap → refused
+
+
+# --------------------------------------------------------------------------
+# Fix 3: repeated ConnectInput on existing target slot + executor wire_equal
+# --------------------------------------------------------------------------
+
+
+def test_fix3_executor_path_only_old_source_matches_existing_wire() -> None:
+    """Executor-level regression: an existing target slot wired to a mirrored
+    source is reconnected using a path-only expected_old_source (node_id=None,
+    workspace=None). The apply must succeed — _wire_equal preserves optional-
+    field semantics end-to-end."""
+    spy: list = []
+    adapter = _adapter(spy)
+    child = _noderef("n_child", "/obj/ws/geo1", "geo")
+    src1 = _noderef("n_src", "/obj/ws/src1", "xform")
+    src2 = _noderef("n_root", "/obj/ws", "subnet")
+    connect1 = ConnectInput(op_id="op_w1", target=child, input_index=1, source=src1,
+                            source_output_index=0, expected_old_source=None)
+    # path-only old source: node_id=None, workspace=None
+    path_only_old = WireRef(
+        source=NodeRef(node_id=None, path="/obj/ws/src1", expected_type="xform",
+                       expected_workspace_id=None),
+        source_output_index=0,
+    )
+    connect2 = ConnectInput(op_id="op_w2", target=child, input_index=1, source=src2,
+                            source_output_index=0, expected_old_source=path_only_old)
+    ops = (connect1, connect2)
+    _cs, req = _complete(adapter, ops)
+    receipt = ChangeSetExecutor(adapter).apply(req)
+    assert receipt.status.value == "Applied"
+    assert receipt.applied_op_ids == ("op_w1", "op_w2")
+
+
+def test_fix3_repeated_connect_existing_slot_applied() -> None:
+    """Two ConnectInput ops on the same existing target slot: first None→src1,
+    then src1→src2. Only the first gets a preflight old-wire precondition; the
+    second is JIT-only. Both must apply."""
+    spy: list = []
+    adapter = _adapter(spy)
+    child = _noderef("n_child", "/obj/ws/geo1", "geo")
+    src1 = _noderef("n_src", "/obj/ws/src1", "xform")
+    # src2 doesn't exist in the standard scene; use n_root as a stand-in source
+    src2 = _noderef("n_root", "/obj/ws", "subnet")
+    connect1 = ConnectInput(op_id="op_w1", target=child, input_index=1, source=src1,
+                            source_output_index=0, expected_old_source=None)
+    old_from_src1 = WireRef(source=src1, source_output_index=0)
+    connect2 = ConnectInput(op_id="op_w2", target=child, input_index=1, source=src2,
+                            source_output_index=0, expected_old_source=old_from_src1)
+    ops = (connect1, connect2)
+    _cs, req = _complete(adapter, ops)
+    receipt = ChangeSetExecutor(adapter).apply(req)
+    assert receipt.status.value == "Applied"
+    assert receipt.applied_op_ids == ("op_w1", "op_w2")
+
+
+def test_fix3_repeated_connect_stale_second_rolls_back() -> None:
+    """Second connect on same slot with a stale expected_old_source → JIT fails →
+    zero current write → rollback of the first connect."""
+    spy: list = []
+    adapter = _adapter(spy)
+    child = _noderef("n_child", "/obj/ws/geo1", "geo")
+    src1 = _noderef("n_src", "/obj/ws/src1", "xform")
+    src2 = _noderef("n_root", "/obj/ws", "subnet")
+    connect1 = ConnectInput(op_id="op_w1", target=child, input_index=1, source=src1,
+                            source_output_index=0, expected_old_source=None)
+    wrong_old = WireRef(
+        source=_noderef("n_root", "/obj/ws", "subnet"), source_output_index=0,
+    )
+    connect2 = ConnectInput(op_id="op_w2", target=child, input_index=1, source=src2,
+                            source_output_index=0, expected_old_source=wrong_old)
+    ops = (connect1, connect2)
+    _cs, req = _complete(adapter, ops)
+    receipt = ChangeSetExecutor(adapter).apply(req)
+    assert receipt.status.value == "RolledBack"
+    assert "op_w2" not in receipt.applied_op_ids
+
+
+# --------------------------------------------------------------------------
+# Fix 4: direct preflight adapter evidence for created targets
+# --------------------------------------------------------------------------
+
+
+def test_fix4_preflight_no_parm_wire_facts_for_created_targets() -> None:
+    """Exercising the preflight adapter directly: a ChangeSet with create, a
+    created-target SetParm, a created-target ConnectInput, AND an existing-target
+    SetParm. Proves create targets are absent, created targets produce NO parm
+    or wire facts, and the existing target's parm fact is exactly correct."""
+    spy: list = []
+    scene = _standard_scene(spy)
+    adapter = _adapter(spy, scene)
+    from eee_agent.houdini_bridge.changesets import PreflightRequest
+    create = CreateNode(
+        op_id="op_c", parent=_noderef("n_root", "/obj/ws", "subnet"), node_id="n_new",
+        node_type="geo", node_name="geo_new", workspace_id=WS, capability="modeling", role="member",
+    )
+    ref = NodeRef(node_id="n_new", path="/obj/ws/geo_new", expected_type="geo", expected_workspace_id=WS)
+    created_setparm = SetParm(op_id="op_s1", target=ref, parm_name="tx", value=5, expected_old_value=0)
+    created_connect = ConnectInput(
+        op_id="op_w1", target=ref, input_index=0, source=_noderef("n_src", "/obj/ws/src1", "xform"),
+        source_output_index=0, expected_old_source=None,
+    )
+    child = _noderef("n_child", "/obj/ws/geo1", "geo")
+    existing_setparm = SetParm(op_id="op_s2", target=child, parm_name="tx", value=9, expected_old_value=0)
+    ops = (create, created_setparm, created_connect, existing_setparm)
+    cs, _req = _complete(adapter, ops)
+    preflight_req = PreflightRequest.build(
+        request_id="req_pf", deadline_ms=5000,
+        scene_epoch=adapter.binding().scene_epoch, changeset=cs, workspace=_manifest(adapter),
+    )
+    pre = ChangeSetPreflightAdapter(adapter)
+    result = pre.preflight(preflight_req)
+    # Create target is proven absent
+    create_facts = [f for f in result.node_facts if f.requested.node_id == "n_new"]
+    assert len(create_facts) == 1
+    assert create_facts[0].exists is False
+    # No parm facts for the created target
+    created_parm_facts = [f for f in result.parm_facts if f.target.node_id == "n_new"]
+    assert created_parm_facts == []
+    # No wire facts for the created target
+    created_wire_facts = [f for f in result.wire_facts if f.target.node_id == "n_new"]
+    assert created_wire_facts == []
+    # Existing target parm fact is present and exact
+    existing_parm_facts = [f for f in result.parm_facts if f.target.node_id == "n_child"]
+    assert len(existing_parm_facts) == 1
+    assert existing_parm_facts[0].exists is True
+    assert existing_parm_facts[0].parm_name == "tx"
+    assert existing_parm_facts[0].value == 0
+
+
+# --------------------------------------------------------------------------
+# Fix 5: parameterized mirror + path/type tampering; exact statuses
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("tamper_key", [
+    "eee.node_id", "eee.workspace_id", "eee.capability", "eee.role", "eee.schema_version",
+    "eee.created_by_run",
+])
+def test_fix5_six_mirror_tampering_before_child_create(tamper_key: str) -> None:
+    """Parameterized: tamper each of the six created mirrors on the parent before
+    a child create. The JIT identity check fails → child create zero-write →
+    rollback → exact CriticalRecovery + write_frozen (parent can't be safely
+    destroyed because the tampered mirror doesn't match the journaled identity)."""
+    spy: list = []
+    scene = _standard_scene(spy)
+    scene["/obj/ws"].created_tamper_key = tamper_key
+    adapter = _adapter(spy, scene)
+    create_a = CreateNode(
+        op_id="op_a", parent=_noderef("n_root", "/obj/ws", "subnet"), node_id="n_a",
+        node_type="geo", node_name="a", workspace_id=WS, capability="modeling", role="member",
+    )
+    ref_a = NodeRef(node_id="n_a", path="/obj/ws/a", expected_type="geo", expected_workspace_id=WS)
+    create_b = CreateNode(op_id="op_b", parent=ref_a, node_id="n_b", node_type="geo",
+                          node_name="b", workspace_id=WS, capability="modeling", role="member")
+    _cs, req = _complete(adapter, (create_a, create_b))
+    executor = ChangeSetExecutor(adapter)
+    receipt = executor.apply(req)
+    assert receipt.status.value == "CriticalRecovery"
+    assert receipt.scene_may_have_changed is True
+    assert executor.write_frozen is True
+    assert "/obj/ws/a/b" not in scene_nodes(adapter)
+
+
+def test_fix5_path_tampering_before_child_create() -> None:
+    """The created parent's path is tampered: path() returns a different value
+    than the derived ref. JIT identity check fails → CriticalRecovery + freeze."""
+    spy: list = []
+    scene = _standard_scene(spy)
+    scene["/obj/ws"].created_tamper_path = "/obj/ws/RENAMED"
+    adapter = _adapter(spy, scene)
+    create_a = CreateNode(
+        op_id="op_a", parent=_noderef("n_root", "/obj/ws", "subnet"), node_id="n_a",
+        node_type="geo", node_name="a", workspace_id=WS, capability="modeling", role="member",
+    )
+    ref_a = NodeRef(node_id="n_a", path="/obj/ws/a", expected_type="geo", expected_workspace_id=WS)
+    create_b = CreateNode(op_id="op_b", parent=ref_a, node_id="n_b", node_type="geo",
+                          node_name="b", workspace_id=WS, capability="modeling", role="member")
+    _cs, req = _complete(adapter, (create_a, create_b))
+    executor = ChangeSetExecutor(adapter)
+    receipt = executor.apply(req)
+    assert receipt.status.value == "CriticalRecovery"
+    assert executor.write_frozen is True
+
+
+def test_fix5_type_tampering_before_child_create() -> None:
+    """The created parent's type is tampered: type().name() returns a different
+    value than the derived ref. JIT identity check fails → child create zero-write.
+    The parent's mirrors are intact, so it rolls back cleanly → RolledBack (not
+    CriticalRecovery, because type alone doesn't prevent safe destroy)."""
+    spy: list = []
+    scene = _standard_scene(spy)
+    scene["/obj/ws"].created_tamper_type = "WRONG"
+    adapter = _adapter(spy, scene)
+    create_a = CreateNode(
+        op_id="op_a", parent=_noderef("n_root", "/obj/ws", "subnet"), node_id="n_a",
+        node_type="geo", node_name="a", workspace_id=WS, capability="modeling", role="member",
+    )
+    ref_a = NodeRef(node_id="n_a", path="/obj/ws/a", expected_type="geo", expected_workspace_id=WS)
+    create_b = CreateNode(op_id="op_b", parent=ref_a, node_id="n_b", node_type="geo",
+                          node_name="b", workspace_id=WS, capability="modeling", role="member")
+    _cs, req = _complete(adapter, (create_a, create_b))
+    executor = ChangeSetExecutor(adapter)
+    receipt = executor.apply(req)
+    assert receipt.status.value == "RolledBack"
+    assert "op_b" not in receipt.applied_op_ids
+    assert "/obj/ws/a/b" not in scene_nodes(adapter)
+
+
+def test_fix5_multi_prior_jit_failure_strict_reverse_rollback() -> None:
+    """Three ops: create A, set existing child tx, set A's tx with stale
+    expected_old_value. The stale third op fails → create A + set child both roll
+    back in strict reverse order → RolledBack."""
+    spy: list = []
+    scene = _standard_scene(spy)
+    scene["/obj/ws"].created_parms = {"tx": 0}
+    adapter = _adapter(spy, scene)
+    create = CreateNode(
+        op_id="op_c", parent=_noderef("n_root", "/obj/ws", "subnet"), node_id="n_new",
+        node_type="geo", node_name="geo_new", workspace_id=WS, capability="modeling", role="member",
+    )
+    child = _noderef("n_child", "/obj/ws/geo1", "geo")
+    set_existing = SetParm(op_id="op_s1", target=child, parm_name="tx", value=5, expected_old_value=0)
+    ref = NodeRef(node_id="n_new", path="/obj/ws/geo_new", expected_type="geo", expected_workspace_id=WS)
+    set_created_stale = SetParm(op_id="op_s2", target=ref, parm_name="tx", value=9, expected_old_value=999)
+    ops = (create, set_existing, set_created_stale)
+    _cs, req = _complete(adapter, ops)
+    receipt = ChangeSetExecutor(adapter).apply(req)
+    assert receipt.status.value == "RolledBack"
+    assert receipt.applied_op_ids == ("op_c", "op_s1")
+    assert "op_s2" not in receipt.applied_op_ids
+    assert all(r.passed for r in receipt.rollback_results)
+    # Reversed: set_existing rollback first, then create rollback.
+    assert receipt.rollback_results[0].kind == "parm.value_equals"  # set_existing (reversed)
+    assert receipt.rollback_results[1].kind == "node.absent"         # create (reversed)
+    assert len(receipt.rollback_results) == 2  # only 2 ops applied (create + set_existing)
