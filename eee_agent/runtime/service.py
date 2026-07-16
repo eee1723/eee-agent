@@ -44,6 +44,7 @@ from eee_agent.changesets.service import (
 )
 from eee_agent.changesets.workspace_service import (
     WorkspaceFactProvider,
+    WorkspaceHealth,
     WorkspaceInspectionSummary,
     WorkspaceLifecycleSummary,
     WorkspaceService,
@@ -58,7 +59,15 @@ from eee_agent.houdini_bridge.workspaces import (
     WorkspaceInspectResult,
     WorkspaceInspectionUnavailable,
 )
+from eee_agent.modeling.catalog import houdini_21_minimal_quality_profile
+from eee_agent.modeling.compiler import NodeCatalog
+from eee_agent.modeling.proposal import (
+    ModelingProposalContext,
+    ModelingProposalCoordinator,
+    ModelingToolContext,
+)
 from eee_agent.runtime.agent_runner import (
+    AgentRunner,
     RunnerCompleted,
     RunnerEvent,
     RunnerFactory,
@@ -208,6 +217,7 @@ class RuntimeService:
         changeset_binding_provider: "Callable[[], object] | None" = None,
         changeset_bridge_provider: ChangeSetBridgeProvider | None = None,
         workspace_fact_provider: WorkspaceFactProvider | None = None,
+        modeling_catalog_provider: Callable[[], NodeCatalog] | None = None,
     ) -> None:
         self._database = database
         self._paths = paths
@@ -229,6 +239,7 @@ class RuntimeService:
         self._state_lock = asyncio.Lock()
         self._checkpoints: CheckpointManager | None = None
         self._runner: object | None = None
+        self._modeling_catalog_provider = modeling_catalog_provider
         # Trusted ChangeSet approval service. It shares this service's EventStore
         # so proposal/decision events commit in the same transaction as the
         # changeset/approval mutation, and it is constructed with injected
@@ -271,6 +282,7 @@ class RuntimeService:
         changeset_binding_provider: "Callable[[], object] | None" = None,
         changeset_bridge_provider: ChangeSetBridgeProvider | None = None,
         workspace_fact_provider: WorkspaceFactProvider | None = None,
+        modeling_catalog_provider: Callable[[], NodeCatalog] | None = None,
     ) -> AsyncIterator["RuntimeService"]:
         """Open a service in the approved order and close it in reverse.
 
@@ -298,12 +310,20 @@ class RuntimeService:
                 changeset_binding_provider=changeset_binding_provider,
                 changeset_bridge_provider=changeset_bridge_provider,
                 workspace_fact_provider=workspace_fact_provider,
+                modeling_catalog_provider=modeling_catalog_provider,
             )
             await service._reconcile()
             checkpoints = CheckpointManager(paths.checkpoints_db)
             await checkpoints.__aenter__()
             service._checkpoints = checkpoints
             service._runner = runner_factory(checkpoints.require_saver())
+            if (
+                service._modeling_catalog_provider is not None
+                and hasattr(service._runner, "set_context_factory")
+            ):
+                service._runner.set_context_factory(
+                    service._build_modeling_context
+                )
             try:
                 yield service
             finally:
@@ -952,6 +972,58 @@ class RuntimeService:
         except Exception:
             pass
 
+    async def _build_modeling_context(
+        self, session_id: str, run_id: str
+    ) -> ModelingToolContext | None:
+        """Build one trusted, frozen modeling context for an opt-in Run.
+
+        Capability unavailability is represented as ``None`` so a read-only
+        Run remains usable and the modeling tool fails closed if called.
+        """
+        provider = self._modeling_catalog_provider
+        if provider is None:
+            return None
+        try:
+            catalog = provider()
+            if inspect.isawaitable(catalog):
+                catalog = await catalog
+            if type(catalog) is not NodeCatalog:
+                return None
+            binding = await self._changesets.current_binding()
+            inspection = await self._workspaces.inspect(
+                session_id,
+                None,
+                expected_scene_epoch=binding.scene_epoch,
+            )
+            if inspection.status is not WorkspaceHealth.HEALTHY:
+                return None
+            manifest = inspection.target_manifest
+            if (
+                manifest.session_id != session_id
+                or manifest.instance_id != binding.instance_id
+                or manifest.scene_epoch != binding.scene_epoch
+            ):
+                return None
+
+            async def persist(changeset, decision):
+                return await self.propose_changeset_trusted(changeset, decision)
+
+            return ModelingToolContext(
+                ModelingProposalCoordinator(
+                    ModelingProposalContext(
+                        session_id=session_id,
+                        run_id=run_id,
+                        workspace=manifest,
+                        scene_binding=binding,
+                        catalog=catalog,
+                        quality_profile=houdini_21_minimal_quality_profile(),
+                        propose_callback=persist,
+                    )
+                )
+            )
+        except Exception:
+            return None
+
     async def _run(
         self, session_id: str, run_id: str, user_input: str
     ) -> None:
@@ -973,9 +1045,17 @@ class RuntimeService:
                 "output_tokens": 0,
                 "total_tokens": 0,
             }
-            async for event in runner.stream(  # type: ignore[union-attr]
-                session_id=session_id, user_input=user_input
-            ):
+            if isinstance(runner, AgentRunner):
+                stream = runner.stream(
+                    session_id=session_id,
+                    run_id=run_id,
+                    user_input=user_input,
+                )
+            else:
+                stream = runner.stream(  # type: ignore[union-attr]
+                    session_id=session_id, user_input=user_input
+                )
+            async for event in stream:
                 if isinstance(event, RunnerEvent):
                     await self._emit(
                         session_id,

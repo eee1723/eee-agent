@@ -27,6 +27,7 @@ from eee_agent.houdini_bridge.workspace_provider import (
     BridgeWorkspaceFactProvider,
 )
 from eee_agent.houdini_bridge.changeset_provider import BridgeChangeSetProvider
+from eee_agent.modeling.catalog import houdini_21_minimal_catalog
 from eee_agent.runtime.agent_runner import build_agent_runner
 from eee_agent.runtime.auth import (
     RuntimeIdentity,
@@ -207,10 +208,13 @@ async def async_main(argv: Sequence[str] | None = None) -> int:
         changeset_bridge_provider = BridgeChangeSetProvider(paths.state_dir)
         async with RuntimeService.open(
             paths,
-            runner_factory=build_agent_runner,
+            runner_factory=lambda saver: build_agent_runner(
+                saver, modeling=True
+            ),
             graceful_timeout=args.graceful_timeout,
             changeset_bridge_provider=changeset_bridge_provider,
             workspace_fact_provider=workspace_fact_provider,
+            modeling_catalog_provider=houdini_21_minimal_catalog,
         ) as service:
             server = RuntimeWebSocketServer(
                 service, identity, host=args.host, port=args.port

@@ -221,9 +221,10 @@ covered offline until Task 18 can produce trusted proposals.
 **Current state:** Task 18-A (strict Brief/Spec/Component/QualityProfile/
 RepairTicket contracts and catalog-gated deterministic compiler) is accepted
 locally at `09ea256`, and the pure 18-B proposal seam is accepted at
-`23379df` after 99 focused and 2140 full offline tests. Runtime graph
-integration, a Houdini-verified production catalog, and real approval/Apply
-testing have not started.
+`23379df` after 99 focused and 2140 full offline tests. Task 18-C Runtime
+integration and a Houdini-verified minimal catalog are implemented locally;
+real proposal/approval testing remains the next gate. See
+`docs/handoffs/2026-07-16-modeling-18c-transfer.md`.
 
 **Dependency:** Tasks 15–17.
 

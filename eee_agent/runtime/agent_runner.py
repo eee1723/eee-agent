@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass
 
@@ -94,24 +94,49 @@ class AgentRunner:
 
     def __init__(self, graph: CompiledStateGraph) -> None:
         self._graph = graph
+        self._context_factory: (
+            Callable[[str, str], object | Awaitable[object | None]] | None
+        ) = None
+
+    def set_context_factory(
+        self,
+        factory: Callable[[str, str], object | Awaitable[object | None]] | None,
+    ) -> None:
+        """Install a trusted per-Run context factory for opt-in capabilities."""
+        if factory is not None and not callable(factory):
+            raise TypeError("context factory must be callable or None")
+        self._context_factory = factory
 
     async def stream(
         self,
         *,
         session_id: str,
         user_input: str,
+        run_id: str | None = None,
     ) -> AsyncIterator[RunnerEvent | RunnerCompleted]:
         text_deltas: list[str] = []
         final_message: AIMessage | None = None
         usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
-        stream = self._graph.astream(
-            {"messages": [{"role": "user", "content": user_input}]},
-            config={
+        context: object | None = None
+        if self._context_factory is not None:
+            if run_id is None:
+                raise ValueError("run_id is required when a context factory is set")
+            context = self._context_factory(session_id, run_id)
+            if hasattr(context, "__await__"):
+                context = await context  # type: ignore[assignment]
+        stream_kwargs: dict[str, object] = {
+            "config": {
                 "configurable": {"thread_id": session_id},
                 "recursion_limit": recursion_limit(),
             },
-            stream_mode=["messages", "updates"],
+            "stream_mode": ["messages", "updates"],
+        }
+        if context is not None:
+            stream_kwargs["context"] = context
+        stream = self._graph.astream(
+            {"messages": [{"role": "user", "content": user_input}]},
+            **stream_kwargs,
         )
         try:
             async for mode, data in stream:
@@ -213,15 +238,31 @@ class AgentRunner:
 RunnerFactory = Callable[[BaseCheckpointSaver], AgentRunner]
 
 
-def build_agent_runner(checkpointer: BaseCheckpointSaver) -> AgentRunner:
+def build_agent_runner(
+    checkpointer: BaseCheckpointSaver,
+    *,
+    modeling: bool = False,
+) -> AgentRunner:
     """Construct a real read-only AgentRunner over a fresh compiled graph.
 
     The factory only builds the graph/runner; it does not open or own the
     checkpointer. Task 10's RuntimeService supplies the live checkpointer.
     """
-    return AgentRunner(
-        build_agent(
-            tools=read_only_tools(),
-            checkpointer=checkpointer,
+    if type(modeling) is not bool:
+        raise TypeError("modeling must be a bool")
+    tools = read_only_tools()
+    if modeling:
+        from eee_agent.modeling.proposal import (
+            ModelingToolContext,
+            propose_modeling,
         )
-    )
+
+        tools.append(propose_modeling)
+        graph = build_agent(
+            tools=tools,
+            checkpointer=checkpointer,
+            context_schema=ModelingToolContext,
+        )
+    else:
+        graph = build_agent(tools=tools, checkpointer=checkpointer)
+    return AgentRunner(graph)

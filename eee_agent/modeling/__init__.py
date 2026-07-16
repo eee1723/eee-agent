@@ -8,6 +8,10 @@ from eee_agent.modeling.compiler import (
     ParmDefinition,
     compile_procedural_spec,
 )
+from eee_agent.modeling.catalog import (
+    houdini_21_minimal_catalog,
+    houdini_21_minimal_quality_profile,
+)
 from eee_agent.modeling.contracts import (
     Axis,
     BriefConstraint,
@@ -57,6 +61,8 @@ __all__ = [
     "UnitSystem",
     "ValidatorKind",
     "compile_procedural_spec",
+    "houdini_21_minimal_catalog",
+    "houdini_21_minimal_quality_profile",
     "parse_modeling_brief",
     "parse_procedural_spec",
     "parse_quality_profile",

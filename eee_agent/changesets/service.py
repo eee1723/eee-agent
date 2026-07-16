@@ -615,6 +615,10 @@ class ChangeSetService:
             raise _binding_unavailable()
         return binding
 
+    async def current_binding(self) -> SceneBinding:
+        """Return the trusted current scene binding for capability context."""
+        return await self._current_binding()
+
     @staticmethod
     def _validate_receipt(changeset: ChangeSet, receipt: ChangeReceipt) -> None:
         if type(receipt) is not ChangeReceipt or receipt.change_id != changeset.change_id:

@@ -24,6 +24,7 @@ def build_agent(
     *,
     tools: Sequence[BaseTool] | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
+    context_schema: type | None = None,
 ) -> CompiledStateGraph:
     # Instrument LangChain/LangGraph for Phoenix tracing if EEE_TRACING=phoenix.
     from eee_agent.tracing import setup_tracing
@@ -92,5 +93,7 @@ def build_agent(
         kwargs["backend"] = backend
     if checkpointer is not None:
         kwargs["checkpointer"] = checkpointer
+    if context_schema is not None:
+        kwargs["context_schema"] = context_schema
     configure_deepagents_harness()
     return create_deep_agent(**kwargs)

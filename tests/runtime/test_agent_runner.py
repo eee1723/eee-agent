@@ -71,12 +71,13 @@ class _FakeGraph:
         self.state = {"closed": False, "close_attempted": False}
         self.astream_calls = []
 
-    def astream(self, input, *, config=None, stream_mode=None):
+    def astream(self, input, *, config=None, stream_mode=None, context=None):
         self.astream_calls.append(
             {
                 "input": input,
                 "config": config,
                 "stream_mode": list(stream_mode) if stream_mode is not None else None,
+                "context": context,
             }
         )
         return _FakeStream(self._items, self.state, self._close_error)
@@ -138,9 +139,55 @@ def test_graph_receives_correct_input_config_stream_mode() -> None:
         assert call["config"]["configurable"]["thread_id"] == "ses_abc"
         assert call["config"]["recursion_limit"] == recursion_limit()
         assert call["stream_mode"] == ["messages", "updates"]
+        assert call["context"] is None
         assert graph.state["closed"] is True
 
     _run(scenario())
+
+
+def test_opt_in_context_factory_is_frozen_into_one_graph_run() -> None:
+    async def scenario() -> None:
+        graph = _FakeGraph([])
+        runner = AgentRunner(graph)
+
+        async def context_factory(session_id: str, run_id: str):
+            return {"session_id": session_id, "run_id": run_id}
+
+        runner.set_context_factory(context_factory)
+        await _drain(
+            runner,
+            session_id="ses_abc",
+            user_input="hello",
+        )
+        # The direct drain helper has no run_id, so the factory requirement is
+        # fail-closed before a graph call.
+
+    with pytest.raises(ValueError, match="run_id is required"):
+        _run(scenario())
+
+    async def successful() -> None:
+        graph = _FakeGraph([])
+        runner = AgentRunner(graph)
+        runner.set_context_factory(
+            lambda session_id, run_id: {
+                "session_id": session_id,
+                "run_id": run_id,
+            }
+        )
+        events = []
+        async for event in runner.stream(
+            session_id="ses_abc",
+            run_id="run_def",
+            user_input="hello",
+        ):
+            events.append(event)
+        assert events[-1].final_response == ""
+        assert graph.astream_calls[0]["context"] == {
+            "session_id": "ses_abc",
+            "run_id": "run_def",
+        }
+
+    _run(successful())
 
 
 # --------------------------------------------------------------------------
@@ -622,3 +669,23 @@ def test_factory_uses_read_only_tools_and_same_checkpointer(monkeypatch) -> None
     assert runner._graph is sentinel  # noqa: SLF001
     assert captured["checkpointer"] is saver
     assert {t.name for t in captured["tools"]} == EXPECTED_READ_ONLY
+
+
+def test_factory_opt_in_modeling_adds_only_proposal_tool(monkeypatch) -> None:
+    import eee_agent.runtime.agent_runner as ar_module
+
+    captured: dict = {}
+    sentinel = object()
+
+    def fake_build_agent(**kwargs):
+        captured.update(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(ar_module, "build_agent", fake_build_agent)
+    runner = build_agent_runner(object(), modeling=True)
+    assert runner._graph is sentinel  # noqa: SLF001
+    assert {tool.name for tool in captured["tools"]} == {
+        *EXPECTED_READ_ONLY,
+        "propose_modeling",
+    }
+    assert captured["context_schema"].__name__ == "ModelingToolContext"
