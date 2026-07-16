@@ -4,6 +4,16 @@ A **deepagents**-based AI agent that does procedural/parametric modeling in Side
 Houdini 21. Read this first every session — it captures the hard-won facts (so we
 don't re-discover them). Mirrors the auto-memory; kept in-repo so it travels with git.
 
+## Current development handoff
+
+The current cross-computer source of truth is
+`docs/handoffs/2026-07-16-runtime-d1-transfer.md`. The active development branch
+is `feature/runtime`. Task 16-D1 is Codex-accepted at `39f7346` after 513 focused
+and 1872 full offline tests (one existing optional WSL skip) plus a real Houdini
+21.0.440 transactional created-chain smoke. Task 16-B2b, Task 16-E, and Task 17
+have not started and require separate bounded plans. Do not merge `main` or
+weaken the typed ChangeSet/single-FIFO write boundary while resuming work.
+
 ## Golden rule
 **Verify, don't guess.** The user insists: when unsure about a Houdini/hou/deepagents
 fact, verify by inspecting the local Houdini install or the web — never assert from
@@ -144,7 +154,7 @@ rollback path. It does **not** replace the Secure HoudiniBridge (deferred).
   `runtime.token`, `runtime.json`, `runtime.lock`, logs, `.env`, `.venv` — all
   `.gitignore`d. Approved spec:
   `docs/superpowers/specs/2026-07-14-runtime-design.md`; status:
-  `docs/handoffs/2026-07-15-runtime-migration.md`.
+  `docs/handoffs/2026-07-16-runtime-d1-transfer.md`.
 
 ## Known limitation
 DeepSeek V4 Pro loops on long-horizon tasks (over-iteration). Architecture is proven

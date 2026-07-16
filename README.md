@@ -5,9 +5,10 @@ A **deepagents**-based AI agent that does procedural / parametric modeling in
 geometry back, validates, self-corrects, and exports — exposing tunables as
 parms so a model can be reshaped without rebuilding.
 
-> **Read first each session:** `CLAUDE.md` (full context + gotchas) and
-> `docs/handoffs/2026-07-13-foundation-migration.md` (Foundation status + what's
-> done + open caveats). This README is the orientation map.
+> **Read first each session:** `CLAUDE.md` (full context + gotchas) and the
+> current cross-computer handoff,
+> `docs/handoffs/2026-07-16-runtime-d1-transfer.md`. This README is the
+> orientation map; older handoffs retain milestone history.
 
 ## Architecture (three processes, deps isolated)
 
@@ -161,7 +162,7 @@ uv run --extra eval python -m eee_agent.runtime serve --help   # options
 | Observability | ✅ Phoenix one-click launcher + tool-error spans (runtime deps return in a later milestone) |
 | **Foundation milestone** | ✅ done — uv-locked deps, core contracts, provider registry (DeepSeek via official Anthropic endpoint), normalized events, explicit harness (no implicit `task`), `cli versions`. 369 tests pass. See `docs/handoffs/2026-07-13-foundation-migration.md` |
 | **Live end-to-end agent run on current machine** | ⏳ pending — bridge must be started in Houdini, then `selftest` + a `prompt` |
-| Runtime milestone (Session/Run, SQLite, WebSocket) | ✅ implemented (Tasks 1–13, branch `feature/runtime`) — persistent loopback Runtime, read-only agent, restart E2E; pending Codex final acceptance + merge. See `docs/handoffs/2026-07-15-runtime-migration.md` |
+| Runtime + typed Houdini ChangeSets | ✅ Tasks 1–13, 15-A/B/C/D, and 16-A/B1/B2a/C/D/D1 Codex-accepted on `feature/runtime`; D1 supports transactional create-under-created-parent and create-then-set/connect. B2b/16-E/UI remain separate planned slices; branch is not merged. See `docs/handoffs/2026-07-16-runtime-d1-transfer.md` |
 | B2 — per-component subagents | ⏳ deferred (largest change; after model swap) |
 | Eval framework | ⏳ scaffold (`eval/`), cases minimal |
 

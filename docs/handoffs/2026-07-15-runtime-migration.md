@@ -2,10 +2,11 @@
 
 ## Purpose
 
-This is the current repository-owned handoff for continuing the persistent
-Runtime milestone on another computer. It supersedes the progress snapshot and
-resume prompt in `2026-07-14-runtime-migration.md`. The older handoff remains the
-detailed history for Tasks 1-9.
+This is the detailed repository-owned history for Tasks 10-16. The current
+short-form cross-computer entrypoint is
+`2026-07-16-runtime-d1-transfer.md`, which supersedes the restore instructions
+and resume prompt below. `2026-07-14-runtime-migration.md` remains the detailed
+history for Tasks 1-9.
 
 Generated: 2026-07-15 (Asia/Shanghai)
 
@@ -94,6 +95,7 @@ Read these files in order on the new computer:
 10. `docs/superpowers/specs/2026-07-15-typed-changeset-policy-design.md`
 11. `docs/superpowers/plans/2026-07-15-typed-changeset-policy.md`
 12. `docs/superpowers/reviews/2026-07-16-task16-d-review-result.md`
+13. `docs/superpowers/reviews/2026-07-16-task16-d1-review-result.md`
 
 The approved design has not changed. Continue one plan task at a time. Claude
 Code CLI with explicit model `glm-5.2[1m]` performs implementation; Codex owns
@@ -116,6 +118,8 @@ the plan, diff review, adversarial diagnostics, and independent acceptance.
 | 16-B2b Workspace lifecycle protocol | Ready to plan against accepted 16-C provider seam | Task 16 plan |
 | 16-C Bridge preflight/capability negotiation | Complete, Codex accepted | `6050a00` (implementation `86a6bb6`) |
 | 16-D Transactional executor/receipt/rollback | Complete, Codex accepted | `3435f4b` |
+| 16-D1 Ordered transaction-created references | Complete, Codex accepted | `39f7346` (status `2ee9a2e`) |
+| 16-E Runtime apply orchestration/recovery | Not started; requires a new bounded plan | Task 16 plan |
 
 ## Task 10: Accepted RuntimeService
 
@@ -478,8 +482,9 @@ cleaned the disposable root. Full evidence is in
 
 ## Remaining Delivery Sequence
 
-1. Push the accepted Task 16-D/D1 implementation and documentation commits; keep
-   `feature/runtime` separate from `main` until the integration decision.
+1. At handoff completion, the accepted Task 16-D/D1 implementation and transfer
+   documentation are pushed to `origin/feature/runtime`; keep the branch
+   separate from `main` until the integration decision.
 2. On the next computer, restore the branch from `origin/feature/runtime` and
    rerun the clean baseline verification below.
 3. Perform the separate manual GLM-5.2 and Houdini read-only smoke procedures
@@ -511,7 +516,7 @@ Expected baseline before new development:
 - Branch is `feature/runtime` and tracks `origin/feature/runtime`.
 - Worktree is clean.
 - `uv lock --check` exits 0 with 69 packages.
-- Full suite reports at least `1821 passed` on the current environment. The
+- Full suite reports at least `1872 passed` on the current environment. The
   optional WSL environment probe may be skipped or may run on another machine;
   either result is acceptable if there are no failures and no new skips.
 - Compileall exits 0.
@@ -549,7 +554,7 @@ Resume the persistent Runtime milestone from origin/feature/runtime.
 Tasks 1-13 are complete and Codex-accepted. Task 14 remains a separate
 external-acceptance/restore gate. Task 15-A/B/C/D is complete and Codex-
 accepted; implementation tips are 4c22d45, 379a5c8, c717e60, fcdee32, and
-bfc00f3, with the latest pushed documentation/status tip c98824d. Task 16-A is
+bfc00f3, with Task 15 documentation/status tip c98824d. Task 16-A is
 Codex-accepted at 79f281d; Task 16-B1 is Codex-accepted at 54f2989 after
 implementation a3914f5 and an approval-identity follow-up. Task 16-B2a is
 Codex-accepted at 7b3bff8 after implementation 8fed692 and two integrity
