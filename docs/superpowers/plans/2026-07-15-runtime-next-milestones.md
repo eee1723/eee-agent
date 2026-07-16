@@ -164,6 +164,20 @@ included in its focused local commit. See
 
 **Dependency:** Runtime protocol plus the read-only portion of Task 15. The read-only panel slice may start before Task 16; its write/approval slice must wait for Task 16.
 
+**Current state:** Task 17-A now has an approved bounded design and executable
+plan in
+`docs/superpowers/specs/2026-07-16-task17-a-docked-readonly-panel-design.md`
+and
+`docs/superpowers/plans/2026-07-16-task17-a-docked-readonly-panel.md`.
+Slice 17-A1 is locally implemented: strict Runtime discovery/token verification,
+read-only command construction, deterministic Session selection, monotonic
+per-Session reconnect cursors, an authenticated Qt WebSocket observer, and a
+menu-visible `.pypanel`. Its gate passed 18 panel tests, a 219-test
+panel/protocol/server regression slice, and 2055 full offline tests with the
+single existing optional WSL skip. Slice 17-A2 (Secure Bridge host plus typed
+`scene.query` selection inspector) and 17-A3 Houdini acceptance have not
+started.
+
 ### 17-A: Read-only selection inspector (earliest Houdini UI test)
 
 - Keep the panel a client only: it must not import the agent graph, open SQLite, or own Runtime/checkpoint lifetimes.

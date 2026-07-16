@@ -7,13 +7,14 @@ don't re-discover them). Mirrors the auto-memory; kept in-repo so it travels wit
 ## Current development handoff
 
 The current source of truth is
-`docs/handoffs/2026-07-16-runtime-e-transfer.md`. The active branch is
-`feature/runtime`. Task 16-E is implemented, locally accepted, and included in
-the focused local Task 16-E commit after 2037 full offline tests, a hard-process
-receipt-recovery E2E, and the real Houdini 21.0.440 Task 16 smoke. It adds
-trusted Runtime Apply/recovery without a public Apply command or LLM write
-tool. Task 17 has not started and requires a separate bounded plan. Do not
-rewrite or discard the 16-E commit, merge `main`, or weaken the trusted
+`docs/handoffs/2026-07-16-runtime-17a1-transfer.md`. The active branch is
+`feature/runtime`. Task 16-E remains locally accepted in its focused commit.
+Task 17-A now has an approved bounded design/plan, and slice 17-A1 implements
+the pure panel client-state contract plus a dockable Runtime WebSocket observer
+shell. Its full offline baseline is 2055 passed, 1 skipped. Secure Bridge host
+integration and the typed `scene.query` selection inspector are still pending
+in 17-A2; Task 17-B write/approval UI has not started. Do not rewrite or
+discard the 16-E or 17-A1 commits, merge `main`, or weaken the trusted
 Workspace, typed ChangeSet, approval, preflight, transactional Apply, receipt,
 recovery, or single-FIFO boundaries while resuming work.
 
