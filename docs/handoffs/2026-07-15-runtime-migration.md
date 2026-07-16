@@ -68,8 +68,10 @@ Generated: 2026-07-15 (Asia/Shanghai)
 - Task 16-B1, 16-B2a, and 16-C are Codex-accepted at `54f2989`, `7b3bff8`,
   and `6050a00`. Task 16-D is Codex-accepted at `3435f4b`; its final gate passed
   462 focused and 1821 full offline tests with only the existing optional WSL
-  skip, plus a real Houdini 21.0.440 transactional smoke. Task 16-E and B2b
-  have not started.
+  skip, plus a real Houdini 21.0.440 transactional smoke. Task 16-D1 is
+  Codex-accepted at `39f7346`; its final gate passed 513 focused and 1872 full
+  offline tests with the same one skip, plus real create-under-created-parent
+  and created-endpoint Houdini smoke. Task 16-E and B2b have not started.
 
 Do not merge this branch to `main` until the accepted implementation and
 documentation commits are pushed
@@ -464,25 +466,26 @@ receipt digest/epoch conflicts, real cancellation-after-start evidence,
 shutdown drain ordering, and strict rollback identity reads. Full details are
 in `docs/superpowers/reviews/2026-07-16-task16-d-review-result.md`.
 
-Residual boundary: the accepted Task 16-A policy does not treat a node created
-earlier in the same ChangeSet as manifest-owned for a later SetParm or
-ConnectInput target, and mandatory preflight facts cannot read that absent node.
-The accepted smoke therefore uses one create plus set/connect on pre-existing
-owned nodes. Do not make a compiler emit dependent create-then-set/connect (or
-create-under-created-parent) sequences until that cross-slice policy/derivation
-rule receives an explicit design and file-scope follow-up.
+Task 16-D1 closes the prior dependent-create boundary at implementation
+`39f7346`. Exact earlier-created refs may now be targets, sources, or create
+parents; impossible preflight facts are omitted and expected-old/created
+identity facts are checked immediately before each write. The final D1 gate
+passed 513 focused and 1872 full offline tests with the existing one WSL skip.
+Real Houdini created a SOP subnet, box, and xform in one ChangeSet, set the
+created xform, connected the two created endpoints, replayed idempotently, and
+cleaned the disposable root. Full evidence is in
+`docs/superpowers/reviews/2026-07-16-task16-d1-review-result.md`.
 
 ## Remaining Delivery Sequence
 
-1. Push the accepted Task 16-D implementation and documentation commits; keep
+1. Push the accepted Task 16-D/D1 implementation and documentation commits; keep
    `feature/runtime` separate from `main` until the integration decision.
 2. On the next computer, restore the branch from `origin/feature/runtime` and
    rerun the clean baseline verification below.
 3. Perform the separate manual GLM-5.2 and Houdini read-only smoke procedures
    from the Runtime plan, recording external-service failures separately.
-4. Task 16-D is accepted. Plan B2b or Task 16-E as a separate bounded slice;
-   do not start either from the 16-D prompt. Preserve the residual
-   create-then-set/connect boundary recorded above until explicitly designed.
+4. Task 16-D/D1 is accepted. Plan B2b or Task 16-E as a separate bounded slice;
+   do not start either from the D/D1 prompts.
 5. Decide whether to merge `feature/runtime` into `main`; do not merge during
    the migration without an explicit integration decision.
 
@@ -553,7 +556,9 @@ Codex-accepted at 7b3bff8 after implementation 8fed692 and two integrity
 follow-ups. Task 16-C is Codex-accepted at 6050a00 after implementation
 86a6bb6 and identity-integrity follow-ups 357d862/6050a00. Task 16-D is
 Codex-accepted at 3435f4b after 462 focused, 1821 full offline, and real
-Houdini 21.0.440 smoke acceptance. B2b and Task 16-E have not started.
+Houdini 21.0.440 smoke acceptance. Task 16-D1 is Codex-accepted at 39f7346
+after 513 focused, 1872 full offline, and real created-chain Houdini 21.0.440
+smoke acceptance. B2b and Task 16-E have not started.
 Read, in order:
 
 1. docs/superpowers/specs/2026-07-14-runtime-design.md
@@ -566,13 +571,14 @@ Read, in order:
 8. docs/superpowers/specs/2026-07-15-typed-changeset-policy-design.md
 9. docs/superpowers/plans/2026-07-15-typed-changeset-policy.md
 10. docs/superpowers/reviews/2026-07-16-task16-d-review-result.md
+11. docs/superpowers/reviews/2026-07-16-task16-d1-review-result.md
 
 Run `uv sync --frozen --extra eval --python 3.11`, `uv lock --check`, the full
 pytest suite, compileall including `houdini_side`, and `git status` before any
 new work.
 
 Do not start Task 16-B2b, Task 16-E, or Task 17 without a current Codex plan and
-acceptance gate. Task 16-D is complete; only verification or documentation
+acceptance gate. Task 16-D/D1 is complete; only verification or documentation
 corrections may be made without a new task authorization.
 Claude Code is responsible only for the concrete implementation task supplied
 by Codex; Codex owns plan/status documents, diff review, adversarial checks,

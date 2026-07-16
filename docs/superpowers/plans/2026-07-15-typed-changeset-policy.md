@@ -275,6 +275,31 @@ Then run the real smoke with the detected Houdini 21.0.440 `hython` and record
 the exact command/result in the handoff. Commit only after offline and hython
 acceptance: `feat: apply typed houdini changesets transactionally`.
 
+## Task 16-D1: Ordered references to transaction-created nodes
+
+**Dependency:** 16-D accepted.
+
+**Status:** Complete, Codex-accepted at `39f7346`. The final independent gate
+passed 513 focused and 1872 full offline tests with only the existing optional
+WSL probe skipped. Real Houdini 21.0.440 create-under-created-parent,
+create-then-set/connect, receipt, replay, and cleanup smoke passed.
+
+**Design:** `docs/superpowers/specs/2026-07-16-task16-d1-created-reference-design.md`
+
+**Plan:** `docs/superpowers/plans/2026-07-16-task16-d1-created-references.md`
+
+**Prompt:** `docs/superpowers/prompts/2026-07-16-task16-d1-created-references-prompt.md`
+
+**Review:** `docs/superpowers/reviews/2026-07-16-task16-d1-review-checklist.md`
+
+**Result:** `docs/superpowers/reviews/2026-07-16-task16-d1-review-result.md`
+
+D1 adds no protocol/effect. It validates exact backward-only created refs,
+allows exact created refs under OwnedWorkspace, omits impossible preflight
+facts, and enforces expected-old plus full created identity immediately before
+each ordered write. ScopedPatch continues to forbid create. Do not use this
+slice to start B2b, 16-E, UI/compiler work, push, or merge.
+
 ## Task 16-E: Runtime apply orchestration and restart recovery
 
 **Dependency:** 16-D accepted.
