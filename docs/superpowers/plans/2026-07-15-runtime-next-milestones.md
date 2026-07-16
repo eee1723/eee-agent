@@ -177,8 +177,12 @@ binary compatibility in the panel. Panel reopen then exposed a 256-item
 outbound queue rejecting the TEST Session's 315+ event replay; `15b6c00`
 bootstraps the panel from a bounded snapshot before subscribing and applies
 backpressure to server replay initialization. The focused recovery gate passes
-173 tests and the full suite passes 2105 tests with the same single optional
-WSL skip. Populated Run and approval states were also rendered with Houdini
+173 tests. `73c6214` then replaces the static Session title prompt with an
+IME-enabled non-blocking owned dialog, explicitly enables IME on Run Request,
+and remembers the last selected Session with highest-event-boundary fallback.
+The current focused gate passes 174 tests and the full suite passes 2106 tests
+with the same single optional WSL skip. Populated Run and approval states were
+also rendered with Houdini
 21.0.440's bundled PySide6 at a narrow dock size. Real Houdini
 Run/reconnect/stop/empty-approval acceptance is the remaining Task 17-B gate.
 

@@ -2,9 +2,10 @@
 
 Status: implemented and offline-accepted in `13e0782`, with Qt WebSocket frame
 delivery corrected in `423a0e4` and high-volume Session reopen corrected in
-`15b6c00` after the first real tests. The focused recovery gate passes 173
-tests and the full suite passes 2105 tests with the single existing optional
-WSL skip. Real Houdini
+`15b6c00` after the first real tests. Chinese IME and remembered/default
+Session selection are corrected in `73c6214`. The focused panel/server gate
+passes 174 tests and the full suite passes 2106 tests with the single existing
+optional WSL skip. Real Houdini
 Run/reconnect/stop/empty-approval acceptance is pending.
 
 ## Boundary

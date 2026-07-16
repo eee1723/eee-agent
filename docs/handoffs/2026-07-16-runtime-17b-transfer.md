@@ -9,13 +9,14 @@
 - Task 17-B implementation: `13e0782`
 - Qt WebSocket delivery fix: `423a0e4`
 - High-volume Session recovery fix: `15b6c00`
-- Focused panel/server recovery gate: 173 passed
-- Full offline baseline: 2105 passed, 1 skipped
+- Chinese IME and Session preference fix: `73c6214`
+- Focused panel/server gate: 174 passed
+- Full offline baseline: 2106 passed, 1 skipped
 - Real Houdini Task 17-B gate: pending
 
-Do not rewrite the accepted Task 16-E/17-A commits, `13e0782`, `423a0e4`, or
-`15b6c00`, merge `main`, push, or weaken the trusted Workspace, typed
-ChangeSet, approval, preflight, transactional Apply, receipt, recovery,
+Do not rewrite the accepted Task 16-E/17-A commits, `13e0782`, `423a0e4`,
+`15b6c00`, or `73c6214`, merge `main`, push, or weaken the trusted Workspace,
+typed ChangeSet, approval, preflight, transactional Apply, receipt, recovery,
 loopback authentication, or single-main-thread-FIFO boundaries.
 
 ## First real-test finding and correction
@@ -63,6 +64,27 @@ Against the still-running pre-fix Runtime and the real `TEST` Session at seq
 368, the corrected complete panel switched Sessions with zero OFFLINE
 transitions, restored `Completed`, enabled Start, disabled Stop, and accepted
 text input.
+
+## IME and default-Session finding and correction
+
+The recovery retest passed, but Houdini's static `QInputDialog.getText()` path
+did not accept Chinese input reliably and a fresh panel still chose the newer
+accidental long-title Session rather than the active `TEST` history.
+
+`73c6214` corrects the UI behavior:
+
+- the Session title prompt is now a panel-owned, non-blocking modal dialog
+  rather than a nested static dialog;
+- its `QLineEdit` and the Run Request `QPlainTextEdit` explicitly enable Qt
+  input-method events and strong focus;
+- the last selected Session ID is stored as a small Qt user preference;
+- when no valid preference exists, the active Session with the highest
+  persisted `last_seq` is selected before timestamp tie-breaking.
+
+Houdini 21.0.440's bundled PySide6 accepted committed Chinese text in both
+editors. Preference verification showed: no preference selects `TEST`; a manual
+selection persists into a new panel; the local preference was restored to
+`TEST` after the test.
 
 ## What Task 17-B adds
 
@@ -114,13 +136,15 @@ use the authenticated Secure Bridge.
 ## Verification evidence
 
 ```text
-Focused recovery gate:    173 passed
-Full offline suite:       2105 passed, 1 skipped
+Focused panel/server gate: 174 passed
+Full offline suite:       2106 passed, 1 skipped
 uv lock --check:          passed, 69 packages
 compileall:               passed
 git diff --check:         passed
 Boundary source scan:     no Apply/workspace-create/SQLite/rpyc/eval/exec path
 Live high-volume Qt test: seq 368/Completed/Start/input/zero OFFLINE
+Houdini PySide6 IME test: Session title + Run Request Chinese commit passed
+Session preference test:  fallback/persist/reopen passed; TEST restored
 ```
 
 The only skipped test is the existing optional WSL/Windows environment probe.
