@@ -20,6 +20,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -264,16 +265,123 @@ async def _dispatch_for_response_and_event(
 def _write_workspace_control(home: Path, data: dict) -> None:
     state_dir = home / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
-    (state_dir / _WORKSPACE_CONTROL).write_text(
-        json.dumps(data, sort_keys=True),
-        encoding="utf-8",
+    destination = state_dir / _WORKSPACE_CONTROL
+    encoded = json.dumps(
+        data,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    fd, temp_name = tempfile.mkstemp(
+        dir=str(state_dir),
+        prefix=f"{_WORKSPACE_CONTROL}.",
+        suffix=".tmp",
     )
+    temp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, destination)
+    except BaseException:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _remove_workspace_control(home: Path) -> None:
     try:
         (home / "state" / _WORKSPACE_CONTROL).unlink()
     except FileNotFoundError:
+        pass
+
+
+def test_workspace_control_publication_uses_atomic_replace(
+    runtime_home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destinations: list[Path] = []
+    real_replace = os.replace
+
+    def spy_replace(src, dst):  # type: ignore[no-untyped-def]
+        destinations.append(Path(dst))
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", spy_replace)
+    _write_workspace_control(runtime_home, {"manifest_status": "healthy"})
+
+    expected = runtime_home / "state" / _WORKSPACE_CONTROL
+    assert destinations == [expected]
+    assert json.loads(expected.read_text(encoding="utf-8")) == {
+        "manifest_status": "healthy"
+    }
+
+
+def test_houdini_smoke_required_fingerprint_reads_fail_closed() -> None:
+    from tests.runtime.changeset_houdini_smoke import _required_read
+
+    def unreadable():
+        raise RuntimeError("simulated HOM read failure")
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"node /obj/example parameter tx data.*RuntimeError",
+    ):
+        _required_read(
+            "node /obj/example parameter tx data",
+            unreadable,
+        )
+
+
+def test_houdini_smoke_force_stops_runtime_launcher_and_worker(
+    runtime_home: Path,
+) -> None:
+    from tests.runtime.changeset_houdini_smoke import _RuntimeFixtureProcess
+
+    from eee_agent.runtime.lock import RuntimeLock
+    from eee_agent.runtime.paths import RuntimePaths
+
+    async def scenario() -> tuple[int, int, str | None]:
+        paths = RuntimePaths(
+            home=runtime_home,
+            state_dir=runtime_home / "state",
+            app_db=runtime_home / "state" / "app.sqlite",
+            checkpoints_db=runtime_home / "state" / "checkpoints.sqlite",
+            lock_file=runtime_home / "state" / "runtime.lock",
+            discovery_file=runtime_home / "state" / "runtime.json",
+            token_file=runtime_home / "state" / "runtime.token",
+        )
+        paths.create_used_directories()
+        process = _RuntimeFixtureProcess(
+            runtime_home,
+            mode="bridge_hang",
+            graceful_timeout=0.1,
+        )
+        process.start()
+        try:
+            discovery, _token = await process.wait_for_discovery(paths)
+            assert discovery["pid"] == process.worker_pid
+            assert process.launcher_pid > 0
+            assert process.worker_pid > 0
+            cleanup_error = await process.stop(paths)
+            return (
+                process.launcher_pid,
+                process.worker_pid,
+                cleanup_error,
+            )
+        finally:
+            await process.stop(paths)
+
+    launcher_pid, worker_pid, cleanup_error = asyncio.run(scenario())
+    assert cleanup_error == "Runtime fixture required forced termination"
+    assert _RuntimeFixtureProcess.pid_exists(launcher_pid) is False
+    assert _RuntimeFixtureProcess.pid_exists(worker_pid) is False
+    assert not (runtime_home / "state" / "runtime.json").exists()
+    assert not (runtime_home / "state" / "runtime.token").exists()
+    with RuntimeLock(runtime_home / "state" / "runtime.lock"):
         pass
 
 
@@ -1039,6 +1147,9 @@ def test_workspace_public_switch_concurrent_cas_noop_and_stale_preservation(
                     assert successes[0]["result"]["active_workspace_id"] == (
                         second_workspace
                     )
+                    switched_state_revision = successes[0]["result"][
+                        "state_revision"
+                    ]
                     assert len(failures) == 1
                     assert failures[0]["error"]["code"] == (
                         "workspace.active_conflict"
@@ -1077,6 +1188,10 @@ def test_workspace_public_switch_concurrent_cas_noop_and_stale_preservation(
                     )
                     assert noop["ok"] is True
                     assert noop["result"]["changed"] is False
+                    assert (
+                        noop["result"]["state_revision"]
+                        == switched_state_revision
+                    )
                     after_noop = await _request(
                         first_ws,
                         "switch-after-noop",
@@ -1122,6 +1237,58 @@ def test_workspace_public_switch_concurrent_cas_noop_and_stale_preservation(
                     assert inspected["result"]["active_workspace_id"] == (
                         second_workspace
                     )
+
+                    conflict_control = dict(control)
+                    conflict_control["manifest_status"] = "conflict"
+                    _write_workspace_control(runtime_home, conflict_control)
+                    conflict = await _request(
+                        first_ws,
+                        "switch-identity-conflict",
+                        "workspace.switch",
+                        {
+                            "session_id": state["session_id"],
+                            "workspace_id": first_workspace,
+                            "expected_active_workspace_id": second_workspace,
+                            "expected_scene_epoch": 7,
+                        },
+                    )
+                    assert conflict["ok"] is False
+                    assert conflict["error"]["code"] == (
+                        "workspace.identity_conflict"
+                    )
+
+                    _write_workspace_control(runtime_home, control)
+                    verified_noop = await _request(
+                        first_ws,
+                        "switch-verify-preserved-state",
+                        "workspace.switch",
+                        {
+                            "session_id": state["session_id"],
+                            "workspace_id": second_workspace,
+                            "expected_active_workspace_id": second_workspace,
+                            "expected_scene_epoch": 7,
+                        },
+                    )
+                    assert verified_noop["ok"] is True
+                    assert verified_noop["result"]["changed"] is False
+                    assert verified_noop["result"]["active_workspace_id"] == (
+                        second_workspace
+                    )
+                    assert (
+                        verified_noop["result"]["state_revision"]
+                        == switched_state_revision
+                    )
+                    after_failures = await _request(
+                        first_ws,
+                        "switch-after-failures",
+                        "events.replay",
+                        {
+                            "session_id": state["session_id"],
+                            "after_seq": updated[0]["seq"],
+                            "limit": 100,
+                        },
+                    )
+                    assert after_failures["result"]["events"] == []
 
         asyncio.run(switch_concurrently())
     finally:

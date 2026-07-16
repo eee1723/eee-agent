@@ -2,13 +2,15 @@
 
 Run as::
 
-    python -m tests.runtime.runtime_process_fixture [complete|block|workspace]
+    python -m tests.runtime.runtime_process_fixture [complete|block|workspace|bridge|bridge_hang]
 
 It opens the REAL ``RuntimeService`` and ``RuntimeWebSocketServer`` with a
-deterministic fake ``RunnerFactory`` (no live LLM, no Houdini), publishes the
-discovery/token files for the parent test to read, and blocks until the parent
-terminates the process. This deliberately duplicates the production lifecycle
-(see ``eee_agent/runtime/__main__.py``) instead of injecting a fake runner into
+deterministic fake ``RunnerFactory`` (no live LLM and no in-process HOM),
+publishes the discovery/token files for the parent test to read, and blocks
+until the parent terminates the process. ``bridge`` mode talks to an external
+authenticated Houdini Bridge through the production provider. This deliberately
+duplicates the production lifecycle (see ``eee_agent/runtime/__main__.py``)
+instead of injecting a fake runner into
 production code — there is no test-runner switch in the Runtime package.
 
 Modes:
@@ -21,6 +23,12 @@ Modes:
 * ``workspace``: the completing runner plus a JSON-controlled trusted
   Workspace fact provider. Public tests still traverse the real Runtime
   parser/server/service/repository chain.
+* ``bridge``: the completing runner plus the production
+  ``BridgeWorkspaceFactProvider``. This mode is used by the real-Houdini smoke
+  so Runtime stays in a standard Python process while HOM remains in hython.
+  Creating ``runtime_fixture_stop`` in ``state_dir`` requests a graceful exit.
+* ``bridge_hang``: the same production provider, but deliberately ignores the
+  stop marker so parent-side launcher/worker process-tree cleanup can be tested.
 """
 
 from __future__ import annotations
@@ -31,6 +39,9 @@ import sys
 from pathlib import Path
 
 from eee_agent.houdini_bridge.contracts import SceneBinding
+from eee_agent.houdini_bridge.workspace_provider import (
+    BridgeWorkspaceFactProvider,
+)
 from eee_agent.houdini_bridge.workspaces import (
     WorkspaceInspectResult,
     WorkspaceInspectionConflict,
@@ -53,6 +64,7 @@ _USAGE = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
 _BIND_HOST = "127.0.0.1"
 _WORKSPACE_CONTROL = "workspace_fixture.json"
 _WORKSPACE_EVENT_ENTERED = "workspace_event_entered"
+_RUNTIME_FIXTURE_STOP = "runtime_fixture_stop"
 
 
 class _CompletingFakeRunner:
@@ -226,14 +238,25 @@ async def _serve(mode: str) -> None:
     paths.create_used_directories()
     with RuntimeLock(paths.lock_file):
         identity = create_identity()
-        workspace_provider = (
+        controlled_workspace_provider = (
             _ControlledWorkspaceProvider(paths.state_dir)
             if mode == "workspace"
             else None
         )
-        if workspace_provider is not None:
+        workspace_provider = (
+            BridgeWorkspaceFactProvider(paths.state_dir)
+            if mode in ("bridge", "bridge_hang")
+            else controlled_workspace_provider
+        )
+        if controlled_workspace_provider is not None:
             try:
-                workspace_provider.event_entered_path.unlink()
+                controlled_workspace_provider.event_entered_path.unlink()
+            except FileNotFoundError:
+                pass
+        stop_path = paths.state_dir / _RUNTIME_FIXTURE_STOP
+        if mode in ("bridge", "bridge_hang"):
+            try:
+                stop_path.unlink()
             except FileNotFoundError:
                 pass
         async with RuntimeService.open(
@@ -241,21 +264,25 @@ async def _serve(mode: str) -> None:
             runner_factory=_runner_factory(mode),
             workspace_fact_provider=workspace_provider,
         ) as service:
-            if workspace_provider is not None:
+            if controlled_workspace_provider is not None:
                 original_append_conn = service._events._append_conn
 
                 async def controlled_append_conn(conn, **kwargs):
                     event_type = kwargs.get("event_type")
-                    if workspace_provider.block_event_type() == event_type:
-                        workspace_provider.event_entered_path.write_text(
+                    if (
+                        controlled_workspace_provider.block_event_type()
+                        == event_type
+                    ):
+                        controlled_workspace_provider.event_entered_path.write_text(
                             str(event_type), encoding="utf-8"
                         )
                         while (
-                            workspace_provider.block_event_type() == event_type
+                            controlled_workspace_provider.block_event_type()
+                            == event_type
                         ):
                             await asyncio.sleep(0.01)
                     if (
-                        workspace_provider.fail_event_type()
+                        controlled_workspace_provider.fail_event_type()
                         == event_type
                     ):
                         raise RuntimeError("fixture event append failure")
@@ -266,6 +293,17 @@ async def _serve(mode: str) -> None:
                 service, identity, host=_BIND_HOST, port=0
             )
             async with server:
+                if mode == "bridge_hang":
+                    # Exceed a typical Windows pipe buffer before discovery.
+                    # The parent must continuously drain stderr or this fixture
+                    # will block here and never become ready.
+                    for index in range(128):
+                        print(
+                            f"[fixture] stderr pressure {index}: "
+                            + ("x" * 1024),
+                            file=sys.stderr,
+                            flush=True,
+                        )
                 # The server has bound its ephemeral port; publish discovery so
                 # the parent can read it and authenticate.
                 write_identity_files(
@@ -275,17 +313,32 @@ async def _serve(mode: str) -> None:
                     port=server.port,
                 )
                 try:
-                    # Block until the parent hard-kills this process. No signal
-                    # handling is required: the parent owns the lifecycle and
-                    # the temporary Runtime home.
-                    await asyncio.Event().wait()
+                    # Ordinary process tests hard-kill the fixture to exercise
+                    # restart reconciliation. The real-Houdini bridge mode uses
+                    # a stop marker so identity/database cleanup is observable.
+                    if mode == "bridge":
+                        while not stop_path.exists():
+                            await asyncio.sleep(0.05)
+                    else:
+                        await asyncio.Event().wait()
                 finally:
                     cleanup_identity_files(identity, paths.state_dir)
+                    if mode in ("bridge", "bridge_hang"):
+                        try:
+                            stop_path.unlink()
+                        except FileNotFoundError:
+                            pass
 
 
 def main() -> int:
     mode = sys.argv[1] if len(sys.argv) > 1 else "complete"
-    if mode not in ("complete", "block", "workspace"):
+    if mode not in (
+        "complete",
+        "block",
+        "workspace",
+        "bridge",
+        "bridge_hang",
+    ):
         print(f"[fixture] unknown mode: {mode!r}", file=sys.stderr)
         return 2
     try:

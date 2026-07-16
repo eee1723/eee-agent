@@ -24,14 +24,20 @@ import asyncio
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
+import threading
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _VENV_SITE_PACKAGES = _REPO_ROOT / ".venv" / "Lib" / "site-packages"
+_VENV_PYTHON = _REPO_ROOT / ".venv" / "Scripts" / "python.exe"
+_RUNTIME_FIXTURE_MODULE = "tests.runtime.runtime_process_fixture"
+_RUNTIME_FIXTURE_STOP = "runtime_fixture_stop"
 for _path in (_REPO_ROOT, _VENV_SITE_PACKAGES):
     if _path.exists() and str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
@@ -42,83 +48,185 @@ def _die(message: str) -> None:
     sys.exit(1)
 
 
-def _safe_read(callable_, fallback: object = None) -> object:
+class _FingerprintReadError(RuntimeError):
+    """A required Houdini no-write fingerprint surface was unreadable."""
+
+
+def _required_read(surface: str, callable_):
     try:
         return callable_()
-    except Exception:
-        return fallback
+    except Exception as exc:
+        raise _FingerprintReadError(
+            "required Houdini fingerprint surface unreadable: "
+            f"{surface} ({type(exc).__name__})"
+        ) from exc
 
 
 def _houdini_fingerprint(hou) -> str:
     """Read-only full-scene fingerprint for every B2b operation."""
-    root = hou.node("/")
-    nodes = () if root is None else (root, *root.allSubChildren())
+    root = _required_read("hou.node('/')", lambda: hou.node("/"))
+    if root is None:
+        raise _FingerprintReadError(
+            "required Houdini fingerprint surface unreadable: "
+            "hou.node('/') returned None"
+        )
+    nodes = (
+        root,
+        *_required_read(
+            "root.allSubChildren()",
+            root.allSubChildren,
+        ),
+    )
     inventory = []
     for node in nodes:
+        node_path = _required_read("node.path()", node.path)
         parms = []
-        for parm in _safe_read(node.parms, ()):
+        for parm in _required_read(
+            f"node {node_path} parms",
+            node.parms,
+        ):
+            parm_name = _required_read(
+                f"node {node_path} parameter name",
+                parm.name,
+            )
             parms.append(
                 (
-                    parm.name(),
-                    _safe_read(parm.rawValue, "<unreadable>"),
-                    _safe_read(
-                        lambda parm=parm: parm.expressionLanguage().name(),
-                        None,
+                    parm_name,
+                    _required_read(
+                        f"node {node_path} parameter {parm_name} data",
+                        lambda parm=parm: parm.asData(
+                            value=True,
+                            evaluate_value=False,
+                            locked=True,
+                            brief=False,
+                            multiparm_instances=True,
+                            metadata=True,
+                            verbose=True,
+                        ),
                     ),
                 )
             )
         connections = []
-        for connection in _safe_read(node.inputConnections, ()):
-            input_node = _safe_read(connection.inputNode, None)
+        for connection in _required_read(
+            f"node {node_path} input connections",
+            node.inputConnections,
+        ):
+            input_node = _required_read(
+                f"node {node_path} input connection source",
+                connection.inputNode,
+            )
             connections.append(
                 (
-                    _safe_read(connection.inputIndex, None),
-                    _safe_read(connection.outputIndex, None),
+                    _required_read(
+                        f"node {node_path} input connection index",
+                        connection.inputIndex,
+                    ),
+                    _required_read(
+                        f"node {node_path} input connection output index",
+                        connection.outputIndex,
+                    ),
                     None
                     if input_node is None
-                    else _safe_read(input_node.path, "<unreadable>"),
+                    else _required_read(
+                        f"node {node_path} input connection source path",
+                        input_node.path,
+                    ),
                 )
             )
-        color = _safe_read(node.color, None)
+        color = _required_read(f"node {node_path} color", node.color)
+        parent = _required_read(f"node {node_path} parent", node.parent)
+        flags = {}
+        for flag_name, flag in (
+            ("display", hou.nodeFlag.Display),
+            ("render", hou.nodeFlag.Render),
+            ("template", hou.nodeFlag.Template),
+            ("bypass", hou.nodeFlag.Bypass),
+            ("hard_locked", hou.nodeFlag.Lock),
+            ("soft_locked", hou.nodeFlag.SoftLock),
+        ):
+            readable = _required_read(
+                f"node {node_path} {flag_name} flag readability",
+                lambda node=node, flag=flag: node.isFlagReadable(flag),
+            )
+            flags[flag_name] = {
+                "readable": readable,
+                "value": (
+                    _required_read(
+                        f"node {node_path} {flag_name} flag value",
+                        lambda node=node, flag=flag: node.isGenericFlagSet(flag),
+                    )
+                    if readable
+                    else None
+                ),
+            }
         inventory.append(
             {
-                "path": _safe_read(node.path, "<unreadable>"),
-                "type": _safe_read(lambda: node.type().name(), "<unreadable>"),
-                "parent": _safe_read(
-                    lambda: None
-                    if node.parent() is None
-                    else node.parent().path(),
-                    "<unreadable>",
+                "path": node_path,
+                "type": _required_read(
+                    f"node {node_path} type",
+                    lambda: node.type().name(),
+                ),
+                "parent": (
+                    None
+                    if parent is None
+                    else _required_read(
+                        f"node {node_path} parent path",
+                        parent.path,
+                    )
                 ),
                 "parms": parms,
                 "inputs": connections,
                 "user_data": sorted(
-                    _safe_read(node.userDataDict, {}).items()
+                    _required_read(
+                        f"node {node_path} user data",
+                        node.userDataDict,
+                    ).items()
                 ),
-                "position": tuple(_safe_read(node.position, ())),
-                "color": None
-                if color is None
-                else tuple(_safe_read(color.rgb, ())),
-                "comment": _safe_read(node.comment, ""),
-                "selected": _safe_read(node.isSelected, None),
-                "display": _safe_read(node.isDisplayFlagSet, None),
-                "render": _safe_read(node.isRenderFlagSet, None),
-                "template": _safe_read(node.isTemplateFlagSet, None),
-                "bypass": _safe_read(node.isBypassed, None),
-                "hard_locked": _safe_read(node.isHardLocked, None),
-                "soft_locked": _safe_read(node.isSoftLocked, None),
+                "position": tuple(
+                    _required_read(
+                        f"node {node_path} position",
+                        node.position,
+                    )
+                ),
+                "color": tuple(
+                    _required_read(
+                        f"node {node_path} color RGB",
+                        color.rgb,
+                    )
+                ),
+                "comment": _required_read(
+                    f"node {node_path} comment",
+                    node.comment,
+                ),
+                "selected": _required_read(
+                    f"node {node_path} selected flag",
+                    node.isSelected,
+                ),
+                "flags": flags,
             }
         )
-    undo_labels = _safe_read(
+    undo_labels = _required_read(
+        "hou.undos.undoLabels()",
         lambda: tuple(hou.undos.undoLabels()),
-        None,
     )
     payload = {
-        "hip_name": _safe_read(hou.hipFile.name, None),
-        "hip_is_new": _safe_read(hou.hipFile.isNewFile, None),
+        "hip_name": _required_read("hou.hipFile.name()", hou.hipFile.name),
+        "hip_is_new": _required_read(
+            "hou.hipFile.isNewFile()",
+            hou.hipFile.isNewFile,
+        ),
+        "hip_has_unsaved_changes": _required_read(
+            "hou.hipFile.hasUnsavedChanges()",
+            hou.hipFile.hasUnsavedChanges,
+        ),
         "undo_labels": undo_labels,
         "loaded_hdas": tuple(
-            sorted(_safe_read(hou.hda.loadedFiles, ()))
+            sorted(
+                _required_read(
+                    "hou.hda.loadedFiles()",
+                    hou.hda.loadedFiles,
+                )
+            )
         ),
         "nodes": inventory,
     }
@@ -133,6 +241,13 @@ def _houdini_fingerprint(hou) -> str:
     ).hexdigest()
 
 
+def _fingerprint_or_die(hou) -> str:
+    try:
+        return _houdini_fingerprint(hou)
+    except _FingerprintReadError as exc:
+        _die(str(exc))
+
+
 def _select_exact(hou, nodes: tuple[object, ...]) -> None:
     hou.clearAllSelected()
     for node in nodes:
@@ -142,24 +257,274 @@ def _select_exact(hou, nodes: tuple[object, ...]) -> None:
 async def _runtime_request(ws, request_id: str, command_type: str, payload: dict):
     from eee_agent.runtime.protocol import PROTOCOL, encode_envelope
 
-    await ws.send(
-        encode_envelope(
-            {
-                "protocol": PROTOCOL,
-                "kind": "command",
-                "request_id": request_id,
-                "type": command_type,
-                "payload": payload,
-            }
+    try:
+        async with asyncio.timeout(15.0):
+            await ws.send(
+                encode_envelope(
+                    {
+                        "protocol": PROTOCOL,
+                        "kind": "command",
+                        "request_id": request_id,
+                        "type": command_type,
+                        "payload": payload,
+                    }
+                )
+            )
+            while True:
+                response = json.loads(await ws.recv())
+                if (
+                    response.get("kind") == "response"
+                    and response.get("request_id") == request_id
+                ):
+                    return response
+    except TimeoutError:
+        _die(
+            "Runtime request timed out after 15 seconds: "
+            f"{command_type} ({request_id})"
         )
-    )
-    while True:
-        response = json.loads(await ws.recv())
-        if (
-            response.get("kind") == "response"
-            and response.get("request_id") == request_id
+
+
+class _RuntimeFixtureProcess:
+    """Bounded launcher/worker lifecycle for the external Runtime smoke."""
+
+    def __init__(
+        self,
+        home: Path,
+        *,
+        mode: str = "bridge",
+        graceful_timeout: float = 15.0,
+    ) -> None:
+        self.home = home
+        self.mode = mode
+        self.graceful_timeout = graceful_timeout
+        self.process: subprocess.Popen | None = None
+        self.launcher_pid = 0
+        self.worker_pid = 0
+        self._stderr_lines: deque[str] = deque(maxlen=200)
+        self._stderr_drainer: threading.Thread | None = None
+        self._stopped = False
+        self._cleanup_result: str | None = None
+
+    def start(self) -> None:
+        if not _VENV_PYTHON.is_file():
+            _die(f"Runtime fixture Python is missing: {_VENV_PYTHON}")
+        env = dict(os.environ)
+        env["EEE_RUNTIME_HOME"] = str(self.home)
+        kwargs: dict = {
+            "cwd": str(_REPO_ROOT),
+            "env": env,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.PIPE,
+            "text": True,
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = getattr(
+                subprocess,
+                "CREATE_NO_WINDOW",
+                0,
+            )
+        else:
+            kwargs["start_new_session"] = True
+        self.process = subprocess.Popen(
+            [
+                str(_VENV_PYTHON),
+                "-m",
+                _RUNTIME_FIXTURE_MODULE,
+                self.mode,
+            ],
+            **kwargs,
+        )
+        self.launcher_pid = self.process.pid
+        self._stderr_drainer = threading.Thread(
+            target=self._drain_stderr,
+            daemon=True,
+        )
+        self._stderr_drainer.start()
+
+    def _drain_stderr(self) -> None:
+        process = self.process
+        if process is None or process.stderr is None:
+            return
+        for line in process.stderr:
+            self._stderr_lines.append(line)
+
+    @property
+    def stderr_tail(self) -> str:
+        return "".join(self._stderr_lines)[-4000:]
+
+    async def wait_for_discovery(self, paths) -> tuple[dict, str]:
+        process = self.process
+        if process is None:
+            raise RuntimeError("Runtime fixture was not started")
+        deadline = asyncio.get_running_loop().time() + 30.0
+        while asyncio.get_running_loop().time() < deadline:
+            return_code = process.poll()
+            if return_code is not None:
+                _die(
+                    "Runtime fixture exited before discovery "
+                    f"(code {return_code}): {self.stderr_tail}"
+                )
+            if paths.discovery_file.is_file() and paths.token_file.is_file():
+                try:
+                    discovery = json.loads(
+                        paths.discovery_file.read_text(encoding="utf-8")
+                    )
+                    token = paths.token_file.read_text(encoding="utf-8")
+                except (OSError, ValueError):
+                    await asyncio.sleep(0.05)
+                    continue
+                worker_pid = discovery.get("pid") if type(discovery) is dict else None
+                if (
+                    type(discovery) is dict
+                    and discovery.get("host") == "127.0.0.1"
+                    and type(discovery.get("port")) is int
+                    and type(worker_pid) is int
+                    and worker_pid > 0
+                    and token
+                ):
+                    self.worker_pid = worker_pid
+                    return discovery, token
+            await asyncio.sleep(0.05)
+        _die("Runtime fixture did not publish discovery within 30 seconds")
+
+    async def stop(self, paths) -> str | None:
+        if self._stopped:
+            return self._cleanup_result
+        self._stopped = True
+        process = self.process
+        if process is None:
+            return None
+
+        stop_path = paths.state_dir / _RUNTIME_FIXTURE_STOP
+        stop_path.write_text("stop\n", encoding="utf-8")
+        deadline = (
+            asyncio.get_running_loop().time() + self.graceful_timeout
+        )
+        while (
+            self._tree_is_alive()
+            and asyncio.get_running_loop().time() < deadline
         ):
-            return response
+            await asyncio.sleep(0.05)
+
+        forced = self._tree_is_alive()
+        if forced:
+            self._force_tree()
+            force_deadline = asyncio.get_running_loop().time() + 10.0
+            while (
+                self._tree_is_alive()
+                and asyncio.get_running_loop().time() < force_deadline
+            ):
+                await asyncio.sleep(0.05)
+
+        if self._stderr_drainer is not None:
+            self._stderr_drainer.join(timeout=2.0)
+        process.poll()
+
+        if forced:
+            self._remove_runtime_handoff(paths)
+        if self._tree_is_alive():
+            self._cleanup_result = (
+                "Runtime fixture process tree survived forced termination"
+            )
+        elif forced:
+            self._cleanup_result = (
+                "Runtime fixture required forced termination"
+            )
+        elif process.returncode not in (0, None):
+            self._cleanup_result = (
+                f"Runtime fixture exited with code {process.returncode}: "
+                f"{self.stderr_tail}"
+            )
+        return self._cleanup_result
+
+    def _tree_is_alive(self) -> bool:
+        pids = {self.launcher_pid, self.worker_pid}
+        return any(self.pid_exists(pid) for pid in pids if pid > 0)
+
+    def _force_tree(self) -> None:
+        pids = tuple(
+            dict.fromkeys(
+                pid
+                for pid in (self.worker_pid, self.launcher_pid)
+                if pid > 0
+            )
+        )
+        if os.name == "nt":
+            for pid in pids:
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                        timeout=10,
+                        creationflags=getattr(
+                            subprocess,
+                            "CREATE_NO_WINDOW",
+                            0,
+                        ),
+                    )
+                except subprocess.TimeoutExpired:
+                    pass
+            return
+        try:
+            os.killpg(os.getpgid(self.launcher_pid), 9)
+        except (ProcessLookupError, PermissionError):
+            pass
+        for pid in pids:
+            try:
+                os.kill(pid, 9)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    @staticmethod
+    def pid_exists(pid: int) -> bool:
+        if type(pid) is not int or pid < 1:
+            return False
+        if os.name != "nt":
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True
+            return True
+
+        import ctypes
+
+        process_query_limited_information = 0x1000
+        still_active = 259
+        handle = ctypes.windll.kernel32.OpenProcess(
+            process_query_limited_information,
+            False,
+            pid,
+        )
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if not ctypes.windll.kernel32.GetExitCodeProcess(
+                handle,
+                ctypes.byref(exit_code),
+            ):
+                return False
+            return exit_code.value == still_active
+        finally:
+            ctypes.windll.kernel32.CloseHandle(handle)
+
+    @staticmethod
+    def _remove_runtime_handoff(paths) -> None:
+        for path in (
+            paths.token_file,
+            paths.discovery_file,
+            paths.state_dir / _RUNTIME_FIXTURE_STOP,
+        ):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
 
 
 async def _assert_b2b_no_houdini_write(
@@ -168,10 +533,10 @@ async def _assert_b2b_no_houdini_write(
     label: str,
     operation,
 ):
-    before = _houdini_fingerprint(hou)
+    before = _fingerprint_or_die(hou)
     epoch_before = adapter.binding().scene_epoch
     result = await operation
-    after = _houdini_fingerprint(hou)
+    after = _fingerprint_or_die(hou)
     epoch_after = adapter.binding().scene_epoch
     if before != after:
         _die(f"{label} mutated the Houdini scene fingerprint")
@@ -192,31 +557,31 @@ async def _workspace_lifecycle_smoke(
     partial,
     workspace_id: str,
     second_workspace_id: str,
-    run_id: str,
 ) -> None:
     from websockets.asyncio.client import connect
 
     from eee_agent.changesets import OwnedNodeRef, WorkspaceManifest
     from eee_agent.changesets.repository import ChangeSetRepository
     from eee_agent.core import AgentException
-    from eee_agent.houdini_bridge.auth import create_bridge_identity
+    from eee_agent.houdini_bridge.auth import (
+        BRIDGE_DISCOVERY_FILENAME,
+        BRIDGE_TOKEN_FILENAME,
+        create_bridge_identity,
+    )
     from eee_agent.houdini_bridge.client import BridgeClient
     from eee_agent.houdini_bridge.queue import MainThreadReadQueue
-    from eee_agent.houdini_bridge.workspace_provider import (
-        BridgeWorkspaceFactProvider,
-    )
     from eee_agent.houdini_bridge.workspaces import WorkspaceInspectRequest
-    from eee_agent.runtime.auth import create_identity
     from eee_agent.runtime.database import RuntimeDatabase
     from eee_agent.runtime.paths import RuntimePaths
-    from eee_agent.runtime.server import RuntimeWebSocketServer
-    from eee_agent.runtime.service import RuntimeService
     from houdini_side.secure_bridge import BridgeServer
 
     async def pump(queue: MainThreadReadQueue, stop: asyncio.Event) -> None:
         while not stop.is_set():
             queue.pump_one()
             await asyncio.sleep(0.002)
+
+    _fingerprint_or_die(hou)
+    print("b2b fingerprint: all required Houdini read surfaces are available")
 
     old_runtime_home = os.environ.get("EEE_RUNTIME_HOME")
     with tempfile.TemporaryDirectory(prefix="eee-b2b-smoke-") as temp_home:
@@ -238,31 +603,29 @@ async def _workspace_lifecycle_smoke(
         await bridge_server.serve(listener, host="127.0.0.1")
         stop = asyncio.Event()
         pump_task = asyncio.create_task(pump(bridge_queue, stop))
-        database = await RuntimeDatabase.open(paths.app_db)
-        runtime_identity = create_identity()
-        service = RuntimeService(
-            database,
-            paths,
-            workspace_fact_provider=BridgeWorkspaceFactProvider(
-                paths.state_dir
-            ),
-        )
-        runtime_server = RuntimeWebSocketServer(
-            service,
-            runtime_identity,
-            host="127.0.0.1",
-            port=0,
-        )
+        runtime_fixture = None
+        database = None
         duplicate = None
+        runtime_cleanup_error = None
         try:
-            async with runtime_server:
-                async with connect(
-                    f"ws://127.0.0.1:{runtime_server.port}",
-                    additional_headers={
-                        "Authorization": f"Bearer {runtime_identity.token}"
-                    },
-                    compression=None,
-                ) as ws:
+            runtime_fixture = _RuntimeFixtureProcess(paths.home)
+            runtime_fixture.start()
+            runtime_discovery, runtime_token = (
+                await runtime_fixture.wait_for_discovery(
+                    paths,
+                )
+            )
+            if runtime_token == bridge_identity.token:
+                _die("Runtime and Bridge unexpectedly share one bearer token")
+            database = await RuntimeDatabase.open(paths.app_db)
+            async with connect(
+                "ws://"
+                f"{runtime_discovery['host']}:{runtime_discovery['port']}",
+                additional_headers={
+                    "Authorization": f"Bearer {runtime_token}"
+                },
+                compression=None,
+            ) as ws:
                     session_response = await _runtime_request(
                         ws,
                         "b2b-session",
@@ -272,22 +635,37 @@ async def _workspace_lifecycle_smoke(
                     if not session_response["ok"]:
                         _die(f"Runtime session.create failed: {session_response}")
                     session_id = session_response["result"]["session_id"]
-                    now_iso = datetime.now(timezone.utc).isoformat()
-                    async with database.write_transaction() as conn:
-                        await conn.execute(
-                            "INSERT INTO runs("
-                            "run_id, session_id, status, user_input, final_response, "
-                            "created_at, started_at, finished_at, failure_json, "
-                            "model_snapshot_json) VALUES "
-                            "(?, ?, 'Completed', 'fixture', 'done', ?, ?, ?, NULL, '{}')",
-                            (
-                                run_id,
-                                session_id,
-                                now_iso,
-                                now_iso,
-                                now_iso,
-                            ),
+                    run_response = await _runtime_request(
+                        ws,
+                        "b2b-run",
+                        "run.start",
+                        {
+                            "session_id": session_id,
+                            "user_input": "real Houdini workspace fixture",
+                        },
+                    )
+                    if not run_response["ok"]:
+                        _die(f"Runtime run.start failed: {run_response}")
+                    run_id = run_response["result"]["run_id"]
+                    for index in range(200):
+                        snapshot = await _runtime_request(
+                            ws,
+                            f"b2b-run-snapshot-{index}",
+                            "session.snapshot",
+                            {"session_id": session_id},
                         )
+                        runs = {
+                            item["run_id"]: item
+                            for item in snapshot["result"]["runs"]
+                        }
+                        if runs[run_id]["status"] == "Completed":
+                            break
+                        await asyncio.sleep(0.01)
+                    else:
+                        _die("Runtime fixture run did not reach Completed")
+
+                    for node in (root, child, alternate):
+                        node.setUserData("eee.created_by_run", run_id)
 
                     _select_exact(hou, (root, child))
                     binding = adapter.binding()
@@ -448,6 +826,27 @@ async def _workspace_lifecycle_smoke(
                         second_workspace_id
                     ):
                         _die("Runtime workspace.switch did not persist active target")
+                    switched_state_revision = switch_response["result"][
+                        "state_revision"
+                    ]
+                    switch_boundary_response = await _runtime_request(
+                        ws,
+                        "b2b-switch-boundary",
+                        "events.replay",
+                        {
+                            "session_id": session_id,
+                            "after_seq": 0,
+                            "limit": 1000,
+                        },
+                    )
+                    if not switch_boundary_response["ok"]:
+                        _die(
+                            "Runtime events.replay failed after switch: "
+                            f"{switch_boundary_response}"
+                        )
+                    switch_boundary = switch_boundary_response["result"][
+                        "last_seq"
+                    ]
 
                     inspect_response = await _assert_b2b_no_houdini_write(
                         hou,
@@ -469,6 +868,165 @@ async def _workspace_lifecycle_smoke(
                         or inspect_response["result"]["status"] != "Healthy"
                     ):
                         _die(f"Runtime workspace.inspect failed: {inspect_response}")
+
+                    alternate.setName(
+                        "alternate_workspace_stale",
+                        unique_name=False,
+                    )
+                    await asyncio.sleep(0)
+                    stale_manifest_binding = adapter.binding()
+                    stale_manifest_inspect = await _assert_b2b_no_houdini_write(
+                        hou,
+                        adapter,
+                        "Runtime stale manifest inspection",
+                        _runtime_request(
+                            ws,
+                            "b2b-stale-manifest-inspect",
+                            "workspace.inspect",
+                            {
+                                "session_id": session_id,
+                                "workspace_id": second_workspace_id,
+                                "expected_scene_epoch": (
+                                    stale_manifest_binding.scene_epoch
+                                ),
+                            },
+                        ),
+                    )
+                    if (
+                        not stale_manifest_inspect["ok"]
+                        or stale_manifest_inspect["result"]["status"] != "Stale"
+                    ):
+                        _die(
+                            "renamed live node did not make the persisted "
+                            f"manifest stale: {stale_manifest_inspect}"
+                        )
+                    if (
+                        stale_manifest_inspect["result"][
+                            "active_workspace_id"
+                        ]
+                        != second_workspace_id
+                    ):
+                        _die(
+                            "stale manifest inspection changed the active "
+                            "workspace state"
+                        )
+
+                    stale_manifest_switch = await _assert_b2b_no_houdini_write(
+                        hou,
+                        adapter,
+                        "Runtime stale manifest switch rejection",
+                        _runtime_request(
+                            ws,
+                            "b2b-stale-manifest-switch",
+                            "workspace.switch",
+                            {
+                                "session_id": session_id,
+                                "workspace_id": second_workspace_id,
+                                "expected_active_workspace_id": (
+                                    second_workspace_id
+                                ),
+                                "expected_scene_epoch": (
+                                    stale_manifest_binding.scene_epoch
+                                ),
+                            },
+                        ),
+                    )
+                    if (
+                        stale_manifest_switch["ok"]
+                        or stale_manifest_switch["error"]["code"]
+                        != "workspace.revision_conflict"
+                    ):
+                        _die(
+                            "stale persisted manifest did not fail closed: "
+                            f"{stale_manifest_switch}"
+                        )
+
+                    post_stale_switch = await _assert_b2b_no_houdini_write(
+                        hou,
+                        adapter,
+                        "Runtime state after stale manifest rejection",
+                        _runtime_request(
+                            ws,
+                            "b2b-post-stale-manifest",
+                            "workspace.inspect",
+                            {
+                                "session_id": session_id,
+                                "workspace_id": second_workspace_id,
+                                "expected_scene_epoch": (
+                                    stale_manifest_binding.scene_epoch
+                                ),
+                            },
+                        ),
+                    )
+                    if (
+                        not post_stale_switch["ok"]
+                        or post_stale_switch["result"]["status"] != "Stale"
+                        or post_stale_switch["result"][
+                            "active_workspace_id"
+                        ]
+                        != second_workspace_id
+                    ):
+                        _die(
+                            "stale manifest switch changed the prior active "
+                            f"pointer: {post_stale_switch}"
+                        )
+
+                    alternate.setName(
+                        "alternate_workspace",
+                        unique_name=False,
+                    )
+                    await asyncio.sleep(0)
+                    restored_binding = adapter.binding()
+                    preserved_noop = await _assert_b2b_no_houdini_write(
+                        hou,
+                        adapter,
+                        "Runtime state after restored manifest",
+                        _runtime_request(
+                            ws,
+                            "b2b-restored-manifest-noop",
+                            "workspace.switch",
+                            {
+                                "session_id": session_id,
+                                "workspace_id": second_workspace_id,
+                                "expected_active_workspace_id": (
+                                    second_workspace_id
+                                ),
+                                "expected_scene_epoch": (
+                                    restored_binding.scene_epoch
+                                ),
+                            },
+                        ),
+                    )
+                    if (
+                        not preserved_noop["ok"]
+                        or preserved_noop["result"]["changed"]
+                        or preserved_noop["result"]["active_workspace_id"]
+                        != second_workspace_id
+                        or preserved_noop["result"]["state_revision"]
+                        != switched_state_revision
+                    ):
+                        _die(
+                            "stale manifest rejection changed the prior active "
+                            f"pointer or revision: {preserved_noop}"
+                        )
+                    after_stale_manifest = await _runtime_request(
+                        ws,
+                        "b2b-after-stale-manifest",
+                        "events.replay",
+                        {
+                            "session_id": session_id,
+                            "after_seq": switch_boundary,
+                            "limit": 100,
+                        },
+                    )
+                    if (
+                        not after_stale_manifest["ok"]
+                        or after_stale_manifest["result"]["events"]
+                    ):
+                        _die(
+                            "stale inspect/switch or restored no-op emitted an "
+                            f"unexpected event: {after_stale_manifest}"
+                        )
 
                     _select_exact(hou, (ordinary,))
                     ordinary_response = await _assert_b2b_no_houdini_write(
@@ -589,6 +1147,16 @@ async def _workspace_lifecycle_smoke(
                         "B2B SMOKE OK: Bridge selection/manifest inspection and "
                         "public Runtime create/bind/switch/inspect are read-only"
                     )
+                    # Houdini 21.0.440's haio transport has a broken graceful
+                    # EOF path (it references ``_sock`` instead of ``_socket``),
+                    # which prevents the server connection from detaching and
+                    # makes websockets.Server.wait_closed() hang forever.
+                    # All public responses are complete here; abort only this
+                    # disposable smoke client to exercise the working
+                    # connection_lost path. The Runtime server itself runs in a
+                    # standard Python subprocess and isn't exposed to haio.
+                    ws.transport.abort()
+                    await ws.wait_closed()
         except AgentException as exc:
             _die(
                 f"structured B2b setup failure {exc.error.code}: "
@@ -597,7 +1165,18 @@ async def _workspace_lifecycle_smoke(
         finally:
             if duplicate is not None:
                 duplicate.destroy()
-            await database.close()
+            if database is not None:
+                await database.close()
+            runtime_cleanup_error = (
+                None
+                if runtime_fixture is None
+                else await runtime_fixture.stop(paths)
+            )
+            leftover_runtime_identity = [
+                path.name
+                for path in (paths.token_file, paths.discovery_file)
+                if path.exists()
+            ]
             stop.set()
             pump_task.cancel()
             try:
@@ -605,10 +1184,30 @@ async def _workspace_lifecycle_smoke(
             except (asyncio.CancelledError, Exception):
                 pass
             await bridge_server.stop()
+            leftover_identity = [
+                filename
+                for filename in (
+                    BRIDGE_TOKEN_FILENAME,
+                    BRIDGE_DISCOVERY_FILENAME,
+                )
+                if (paths.state_dir / filename).exists()
+            ]
             if old_runtime_home is None:
                 os.environ.pop("EEE_RUNTIME_HOME", None)
             else:
                 os.environ["EEE_RUNTIME_HOME"] = old_runtime_home
+            if runtime_cleanup_error is not None:
+                _die(runtime_cleanup_error)
+            if leftover_runtime_identity:
+                _die(
+                    "Runtime shutdown left identity files: "
+                    + ", ".join(leftover_runtime_identity)
+                )
+            if leftover_identity:
+                _die(
+                    "Bridge shutdown left identity files: "
+                    + ", ".join(leftover_identity)
+                )
 
 
 def main() -> None:
@@ -814,7 +1413,6 @@ def main() -> None:
                 partial=partial,
                 workspace_id=WS,
                 second_workspace_id=WS2,
-                run_id=RUN,
             )
         )
 
@@ -823,16 +1421,13 @@ def main() -> None:
             "idempotent, trusted Workspace lifecycle read-only"
         )
     finally:
-        if root is not None and _safe_read(root.isValid, False):
-            cleanup_path = _safe_read(root.path, ROOT_PATH)
-            root.destroy()
+        cleanup_root = hou.node("/obj/eee_task16d_smoke_bound")
+        if cleanup_root is None:
+            cleanup_root = hou.node(ROOT_PATH)
+        if cleanup_root is not None:
+            cleanup_path = cleanup_root.path()
+            cleanup_root.destroy()
             print(f"cleanup: destroyed {cleanup_path}")
-        else:
-            for path in (ROOT_PATH, "/obj/eee_task16d_smoke_bound"):
-                node = hou.node(path)
-                if node is not None:
-                    node.destroy()
-                    print(f"cleanup: destroyed {path}")
 
 
 if __name__ == "__main__":
