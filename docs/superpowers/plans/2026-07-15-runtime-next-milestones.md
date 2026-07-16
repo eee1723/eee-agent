@@ -164,32 +164,18 @@ included in its focused local commit. See
 
 **Dependency:** Runtime protocol plus the read-only portion of Task 15. The read-only panel slice may start before Task 16; its write/approval slice must wait for Task 16.
 
-**Current state:** Task 17-A now has an approved bounded design and executable
-plan in
-`docs/superpowers/specs/2026-07-16-task17-a-docked-readonly-panel-design.md`
-and
-`docs/superpowers/plans/2026-07-16-task17-a-docked-readonly-panel.md`.
-Slice 17-A1 is locally implemented: strict Runtime discovery/token verification,
-read-only command construction, deterministic Session selection, monotonic
-per-Session reconnect cursors, an authenticated Qt WebSocket observer, and a
-menu-visible `.pypanel`. Its gate passed 18 panel tests, a 219-test
-panel/protocol/server regression slice, and 2055 full offline tests with the
-single existing optional WSL skip. Slice 17-A2 is now locally implemented and
-offline-accepted: the Houdini-owned host binds the accepted BridgeServer on a
-background asyncio thread, pumps the single FIFO from Houdini's main-thread
-idle callback, performs nullable-epoch binding followed by exact bound
-`scene.query`, and renders HIP/instance/epoch/revision plus bounded selected-node
-facts. Snapshot fallback now advances the reconnect cursor from
-`snapshot_seq`. After the real Houdini test exposed its process-wide
-`haio.HoudiniEventLoopPolicy`, both Bridge transport and selection refresh now
-use isolated stdlib selector loops in their worker threads. The final gate
-passed 31 panel tests, a 347-test focused panel/Bridge/server regression, and
-2068 full offline tests with the same optional WSL skip. A real hython
-background loopback probe also passed under the installed `haio` policy. Slice
-17-A3 then passed the user's real Houdini dock/restart/zero-mutation acceptance:
-zero/one/multiple selections matched, geometry and epoch facts rendered,
-Runtime reconnect and panel reopen recovered, Bridge remained alive, and no
-scene or filesystem mutation was observed. Task 17-A is accepted.
+**Current state:** Task 17-A is accepted after its real Houdini
+dock/restart/selection/zero-mutation gate. Task 17-B now has its own bounded
+design and plan and is implemented/offline-accepted in `13e0782`. The panel
+creates/selects Sessions, starts/stops Runs, rebuilds bounded Run output and
+activity from snapshots plus ordered events, lists durable bounded ChangeSet
+summaries, and sends exact approve/reject decisions. The approval surface never
+receives raw operations or parameter values and there is no public Apply
+command. The focused panel/ChangeSet/protocol gate passes 328 tests; the full
+suite passes 2103 tests with the same single optional WSL skip. Populated Run
+and approval states were also rendered with Houdini 21.0.440's bundled PySide6
+at a narrow dock size. Real Houdini Run/reconnect/stop/empty-approval acceptance
+is the remaining Task 17-B gate.
 
 ### 17-A: Read-only selection inspector (earliest Houdini UI test)
 
@@ -200,12 +186,19 @@ scene or filesystem mutation was observed. Task 17-A is accepted.
 
 ### 17-B: Interactive approval and run UI
 
-- After Task 16, add session/run inspectors, active-run close choices (continue/stop/cancel), ChangeSet preview, approval state, stale-precondition display, and actionable structured errors.
-- No Apply button may call a legacy unrestricted bridge function; it must submit the typed ChangeSet flow and render the receipt/reconciliation result.
+- Implemented: Session creation/selection, Run start/stop/force-stop,
+  snapshot/event recovery, bounded output/activity, ChangeSet queue/risk
+  preview, approve/reject, and receipt/critical-recovery evidence.
+- The panel has no Apply button and cannot serialize raw operations. Task 18
+  remains responsible for creating trusted typed proposals and invoking the
+  existing in-process Apply path.
 
 **Acceptance gate for 17-A:** Houdini UI smoke, reconnect without loss or duplicate, selection path/type parity, scene-epoch display, and no mutation from a read-only inspection session.
 
-**Acceptance gate for 17-B:** Runtime restart recovery, approval stale-state display, typed apply/receipt rendering, and no legacy unrestricted write path.
+**Acceptance gate for 17-B:** real Runtime Run/restart/stop recovery,
+empty-approval state before Task 18, Scene inspector regression, and no scene or
+repository mutation. Approval/stale/receipt branches are covered offline until
+Task 18 can produce trusted proposals.
 
 ## Task 18: Strict modeling capability
 

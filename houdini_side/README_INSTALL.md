@@ -1,11 +1,13 @@
-# Houdini side: Runtime observer and bridges
+# Houdini side: Runtime control and bridges
 
 > Fresh machine? See [`../SETUP.md`](../SETUP.md) for the full clone-to-run
 > sequence. This document covers the in-Houdini integration.
 
-The production Runtime path uses an authenticated Secure Bridge and a dockable
-read-only Python Panel. The legacy chat panel still uses the old rpyc bridge and
-remains available as a rollback path.
+The docked Runtime panel and its typed scene inspector use an authenticated
+Secure Bridge. The current Runtime agent's exact read-only Houdini tool
+allowlist still uses the old localhost rpyc bridge; that dependency is separate
+from the panel and does not add write tools to the Runtime agent. The legacy
+chat panel remains available as a rollback path.
 
 ## 0. Install the Houdini package
 
@@ -77,6 +79,12 @@ The Secure Bridge:
 You can also create a Python Panel pane and select **EEE Runtime**. If the
 Secure Bridge is not running, Runtime status remains available and the
 selection area reports that inspection is unavailable.
+
+For a Runtime Run that calls `hou_status`, `find_nodes`, geometry inspection,
+or another current read-only agent tool, also choose **EEE Agent → Start RPC
+Bridge Only**. A text-only Run does not require it. This is a temporary
+agent-tool transport dependency; the Runtime panel itself never falls back to
+rpyc.
 
 ## 2. Manual Secure Bridge controls
 

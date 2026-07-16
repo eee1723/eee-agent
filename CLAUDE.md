@@ -7,16 +7,16 @@ don't re-discover them). Mirrors the auto-memory; kept in-repo so it travels wit
 ## Current development handoff
 
 The current source of truth is
-`docs/handoffs/2026-07-16-runtime-17a-transfer.md`. The active branch is
-`feature/runtime`. Task 16-E and Task 17-A1 remain locally accepted in focused
-commits. Task 17-A2 now implements the Houdini-owned Secure Bridge host,
-main-thread single-FIFO pump, bound typed `scene.query` selection inspector,
-snapshot cursor recovery, menu/install integration, and the completed epoch
-rail/node-fact UI. Its full offline baseline is 2068 passed, 1 skipped.
-Task 17-A3 passed the user's real Houdini docked UI/restart/zero-mutation test,
-so Task 17-A is accepted. Task 17-B write/approval UI has not started. Do not
-rewrite or discard the 16-E, 17-A1, or 17-A2 commits, merge `main`, or weaken
-the trusted
+`docs/handoffs/2026-07-16-runtime-17b-transfer.md`. The active branch is
+`feature/runtime`. Task 16-E and Task 17-A are accepted. Task 17-B is
+implemented and offline-accepted in `13e0782`: the docked panel now creates
+and selects Sessions, starts/stops Runs, recovers bounded Run state/output,
+lists bounded durable ChangeSet summaries, and sends exact approve/reject
+decisions without exposing Apply. Its full offline baseline is 2103 passed,
+1 skipped; the 328-test panel/ChangeSet/protocol gate also passes. Real
+Houdini Run/reconnect/stop/empty-approval acceptance is the next gate. Do not
+rewrite or discard the accepted Task 16-E/17-A commits or `13e0782`, merge
+`main`, or weaken the trusted
 Workspace, typed ChangeSet, approval, preflight, transactional Apply, receipt,
 recovery, or single-FIFO boundaries while resuming work.
 
@@ -163,11 +163,17 @@ rollback path. It does **not** replace the Secure HoudiniBridge (deferred).
   restart E2E (`tests/runtime/runtime_process_fixture.py`) — runs with NO live
   LLM and NO Houdini. GLM-5.2 and Houdini read-only smokes are MANUAL only (plan
   §"Manual Acceptance") and never block offline acceptance.
+- **Docked Runtime control (Task 17-B)**: the Houdini Python Panel owns no
+  Runtime, graph, SQLite, or Apply path. It uses exact Session/Run/approval
+  commands, bounded snapshot/event reducers, and a read-only `changeset.list`
+  projection. Current Runtime agent tools still use the existing localhost
+  rpyc bridge behind an exact read-only allowlist; this is separate from the
+  panel's authenticated Secure Bridge selection inspector.
 - **Don't commit**: runtime SQLite (`app.sqlite*`, `checkpoints.sqlite*`),
   `runtime.token`, `runtime.json`, `runtime.lock`, logs, `.env`, `.venv` — all
   `.gitignore`d. Approved spec:
   `docs/superpowers/specs/2026-07-14-runtime-design.md`; status:
-  `docs/handoffs/2026-07-16-runtime-b2b3-transfer.md`.
+  `docs/handoffs/2026-07-16-runtime-17b-transfer.md`.
 
 ## Known limitation
 DeepSeek V4 Pro loops on long-horizon tasks (over-iteration). Architecture is proven
