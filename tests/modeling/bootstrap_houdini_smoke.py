@@ -35,7 +35,11 @@ def main() -> None:
         WorkspaceBootstrapContext,
         compile_bootstrap_procedural_spec,
     )
-    from eee_agent.modeling.validation import ValidationStatus, validate_compilation
+    from eee_agent.modeling.validation import (
+        ValidationStatus,
+        validate_applied_scene,
+        validate_compilation,
+    )
     from eee_agent.modeling.contracts import (
         Axis,
         ComponentSpec,
@@ -183,6 +187,21 @@ def main() -> None:
         geometry = output.geometry()
         if geometry is None or len(geometry.prims()) == 0:
             _fail("the output did not cook non-empty geometry")
+        scene_query = adapter.scene_query(
+            include_selection=False,
+            node_paths=[node.path for node in compiled.changeset.affected_nodes],
+            include_geometry_stats=True,
+            expected_scene_epoch=binding.scene_epoch,
+        )
+        post_apply = validate_applied_scene(
+            changeset=compiled.changeset,
+            query=scene_query,
+        )
+        if any(item.status is not ValidationStatus.PASSED for item in post_apply):
+            _fail(
+                "typed post-Apply Cook/Geometry validation did not pass: "
+                f"{[item.to_dict() for item in post_apply]}"
+            )
 
         for node in (root, box, xform, output):
             expected = {

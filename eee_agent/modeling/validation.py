@@ -12,7 +12,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Mapping
 
-from eee_agent.changesets.contracts import ChangeSet, CreateNode
+from eee_agent.changesets.contracts import ChangeSet, ConnectInput, CreateNode
+from eee_agent.houdini_bridge.contracts import SceneQueryResult
 from eee_agent.modeling.catalog import NodeCatalog
 from eee_agent.modeling.compiler import CompilationResult
 from eee_agent.modeling.contracts import (
@@ -229,6 +230,152 @@ def validate_compilation(
     )
 
 
+def validate_applied_scene(
+    *, changeset: ChangeSet, query: SceneQueryResult
+) -> tuple[ValidatorResult, ValidatorResult]:
+    """Return Cook and Geometry results from bounded post-Apply scene facts."""
+    if type(changeset) is not ChangeSet:
+        raise TypeError("changeset must be an exact ChangeSet")
+    if type(query) is not SceneQueryResult:
+        raise TypeError("query must be an exact SceneQueryResult")
+    evidence = _evidence(
+        "scene.geometry",
+        query.to_dict(),
+        "Read-only Cook and geometry evidence",
+    )
+    container_ids = {
+        operation.parent.node_id
+        for operation in changeset.operations
+        if isinstance(operation, CreateNode)
+        and operation.parent.node_id is not None
+    }
+    expected_paths = {
+        node.path
+        for node in changeset.affected_nodes
+        if node.node_id not in container_ids
+    }
+    actual_by_path = {node.path: node for node in query.nodes}
+    stale = (
+        query.binding.instance_id != changeset.scene_binding.instance_id
+        or query.binding.scene_epoch != changeset.scene_binding.scene_epoch
+    )
+    if stale:
+        return (
+            ValidatorResult(
+                ValidatorKind.COOK,
+                ValidationStatus.STALE,
+                "modeling.validation.stale",
+                "Scene evidence no longer matches the approved scene binding.",
+                (evidence,),
+            ),
+            ValidatorResult(
+                ValidatorKind.GEOMETRY,
+                ValidationStatus.STALE,
+                "modeling.validation.stale",
+                "Scene evidence no longer matches the approved scene binding.",
+                (evidence,),
+            ),
+        )
+
+    missing = sorted(expected_paths - set(actual_by_path))
+    unreadable = sorted(
+        path
+        for path in expected_paths & set(actual_by_path)
+        if actual_by_path[path].geometry_stats is None
+    )
+    cook = ValidatorResult(
+        ValidatorKind.COOK,
+        ValidationStatus.FAILED if missing or unreadable else ValidationStatus.PASSED,
+        "modeling.cook.failed" if missing or unreadable else "modeling.cook.valid",
+        (
+            "One or more compiled nodes are missing or have unreadable geometry."
+            if missing or unreadable
+            else "Every compiled node returned readable geometry facts."
+        ),
+        (evidence,),
+    )
+    source_ids = {
+        operation.source.node_id
+        for operation in changeset.operations
+        if isinstance(operation, ConnectInput)
+        and operation.source.node_id is not None
+    }
+    terminal_paths = {
+        node.path
+        for node in changeset.affected_nodes
+        if node.node_id not in source_ids and node.node_id not in container_ids
+    }
+    invalid_terminal: list[str] = []
+    for path in sorted(terminal_paths):
+        node = actual_by_path.get(path)
+        stats = None if node is None else node.geometry_stats
+        if stats is None:
+            invalid_terminal.append(path)
+            continue
+        points = stats.get("points")
+        primitives = stats.get("primitives")
+        bbox = stats.get("bbox")
+        if (
+            type(points) is not int
+            or type(primitives) is not int
+            or points <= 0
+            or primitives <= 0
+            or not isinstance(bbox, Mapping)
+        ):
+            invalid_terminal.append(path)
+    geometry = ValidatorResult(
+        ValidatorKind.GEOMETRY,
+        ValidationStatus.FAILED if invalid_terminal else ValidationStatus.PASSED,
+        (
+            "modeling.geometry.empty_or_invalid"
+            if invalid_terminal
+            else "modeling.geometry.valid"
+        ),
+        (
+            "Terminal model outputs must contain non-empty bounded geometry."
+            if invalid_terminal
+            else "Terminal model outputs contain non-empty bounded geometry."
+        ),
+        (evidence,),
+    )
+    return cook, geometry
+
+
+def validate_scene_query(
+    *,
+    report: ValidationReport,
+    changeset: ChangeSet,
+    query: SceneQueryResult,
+) -> ValidationReport:
+    """Resolve Cook and Geometry stages from one exact read-only scene query."""
+    if type(report) is not ValidationReport:
+        raise TypeError("report must be an exact ValidationReport")
+    if type(changeset) is not ChangeSet:
+        raise TypeError("changeset must be an exact ChangeSet")
+    if type(query) is not SceneQueryResult:
+        raise TypeError("query must be an exact SceneQueryResult")
+    if report.changeset_digest != changeset.digest:
+        raise ValueError("report does not bind the supplied ChangeSet")
+    cook, geometry = validate_applied_scene(changeset=changeset, query=query)
+
+    replacements = {
+        ValidatorKind.COOK: cook,
+        ValidatorKind.GEOMETRY: geometry,
+    }
+    results = tuple(
+        sorted(
+            (replacements.get(item.validator, item) for item in report.results),
+            key=lambda item: item.validator.value,
+        )
+    )
+    return ValidationReport(
+        spec_digest=report.spec_digest,
+        changeset_digest=report.changeset_digest,
+        results=results,
+        repair_budget=report.repair_budget,
+    )
+
+
 def issue_repair_ticket(
     *,
     budget: RepairBudget,
@@ -278,5 +425,7 @@ __all__ = [
     "ValidationStatus",
     "ValidatorResult",
     "issue_repair_ticket",
+    "validate_applied_scene",
     "validate_compilation",
+    "validate_scene_query",
 ]

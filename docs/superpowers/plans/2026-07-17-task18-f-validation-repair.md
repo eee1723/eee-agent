@@ -1,7 +1,8 @@
 # Task 18-F Validation and Repair Plan
 
-Status: deterministic pre-Apply report and repair-budget foundation implemented
-locally; typed Bridge post-Apply validators remain the next slice.
+Status: deterministic pre-Apply report, repair-budget foundation, and typed
+Bridge Cook/Geometry post-Apply validators are implemented locally. Parameter
+Sensitivity, Semantic, and Artifact stages remain.
 
 ## Goal
 

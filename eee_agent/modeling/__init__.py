@@ -48,7 +48,9 @@ from eee_agent.modeling.validation import (
     ValidationStatus,
     ValidatorResult,
     issue_repair_ticket,
+    validate_applied_scene,
     validate_compilation,
+    validate_scene_query,
 )
 
 __all__ = [
@@ -78,6 +80,7 @@ __all__ = [
     "ValidationStatus",
     "ValidatorResult",
     "issue_repair_ticket",
+    "validate_applied_scene",
     "UnitSystem",
     "ValidatorKind",
     "WorkspaceBootstrapContext",
@@ -92,6 +95,7 @@ __all__ = [
     "parse_repair_budget",
     "parse_repair_ticket",
     "validate_compilation",
+    "validate_scene_query",
     "ModelingProposalContext",
     "ModelingProposalCoordinator",
     "ModelingProposalError",

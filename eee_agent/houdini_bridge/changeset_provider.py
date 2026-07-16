@@ -21,7 +21,12 @@ from eee_agent.houdini_bridge.changesets import (
     ReceiptRequest,
 )
 from eee_agent.houdini_bridge.client import BridgeClient, BridgeClientError
-from eee_agent.houdini_bridge.contracts import SceneBinding
+from eee_agent.houdini_bridge.contracts import (
+    BridgeOperation,
+    BridgeRequest,
+    SceneBinding,
+    SceneQueryResult,
+)
 from eee_agent.houdini_bridge.workspaces import WorkspaceInspectRequest
 
 
@@ -91,6 +96,23 @@ class BridgeChangeSetProvider:
         )
         result = await self._call("inspect_workspace", request, may_have_changed=False)
         return result.binding
+
+    async def inspect_geometry(self, changeset: ChangeSet) -> SceneQueryResult:
+        """Read bounded Cook/geometry facts for exact compiled node paths."""
+        if type(changeset) is not ChangeSet:
+            raise TypeError("changeset must be an exact ChangeSet")
+        request = BridgeRequest(
+            request_id=self._request_id("geometry"),
+            operation=BridgeOperation.SCENE_QUERY,
+            deadline_ms=self._deadline_ms,
+            scene_epoch=changeset.scene_binding.scene_epoch,
+            payload={
+                "include_selection": False,
+                "node_paths": [node.path for node in changeset.affected_nodes],
+                "include_geometry_stats": True,
+            },
+        )
+        return await self._call("request", request, may_have_changed=False)
 
     async def preflight(
         self, changeset: ChangeSet, workspace: WorkspaceManifest | None

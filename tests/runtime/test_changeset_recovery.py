@@ -42,7 +42,12 @@ from eee_agent.houdini_bridge.auth import (
 )
 from eee_agent.houdini_bridge.changeset_provider import BridgeChangeSetProvider
 from eee_agent.houdini_bridge.client import BridgeClient
-from eee_agent.houdini_bridge.contracts import SceneBinding
+from eee_agent.houdini_bridge.contracts import (
+    BridgeRequest,
+    SceneBinding,
+    SceneQueryResult,
+    SelectedNode,
+)
 from eee_agent.houdini_bridge.workspaces import (
     WorkspaceInspectRequest,
     WorkspaceInspectResult,
@@ -51,6 +56,7 @@ from eee_agent.runtime.database import RuntimeDatabase
 from eee_agent.runtime.events import EventStore
 from eee_agent.runtime.paths import RuntimePaths
 from eee_agent.runtime.service import RuntimeService
+from eee_agent.modeling.catalog import houdini_21_minimal_catalog
 
 SES = f"ses_{'0' * 32}"
 RUN = f"run_{'1' * 32}"
@@ -243,9 +249,37 @@ class FakeBridge:
         )
         self.calls: list[str] = []
         self.on_apply = None
+        self.geometry_error: BaseException | None = None
 
     async def current_binding(self) -> SceneBinding:
         return _binding()
+
+    async def inspect_geometry(self, changeset):
+        self.calls.append("inspect_geometry")
+        if self.geometry_error is not None:
+            raise self.geometry_error
+        target = changeset.affected_nodes[0]
+        return SceneQueryResult(
+            binding=_binding(),
+            selected_nodes=(),
+            nodes=(
+                SelectedNode(
+                    path=target.path,
+                    node_type=target.expected_type,
+                    parent_path=target.path.rsplit("/", 1)[0],
+                    display_name=target.path.rsplit("/", 1)[1],
+                    is_locked=False,
+                    geometry_stats={
+                        "points": 8,
+                        "primitives": 6,
+                        "bbox": {
+                            "min": [0.0, 0.0, 0.0],
+                            "max": [1.0, 1.0, 1.0],
+                        },
+                    },
+                ),
+            ),
+        )
 
     async def preflight(self, changeset, workspace):
         self.calls.append("preflight")
@@ -575,6 +609,24 @@ def test_production_provider_builds_exact_typed_requests(
                 binding=_binding(), mode="selection", observations=()
             )
 
+        async def request(self, request):
+            self.requests.append(request)
+            target = _target()
+            return SceneQueryResult(
+                binding=_binding(),
+                selected_nodes=(),
+                nodes=(
+                    SelectedNode(
+                        path=target.path,
+                        node_type=target.expected_type,
+                        parent_path="/obj",
+                        display_name="ws",
+                        is_locked=False,
+                        geometry_stats={"points": 8, "primitives": 6},
+                    ),
+                ),
+            )
+
         async def preflight(self, request):
             self.requests.append(request)
             return _preflight(0, before_holds=True)
@@ -600,6 +652,8 @@ def test_production_provider_builds_exact_typed_requests(
         changeset = _changeset()
         manifest = _manifest()
         assert await provider.current_binding() == _binding()
+        geometry = await provider.inspect_geometry(changeset)
+        assert geometry.nodes[0].geometry_stats["primitives"] == 6
         assert await provider.preflight(changeset, manifest) == _preflight(
             0, before_holds=True
         )
@@ -607,11 +661,18 @@ def test_production_provider_builds_exact_typed_requests(
         assert (await provider.receipt(changeset)).change_id == CHG
         assert [type(item) for item in fake.requests] == [
             WorkspaceInspectRequest,
+            BridgeRequest,
             PreflightRequest,
             ApplyRequest,
             ReceiptRequest,
         ]
-        assert fake.closed == 4
+        geometry_request = fake.requests[1]
+        assert geometry_request.to_dict()["payload"] == {
+            "include_selection": False,
+            "node_paths": ["/obj/ws"],
+            "include_geometry_stats": True,
+        }
+        assert fake.closed == 5
 
     asyncio.run(scenario())
 
@@ -708,3 +769,94 @@ def test_runtime_shutdown_timeout_leaves_applying_for_restart(
         await db.close()
 
     asyncio.run(asyncio.wait_for(scenario(), timeout=5))
+
+
+def test_runtime_persists_post_apply_geometry_validation(
+    db_path: Path, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        db, events, _repo, _service, bridge = await _seed(db_path)
+        paths = RuntimePaths(
+            home=tmp_path,
+            state_dir=tmp_path,
+            app_db=db_path,
+            checkpoints_db=tmp_path / "checkpoints.sqlite",
+            lock_file=tmp_path / "runtime.lock",
+            discovery_file=tmp_path / "runtime.json",
+            token_file=tmp_path / "runtime.token",
+        )
+        runtime = RuntimeService(
+            db,
+            paths,
+            changeset_clock=lambda: NOW,
+            changeset_bridge_provider=bridge,
+            modeling_catalog_provider=houdini_21_minimal_catalog,
+        )
+        try:
+            result = await runtime.apply_changeset_trusted(CHG)
+            assert result.state is ChangeSetState.APPLIED
+            replay = await events.replay(SES, after_seq=0, limit=100)
+            validation = next(
+                event
+                for event in replay.events
+                if event.event_type == "modeling.validation_completed"
+            )
+            assert validation.payload["complete"] is True
+            assert [item["status"] for item in validation.payload["results"]] == [
+                "Passed",
+                "Passed",
+            ]
+            assert bridge.calls[-1] == "inspect_geometry"
+            await runtime.apply_changeset_trusted(CHG)
+            replay = await events.replay(SES, after_seq=0, limit=100)
+            assert sum(
+                event.event_type == "modeling.validation_completed"
+                for event in replay.events
+            ) == 1
+            assert bridge.calls.count("inspect_geometry") == 1
+        finally:
+            await runtime._shutdown()
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_runtime_records_validation_unavailable_without_replaying_apply(
+    db_path: Path, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        db, events, _repo, _service, bridge = await _seed(db_path)
+        bridge.geometry_error = _agent_error("bridge.not_available", retryable=True)
+        paths = RuntimePaths(
+            home=tmp_path,
+            state_dir=tmp_path,
+            app_db=db_path,
+            checkpoints_db=tmp_path / "checkpoints.sqlite",
+            lock_file=tmp_path / "runtime.lock",
+            discovery_file=tmp_path / "runtime.json",
+            token_file=tmp_path / "runtime.token",
+        )
+        runtime = RuntimeService(
+            db,
+            paths,
+            changeset_clock=lambda: NOW,
+            changeset_bridge_provider=bridge,
+            modeling_catalog_provider=houdini_21_minimal_catalog,
+        )
+        try:
+            result = await runtime.apply_changeset_trusted(CHG)
+            assert result.state is ChangeSetState.APPLIED
+            replay = await events.replay(SES, after_seq=0, limit=100)
+            unavailable = next(
+                event
+                for event in replay.events
+                if event.event_type == "modeling.validation_unavailable"
+            )
+            assert unavailable.payload["code"] == "bridge.not_available"
+            assert bridge.calls.count("apply") == 1
+            assert bridge.calls.count("inspect_geometry") == 1
+        finally:
+            await runtime._shutdown()
+            await db.close()
+
+    asyncio.run(scenario())

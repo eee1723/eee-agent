@@ -68,6 +68,7 @@ from eee_agent.modeling.proposal import (
     ModelingProposalCoordinator,
     ModelingToolContext,
 )
+from eee_agent.modeling.validation import validate_applied_scene
 from eee_agent.runtime.agent_runner import (
     AgentRunner,
     RunnerCompleted,
@@ -242,6 +243,12 @@ class RuntimeService:
         self._checkpoints: CheckpointManager | None = None
         self._runner: object | None = None
         self._modeling_catalog_provider = modeling_catalog_provider
+        self._modeling_validation_provider = (
+            changeset_bridge_provider
+            if modeling_catalog_provider is not None
+            and hasattr(changeset_bridge_provider, "inspect_geometry")
+            else None
+        )
         # Trusted ChangeSet approval service. It shares this service's EventStore
         # so proposal/decision events commit in the same transaction as the
         # changeset/approval mutation, and it is constructed with injected
@@ -670,6 +677,49 @@ class RuntimeService:
             await self._notify(record)
         return result
 
+    async def _validate_applied_changeset(
+        self, result: ApplyCompletionResult
+    ) -> None:
+        """Persist bounded post-Apply quality evidence without replaying writes."""
+        provider = self._modeling_validation_provider
+        if provider is None or not result.receipt.is_success:
+            return
+        event_type = "modeling.validation_completed"
+        try:
+            query = await provider.inspect_geometry(result.changeset)
+            validator_results = validate_applied_scene(
+                changeset=result.changeset,
+                query=query,
+            )
+            payload: dict[str, object] = {
+                "change_id": result.changeset.change_id,
+                "changeset_digest": result.changeset.digest,
+                "complete": all(
+                    item.status.value == "Passed" for item in validator_results
+                ),
+                "results": [item.to_dict() for item in validator_results],
+            }
+        except Exception as exc:  # noqa: BLE001 - Apply is already durable
+            event_type = "modeling.validation_unavailable"
+            code = (
+                exc.error.code
+                if isinstance(exc, AgentException)
+                else "modeling.validation.invalid_evidence"
+            )
+            payload = {
+                "change_id": result.changeset.change_id,
+                "changeset_digest": result.changeset.digest,
+                "complete": False,
+                "code": code,
+            }
+        await self._emit(
+            result.changeset.session_id,
+            result.changeset.run_id,
+            event_type,
+            payload,
+            RetentionClass.DURABLE,
+        )
+
     async def apply_changeset_trusted(
         self, change_id: str
     ) -> ApplyCompletionResult:
@@ -697,6 +747,11 @@ class RuntimeService:
             raise exc.cause from exc
         for record in result.events:
             await self._notify(record)
+        # A terminal ChangeSet loaded with no new events was already finalized
+        # and validated by its original owner; do not append duplicate quality
+        # events on a later trusted join/read.
+        if result.events:
+            await self._validate_applied_changeset(result)
         return result
 
     def _discard_apply_task(
