@@ -1,7 +1,8 @@
 # Task 17-A Docked Read-Only Panel Plan
 
-Status: slices 17-A1 and 17-A2 are implemented and offline-accepted. Slice
-17-A3 is waiting for the real Houdini dock/restart/zero-mutation acceptance.
+Status: accepted. Slices 17-A1 and 17-A2 passed their offline gates, and slice
+17-A3 passed the real Houdini dock/restart/zero-mutation acceptance on
+2026-07-16.
 
 ## Boundary
 

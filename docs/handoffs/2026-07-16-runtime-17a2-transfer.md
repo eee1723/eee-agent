@@ -6,7 +6,7 @@
 - Task 16-E: accepted in a focused local commit
 - Task 17-A1: accepted in local commit `931ac1c`
 - Task 17-A2: implemented and offline-accepted in focused local commits
-- Task 17-A3: waiting for the user's real Houdini UI/restart/zero-mutation test
+- Task 17-A3: accepted by the user's real Houdini UI/restart/zero-mutation test
 - Task 17-B interactive Run/approval UI: not started
 
 Do not rewrite or discard the Task 16-E, 17-A1, or 17-A2 commits. Do not push,
@@ -151,9 +151,9 @@ The Secure Bridge continues to advertise the already accepted typed
 `changeset.v1` capability for trusted Runtime Apply. The panel has no route to
 that operation.
 
-## Required User Test: Task 17-A3
+## Completed User Test: Task 17-A3
 
-The next action requires a real Houdini GUI and user observation:
+On 2026-07-16 the user completed the real Houdini GUI acceptance:
 
 1. install/reload the Houdini package;
 2. start Runtime in a terminal;
@@ -165,5 +165,7 @@ The next action requires a real Houdini GUI and user observation:
 8. close/reopen the panel and verify Runtime/Secure Bridge stay alive;
 9. verify no scene or filesystem mutation.
 
-Exact commands and checkboxes are supplied to the user after the focused
-17-A2 commit is created and the worktree is clean.
+The first launch exposed Houdini's worker-thread `haio` restriction. Commit
+`6685b72` corrected both Bridge transport and selection refresh loops. After
+restarting Houdini, the user reported the Secure Bridge working and then
+confirmed the entire checklist with “全部通过”. Task 17-A is accepted.

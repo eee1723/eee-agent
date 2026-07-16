@@ -186,8 +186,10 @@ use isolated stdlib selector loops in their worker threads. The final gate
 passed 31 panel tests, a 347-test focused panel/Bridge/server regression, and
 2068 full offline tests with the same optional WSL skip. A real hython
 background loopback probe also passed under the installed `haio` policy. Slice
-17-A3 is waiting for the remaining real Houdini dock/restart/zero-mutation
-acceptance.
+17-A3 then passed the user's real Houdini dock/restart/zero-mutation acceptance:
+zero/one/multiple selections matched, geometry and epoch facts rendered,
+Runtime reconnect and panel reopen recovered, Bridge remained alive, and no
+scene or filesystem mutation was observed. Task 17-A is accepted.
 
 ### 17-A: Read-only selection inspector (earliest Houdini UI test)
 
