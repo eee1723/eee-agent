@@ -5,7 +5,9 @@ in ``runtime_process_fixture.py`` — using a deterministic fake RunnerFactory (
 live LLM, no Houdini). A real loopback WebSocket carries every command and event.
 These tests verify durable session/run/event persistence and exact no-loss /
 no-duplicate replay across a hard restart, plus interrupted-run reconciliation
-(``runtime.interrupted``) and its idempotence.
+(``runtime.interrupted``) and its idempotence. B2b extends the same fixture and
+public socket path with a deterministic Workspace provider to verify trusted
+Workspace lifecycle persistence, replay, CAS, isolation, and failure atomicity.
 
 The fixture is spawned with ``python -m tests.runtime.runtime_process_fixture``;
 no pytest in-process fake server substitutes for the real socket here.
@@ -20,11 +22,15 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 from websockets.asyncio.client import connect
 
+from eee_agent.changesets import OwnedNodeRef, WorkspaceManifest
+from eee_agent.changesets.repository import ChangeSetRepository
+from eee_agent.runtime.database import RuntimeDatabase
 from eee_agent.runtime.protocol import PROTOCOL, encode_envelope
 
 # Repo root owns the importable ``tests`` package (for ``-m`` module resolution
@@ -33,6 +39,8 @@ _WORKTREE = Path(__file__).resolve().parents[2]
 _FIXTURE_MODULE = "tests.runtime.runtime_process_fixture"
 _DISCOVERY_POLL_TIMEOUT = 30.0
 _DISCOVERY_POLL_INTERVAL = 0.05
+_WORKSPACE_CONTROL = "workspace_fixture.json"
+_WORKSPACE_EVENT_ENTERED = "workspace_event_entered"
 
 
 def _cmd(request_id: str, type_: str, payload: dict) -> dict:
@@ -236,6 +244,142 @@ async def _dispatch_until(
                     return responses, events
 
 
+async def _dispatch_for_response_and_event(
+    ws, request_id: str, event_type: str
+) -> tuple[dict, dict]:
+    response = None
+    event = None
+    while response is None or event is None:
+        env = await _recv_envelope(ws)
+        if (
+            env.get("kind") == "response"
+            and env.get("request_id") == request_id
+        ):
+            response = env
+        elif env.get("kind") == "event" and env.get("type") == event_type:
+            event = env
+    return response, event
+
+
+def _write_workspace_control(home: Path, data: dict) -> None:
+    state_dir = home / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / _WORKSPACE_CONTROL).write_text(
+        json.dumps(data, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def _remove_workspace_control(home: Path) -> None:
+    try:
+        (home / "state" / _WORKSPACE_CONTROL).unlink()
+    except FileNotFoundError:
+        pass
+
+
+async def _wait_for_path(path: Path, *, timeout: float = 5.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if path.exists():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"fixture marker did not appear: {path.name}")
+
+
+def _selection_control(
+    *,
+    workspace_id: str,
+    run_id: str,
+    path: str = "/obj/ws",
+    scene_epoch: int = 7,
+    status: str = "ok",
+) -> dict:
+    return {
+        "selection": {
+            "status": status,
+            "instance_id": "hou_instance_1",
+            "scene_epoch": scene_epoch,
+            "observations": [
+                {
+                    "path": path,
+                    "node_type": "geo",
+                    "parent_path": "/obj",
+                    "is_locked": False,
+                    "workspace_id": workspace_id,
+                    "node_id": "n_root",
+                    "capability": "modeling",
+                    "role": "root",
+                    "schema_version": 1,
+                    "created_by_run": run_id,
+                }
+            ],
+        },
+        "manifest_status": "healthy",
+    }
+
+
+async def _wait_for_completed_run(ws, session_id: str) -> str:
+    started = await _request(
+        ws,
+        f"run-{time.monotonic_ns()}",
+        "run.start",
+        {"session_id": session_id, "user_input": "workspace fixture"},
+    )
+    assert started["ok"] is True
+    run_id = started["result"]["run_id"]
+    for index in range(200):
+        snap = await _request(
+            ws,
+            f"snap-{index}-{time.monotonic_ns()}",
+            "session.snapshot",
+            {"session_id": session_id},
+        )
+        runs = {run["run_id"]: run for run in snap["result"]["runs"]}
+        if runs[run_id]["status"] == "Completed":
+            return run_id
+        await asyncio.sleep(0.01)
+    raise AssertionError("fixture run did not complete")
+
+
+def _seed_inactive_workspace(
+    home: Path,
+    *,
+    session_id: str,
+    run_id: str,
+    workspace_id: str,
+    node_id: str,
+    path: str,
+    scene_epoch: int = 7,
+) -> str:
+    async def seed() -> str:
+        database = await RuntimeDatabase.open(home / "state" / "app.sqlite")
+        try:
+            repository = ChangeSetRepository(database)
+            node = OwnedNodeRef(
+                node_id=node_id,
+                path=path,
+                node_type="geo",
+                parent_path="/obj",
+                capability="modeling",
+                role="root",
+            )
+            manifest = WorkspaceManifest.build(
+                workspace_id=workspace_id,
+                session_id=session_id,
+                instance_id="hou_instance_1",
+                scene_epoch=scene_epoch,
+                roots=(node,),
+                nodes=(node,),
+                created_by_run=run_id,
+                updated_at=datetime.now(timezone.utc),
+            )
+            return (await repository.insert_workspace(manifest)).revision
+        finally:
+            await database.close()
+
+    return asyncio.run(seed())
+
+
 # --------------------------------------------------------------------------
 # 1. restart replay: no loss, no duplicate, monotonic sequences
 # --------------------------------------------------------------------------
@@ -429,3 +573,652 @@ def test_restart_reconciles_interrupted_run_as_failed(runtime_home: Path) -> Non
         asyncio.run(phase_c())
     finally:
         fixture3.stop()
+
+
+# --------------------------------------------------------------------------
+# 3. trusted Workspace lifecycle through the public process boundary
+# --------------------------------------------------------------------------
+
+
+def test_workspace_public_create_bind_replay_restart_and_offline_inspect(
+    runtime_home: Path,
+) -> None:
+    workspace_id = f"ws_{'a' * 32}"
+    fixture = _FixtureProcess(runtime_home, mode="workspace")
+    fixture.start()
+    state: dict[str, object] = {}
+    try:
+        discovery = fixture.wait_for_discovery()
+        token = fixture.read_token()
+
+        async def phase_one() -> None:
+            async with await _connect(discovery, token) as ws:
+                created_session = await _request(
+                    ws, "c-workspace", "session.create", {"title": "Workspace"}
+                )
+                session_id = created_session["result"]["session_id"]
+                state["session_id"] = session_id
+                run_id = await _wait_for_completed_run(ws, session_id)
+                _write_workspace_control(
+                    runtime_home,
+                    _selection_control(
+                        workspace_id=workspace_id, run_id=run_id
+                    ),
+                )
+                replay = await _request(
+                    ws,
+                    "before-workspace",
+                    "events.replay",
+                    {"session_id": session_id, "after_seq": 0, "limit": 1000},
+                )
+                boundary = replay["result"]["last_seq"]
+                subscribed = await _request(
+                    ws,
+                    "sub-workspace",
+                    "session.subscribe",
+                    {"session_id": session_id, "last_seq": boundary},
+                )
+                assert subscribed["ok"] is True
+
+                await ws.send(
+                    encode_envelope(
+                        _cmd(
+                            "workspace-create",
+                            "workspace.create",
+                            {
+                                "session_id": session_id,
+                                "expected_scene_epoch": 7,
+                            },
+                        )
+                    )
+                )
+                create_response, create_event = (
+                    await _dispatch_for_response_and_event(
+                        ws, "workspace-create", "workspace.created"
+                    )
+                )
+                assert create_response["ok"] is True
+                assert create_response["result"]["changed"] is True
+                assert create_event["payload"]["workspace_id"] == workspace_id
+                state["create_seq"] = create_event["seq"]
+                state["created_revision"] = create_response["result"]["workspace"][
+                    "revision"
+                ]
+
+                idempotent = await _request(
+                    ws,
+                    "workspace-create-noop",
+                    "workspace.create",
+                    {
+                        "session_id": session_id,
+                        "expected_scene_epoch": 7,
+                    },
+                )
+                assert idempotent["ok"] is True
+                assert idempotent["result"]["changed"] is False
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(ws.recv(), timeout=0.3)
+
+                _write_workspace_control(
+                    runtime_home,
+                    _selection_control(
+                        workspace_id=workspace_id,
+                        run_id=run_id,
+                        path="/obj/renamed",
+                        scene_epoch=8,
+                    ),
+                )
+                await ws.send(
+                    encode_envelope(
+                        _cmd(
+                            "workspace-bind",
+                            "workspace.bind",
+                            {
+                                "session_id": session_id,
+                                "workspace_id": workspace_id,
+                                "expected_manifest_revision": state[
+                                    "created_revision"
+                                ],
+                                "expected_scene_epoch": 8,
+                            },
+                        )
+                    )
+                )
+                bind_response, bind_event = (
+                    await _dispatch_for_response_and_event(
+                        ws, "workspace-bind", "workspace.bound"
+                    )
+                )
+                assert bind_response["ok"] is True
+                assert bind_response["result"]["changed"] is True
+                assert bind_response["result"]["workspace"]["scene_epoch"] == 8
+                assert bind_event["seq"] == create_event["seq"] + 1
+                state["bound_revision"] = bind_response["result"]["workspace"][
+                    "revision"
+                ]
+                state["bind_seq"] = bind_event["seq"]
+
+                inspected = await _request(
+                    ws,
+                    "workspace-inspect",
+                    "workspace.inspect",
+                    {
+                        "session_id": session_id,
+                        "workspace_id": None,
+                        "expected_scene_epoch": 8,
+                    },
+                )
+                assert inspected["ok"] is True
+                assert inspected["result"]["status"] == "Healthy"
+                assert inspected["result"]["active_workspace_id"] == workspace_id
+                assert inspected["result"]["target_manifest"]["nodes"][0][
+                    "path"
+                ] == "/obj/renamed"
+
+                snapshot = await _request(
+                    ws,
+                    "workspace-snapshot",
+                    "session.snapshot",
+                    {"session_id": session_id},
+                )
+                assert set(snapshot["result"]) == {
+                    "session",
+                    "runs",
+                    "active_run",
+                    "snapshot_seq",
+                    "has_earlier_runs",
+                    "earliest_included_run_id",
+                    "version_report",
+                }
+
+        asyncio.run(phase_one())
+    finally:
+        fixture.stop()
+
+    _remove_workspace_control(runtime_home)
+    fixture2 = _FixtureProcess(runtime_home, mode="workspace")
+    fixture2.start()
+    try:
+        discovery2 = fixture2.wait_for_discovery()
+        token2 = fixture2.read_token()
+
+        async def phase_two() -> None:
+            async with await _connect(discovery2, token2) as ws:
+                session_id = state["session_id"]
+                inspected = await _request(
+                    ws,
+                    "workspace-offline",
+                    "workspace.inspect",
+                    {
+                        "session_id": session_id,
+                        "workspace_id": workspace_id,
+                        "expected_scene_epoch": None,
+                    },
+                )
+                assert inspected["ok"] is True
+                assert inspected["result"]["status"] == "BridgeUnavailable"
+                assert inspected["result"]["active_workspace_id"] == workspace_id
+                assert inspected["result"]["target_manifest"]["revision"] == state[
+                    "bound_revision"
+                ]
+
+                replay = await _request(
+                    ws,
+                    "workspace-replay",
+                    "events.replay",
+                    {"session_id": session_id, "after_seq": 0, "limit": 1000},
+                )
+                workspace_events = [
+                    event
+                    for event in replay["result"]["events"]
+                    if event["event_type"].startswith("workspace.")
+                ]
+                assert [
+                    (event["seq"], event["event_type"])
+                    for event in workspace_events
+                ] == [
+                    (state["create_seq"], "workspace.created"),
+                    (state["bind_seq"], "workspace.bound"),
+                ]
+
+        asyncio.run(phase_two())
+    finally:
+        fixture2.stop()
+
+
+def test_workspace_provider_commit_failure_and_session_isolation(
+    runtime_home: Path,
+) -> None:
+    workspace_id = f"ws_{'b' * 32}"
+    fixture = _FixtureProcess(runtime_home, mode="workspace")
+    fixture.start()
+    try:
+        discovery = fixture.wait_for_discovery()
+        token = fixture.read_token()
+
+        async def scenario() -> None:
+            async with await _connect(discovery, token) as ws:
+                first = await _request(
+                    ws, "session-one", "session.create", {"title": "One"}
+                )
+                second = await _request(
+                    ws, "session-two", "session.create", {"title": "Two"}
+                )
+                sid_one = first["result"]["session_id"]
+                sid_two = second["result"]["session_id"]
+                run_one = await _wait_for_completed_run(ws, sid_one)
+                run_two = await _wait_for_completed_run(ws, sid_two)
+
+                offline = _selection_control(
+                    workspace_id=workspace_id,
+                    run_id=run_one,
+                    status="offline",
+                )
+                _write_workspace_control(runtime_home, offline)
+                unavailable = await _request(
+                    ws,
+                    "workspace-provider-fail",
+                    "workspace.create",
+                    {
+                        "session_id": sid_one,
+                        "expected_scene_epoch": None,
+                    },
+                )
+                assert unavailable["ok"] is False
+                assert unavailable["error"]["code"] == (
+                    "bridge.capability_unavailable"
+                )
+
+                failing = _selection_control(
+                    workspace_id=workspace_id, run_id=run_one
+                )
+                failing["fail_event_type"] = "workspace.created"
+                _write_workspace_control(runtime_home, failing)
+                commit_failure = await _request(
+                    ws,
+                    "workspace-commit-fail",
+                    "workspace.create",
+                    {
+                        "session_id": sid_one,
+                        "expected_scene_epoch": 7,
+                    },
+                )
+                assert commit_failure["ok"] is False
+                assert commit_failure["error"]["code"] == (
+                    "internal.runtime_failure"
+                )
+                assert _WORKSPACE_CONTROL not in json.dumps(commit_failure)
+
+                replay_after_fail = await _request(
+                    ws,
+                    "workspace-after-fail",
+                    "events.replay",
+                    {"session_id": sid_one, "after_seq": 0, "limit": 1000},
+                )
+                assert not any(
+                    event["event_type"].startswith("workspace.")
+                    for event in replay_after_fail["result"]["events"]
+                )
+                missing_after_fail = await _request(
+                    ws,
+                    "workspace-missing-after-fail",
+                    "workspace.inspect",
+                    {
+                        "session_id": sid_one,
+                        "workspace_id": workspace_id,
+                        "expected_scene_epoch": None,
+                    },
+                )
+                assert missing_after_fail["ok"] is False
+                assert missing_after_fail["error"]["code"] == (
+                    "workspace.not_found"
+                )
+
+                healthy = _selection_control(
+                    workspace_id=workspace_id, run_id=run_one
+                )
+                _write_workspace_control(runtime_home, healthy)
+                created = await _request(
+                    ws,
+                    "workspace-retry",
+                    "workspace.create",
+                    {
+                        "session_id": sid_one,
+                        "expected_scene_epoch": 7,
+                    },
+                )
+                assert created["ok"] is True
+                assert created["result"]["changed"] is True
+
+                isolated = await _request(
+                    ws,
+                    "workspace-other-session-inspect",
+                    "workspace.inspect",
+                    {
+                        "session_id": sid_two,
+                        "workspace_id": workspace_id,
+                        "expected_scene_epoch": None,
+                    },
+                )
+                assert isolated["ok"] is False
+                assert isolated["error"]["code"] == "workspace.not_found"
+
+                conflicting = _selection_control(
+                    workspace_id=workspace_id, run_id=run_two
+                )
+                _write_workspace_control(runtime_home, conflicting)
+                cross_session = await _request(
+                    ws,
+                    "workspace-other-session-create",
+                    "workspace.create",
+                    {
+                        "session_id": sid_two,
+                        "expected_scene_epoch": 7,
+                    },
+                )
+                assert cross_session["ok"] is False
+                assert cross_session["error"]["code"] == (
+                    "workspace.session_mismatch"
+                )
+                replay_two = await _request(
+                    ws,
+                    "workspace-other-session-replay",
+                    "events.replay",
+                    {"session_id": sid_two, "after_seq": 0, "limit": 1000},
+                )
+                assert not any(
+                    event["event_type"].startswith("workspace.")
+                    for event in replay_two["result"]["events"]
+                )
+
+        asyncio.run(scenario())
+    finally:
+        fixture.stop()
+
+
+def test_workspace_public_switch_concurrent_cas_noop_and_stale_preservation(
+    runtime_home: Path,
+) -> None:
+    first_workspace = f"ws_{'c' * 32}"
+    second_workspace = f"ws_{'d' * 32}"
+    fixture = _FixtureProcess(runtime_home, mode="workspace")
+    fixture.start()
+    state: dict[str, str] = {}
+    try:
+        discovery = fixture.wait_for_discovery()
+        token = fixture.read_token()
+
+        async def create_first() -> None:
+            async with await _connect(discovery, token) as ws:
+                session = await _request(
+                    ws, "switch-session", "session.create", {"title": "Switch"}
+                )
+                session_id = session["result"]["session_id"]
+                run_id = await _wait_for_completed_run(ws, session_id)
+                _write_workspace_control(
+                    runtime_home,
+                    _selection_control(
+                        workspace_id=first_workspace, run_id=run_id
+                    ),
+                )
+                created = await _request(
+                    ws,
+                    "switch-create",
+                    "workspace.create",
+                    {
+                        "session_id": session_id,
+                        "expected_scene_epoch": 7,
+                    },
+                )
+                assert created["ok"] is True
+                state["session_id"] = session_id
+                state["run_id"] = run_id
+
+        asyncio.run(create_first())
+    finally:
+        fixture.stop()
+
+    _seed_inactive_workspace(
+        runtime_home,
+        session_id=state["session_id"],
+        run_id=state["run_id"],
+        workspace_id=second_workspace,
+        node_id="n_second",
+        path="/obj/second",
+    )
+    control = _selection_control(
+        workspace_id=first_workspace, run_id=state["run_id"]
+    )
+    control["manifest_status"] = "healthy"
+    _write_workspace_control(runtime_home, control)
+
+    fixture2 = _FixtureProcess(runtime_home, mode="workspace")
+    fixture2.start()
+    try:
+        discovery2 = fixture2.wait_for_discovery()
+        token2 = fixture2.read_token()
+
+        async def switch_concurrently() -> None:
+            async with await _connect(discovery2, token2) as first_ws:
+                async with await _connect(discovery2, token2) as second_ws:
+                    before = await _request(
+                        first_ws,
+                        "switch-before",
+                        "events.replay",
+                        {
+                            "session_id": state["session_id"],
+                            "after_seq": 0,
+                            "limit": 1000,
+                        },
+                    )
+                    boundary = before["result"]["last_seq"]
+                    payload = {
+                        "session_id": state["session_id"],
+                        "workspace_id": second_workspace,
+                        "expected_active_workspace_id": first_workspace,
+                        "expected_scene_epoch": 7,
+                    }
+                    responses = await asyncio.gather(
+                        _request(
+                            first_ws,
+                            "switch-race-one",
+                            "workspace.switch",
+                            payload,
+                        ),
+                        _request(
+                            second_ws,
+                            "switch-race-two",
+                            "workspace.switch",
+                            payload,
+                        ),
+                    )
+                    successes = [response for response in responses if response["ok"]]
+                    failures = [response for response in responses if not response["ok"]]
+                    assert len(successes) == 1
+                    assert successes[0]["result"]["changed"] is True
+                    assert successes[0]["result"]["active_workspace_id"] == (
+                        second_workspace
+                    )
+                    assert len(failures) == 1
+                    assert failures[0]["error"]["code"] == (
+                        "workspace.active_conflict"
+                    )
+
+                    replay = await _request(
+                        first_ws,
+                        "switch-after-race",
+                        "events.replay",
+                        {
+                            "session_id": state["session_id"],
+                            "after_seq": boundary,
+                            "limit": 100,
+                        },
+                    )
+                    updated = [
+                        event
+                        for event in replay["result"]["events"]
+                        if event["event_type"] == "workspace.updated"
+                    ]
+                    assert len(updated) == 1
+                    assert updated[0]["payload"]["workspace_id"] == (
+                        second_workspace
+                    )
+
+                    noop = await _request(
+                        first_ws,
+                        "switch-noop",
+                        "workspace.switch",
+                        {
+                            "session_id": state["session_id"],
+                            "workspace_id": second_workspace,
+                            "expected_active_workspace_id": second_workspace,
+                            "expected_scene_epoch": 7,
+                        },
+                    )
+                    assert noop["ok"] is True
+                    assert noop["result"]["changed"] is False
+                    after_noop = await _request(
+                        first_ws,
+                        "switch-after-noop",
+                        "events.replay",
+                        {
+                            "session_id": state["session_id"],
+                            "after_seq": updated[0]["seq"],
+                            "limit": 100,
+                        },
+                    )
+                    assert after_noop["result"]["events"] == []
+
+                    stale_control = dict(control)
+                    stale_control["manifest_status"] = "stale"
+                    _write_workspace_control(runtime_home, stale_control)
+                    stale = await _request(
+                        first_ws,
+                        "switch-stale",
+                        "workspace.switch",
+                        {
+                            "session_id": state["session_id"],
+                            "workspace_id": first_workspace,
+                            "expected_active_workspace_id": second_workspace,
+                            "expected_scene_epoch": 7,
+                        },
+                    )
+                    assert stale["ok"] is False
+                    assert stale["error"]["code"] == (
+                        "workspace.revision_conflict"
+                    )
+                    inspected = await _request(
+                        first_ws,
+                        "switch-inspect-stale",
+                        "workspace.inspect",
+                        {
+                            "session_id": state["session_id"],
+                            "workspace_id": first_workspace,
+                            "expected_scene_epoch": 7,
+                        },
+                    )
+                    assert inspected["ok"] is True
+                    assert inspected["result"]["status"] == "Stale"
+                    assert inspected["result"]["active_workspace_id"] == (
+                        second_workspace
+                    )
+
+        asyncio.run(switch_concurrently())
+    finally:
+        fixture2.stop()
+
+
+def test_workspace_disconnect_during_commit_replays_one_complete_mutation(
+    runtime_home: Path,
+) -> None:
+    workspace_id = f"ws_{'e' * 32}"
+    marker = runtime_home / "state" / _WORKSPACE_EVENT_ENTERED
+    fixture = _FixtureProcess(runtime_home, mode="workspace")
+    fixture.start()
+    try:
+        discovery = fixture.wait_for_discovery()
+        token = fixture.read_token()
+
+        async def scenario() -> None:
+            async with await _connect(discovery, token) as setup_ws:
+                session = await _request(
+                    setup_ws,
+                    "disconnect-session",
+                    "session.create",
+                    {"title": "Disconnect"},
+                )
+                session_id = session["result"]["session_id"]
+                run_id = await _wait_for_completed_run(setup_ws, session_id)
+
+            blocked = _selection_control(
+                workspace_id=workspace_id, run_id=run_id
+            )
+            blocked["block_event_type"] = "workspace.created"
+            _write_workspace_control(runtime_home, blocked)
+
+            ws = await _connect(discovery, token)
+            try:
+                await ws.send(
+                    encode_envelope(
+                        _cmd(
+                            "disconnect-create",
+                            "workspace.create",
+                            {
+                                "session_id": session_id,
+                                "expected_scene_epoch": 7,
+                            },
+                        )
+                    )
+                )
+                await _wait_for_path(marker)
+            finally:
+                await ws.close()
+
+            _write_workspace_control(
+                runtime_home,
+                _selection_control(
+                    workspace_id=workspace_id, run_id=run_id
+                ),
+            )
+
+            async with await _connect(discovery, token) as replay_ws:
+                workspace_events = []
+                for index in range(200):
+                    replay = await _request(
+                        replay_ws,
+                        f"disconnect-replay-{index}",
+                        "events.replay",
+                        {
+                            "session_id": session_id,
+                            "after_seq": 0,
+                            "limit": 1000,
+                        },
+                    )
+                    workspace_events = [
+                        event
+                        for event in replay["result"]["events"]
+                        if event["event_type"].startswith("workspace.")
+                    ]
+                    if workspace_events:
+                        break
+                    await asyncio.sleep(0.01)
+                assert [
+                    event["event_type"] for event in workspace_events
+                ] == ["workspace.created"]
+                inspected = await _request(
+                    replay_ws,
+                    "disconnect-inspect",
+                    "workspace.inspect",
+                    {
+                        "session_id": session_id,
+                        "workspace_id": workspace_id,
+                        "expected_scene_epoch": 7,
+                    },
+                )
+                assert inspected["ok"] is True
+                assert inspected["result"]["status"] == "Healthy"
+                assert inspected["result"]["active_workspace_id"] == workspace_id
+
+        asyncio.run(scenario())
+    finally:
+        fixture.stop()

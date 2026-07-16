@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 
 from eee_agent.changesets.contracts import WorkspaceManifest
+from eee_agent.core import AgentError, AgentException, ErrorCategory
 from eee_agent.houdini_bridge.auth import (
     BRIDGE_DISCOVERY_FILENAME,
     BRIDGE_TOKEN_FILENAME,
@@ -103,6 +104,16 @@ class BridgeWorkspaceFactProvider:
             if exc.code == "workspace.identity_conflict":
                 raise WorkspaceInspectionConflict(
                     "The live workspace identity is ambiguous."
+                ) from exc
+            if exc.code == "bridge.stale_scene":
+                raise AgentException(
+                    AgentError(
+                        code=exc.code,
+                        category=ErrorCategory.STALE_SCENE,
+                        message_for_user=exc.message_for_user,
+                        technical_detail_ref=exc.technical_detail_ref,
+                        retryable=exc.retryable,
+                    )
                 ) from exc
             raise
         except (OSError, TimeoutError) as exc:

@@ -41,6 +41,8 @@ _SHUTDOWN = object()
 # Exact ChangeSet approval payload shapes (chg_<uuid> / 64 lowercase hex).
 _CHANGE_ID_RE = re.compile(r"^chg_[0-9a-f]{32}$")
 _CHANGESET_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_SESSION_ID_RE = re.compile(r"^ses_[0-9a-f]{32}$")
+_WORKSPACE_ID_RE = re.compile(r"^ws_[0-9a-f]{32}$")
 
 
 class _CloseAction:
@@ -101,6 +103,22 @@ def _is_change_id(v: object) -> bool:
 
 def _is_changeset_digest(v: object) -> bool:
     return type(v) is str and _CHANGESET_DIGEST_RE.fullmatch(v) is not None
+
+
+def _is_session_id(v: object) -> bool:
+    return type(v) is str and _SESSION_ID_RE.fullmatch(v) is not None
+
+
+def _is_workspace_id(v: object) -> bool:
+    return type(v) is str and _WORKSPACE_ID_RE.fullmatch(v) is not None
+
+
+def _is_nullable_workspace_id(v: object) -> bool:
+    return v is None or _is_workspace_id(v)
+
+
+def _is_nullable_epoch(v: object) -> bool:
+    return v is None or (type(v) is int and v >= 1)
 
 
 def _validate(payload: object, schema: dict) -> dict:
@@ -515,6 +533,78 @@ class RuntimeWebSocketServer:
                 payload["change_id"], payload["changeset_digest"]
             )
             self._put(ctx, success_response(req, result))
+            return
+
+        if ct == "workspace.create":
+            _validate(
+                payload,
+                {
+                    "session_id": _is_session_id,
+                    "expected_scene_epoch": _is_nullable_epoch,
+                },
+            )
+            result = await self._service.create_workspace(
+                payload["session_id"],
+                expected_scene_epoch=payload["expected_scene_epoch"],
+            )
+            self._put(ctx, success_response(req, result.to_dict()))
+            return
+
+        if ct == "workspace.bind":
+            _validate(
+                payload,
+                {
+                    "session_id": _is_session_id,
+                    "workspace_id": _is_workspace_id,
+                    "expected_manifest_revision": _is_changeset_digest,
+                    "expected_scene_epoch": _is_nullable_epoch,
+                },
+            )
+            result = await self._service.bind_workspace(
+                payload["session_id"],
+                payload["workspace_id"],
+                expected_manifest_revision=payload["expected_manifest_revision"],
+                expected_scene_epoch=payload["expected_scene_epoch"],
+            )
+            self._put(ctx, success_response(req, result.to_dict()))
+            return
+
+        if ct == "workspace.switch":
+            _validate(
+                payload,
+                {
+                    "session_id": _is_session_id,
+                    "workspace_id": _is_workspace_id,
+                    "expected_active_workspace_id": _is_nullable_workspace_id,
+                    "expected_scene_epoch": _is_nullable_epoch,
+                },
+            )
+            result = await self._service.switch_workspace(
+                payload["session_id"],
+                payload["workspace_id"],
+                expected_active_workspace_id=payload[
+                    "expected_active_workspace_id"
+                ],
+                expected_scene_epoch=payload["expected_scene_epoch"],
+            )
+            self._put(ctx, success_response(req, result.to_dict()))
+            return
+
+        if ct == "workspace.inspect":
+            _validate(
+                payload,
+                {
+                    "session_id": _is_session_id,
+                    "workspace_id": _is_nullable_workspace_id,
+                    "expected_scene_epoch": _is_nullable_epoch,
+                },
+            )
+            result = await self._service.inspect_workspace(
+                payload["session_id"],
+                payload["workspace_id"],
+                expected_scene_epoch=payload["expected_scene_epoch"],
+            )
+            self._put(ctx, success_response(req, result.to_dict()))
             return
 
         # COMMAND_TYPES are all handled above; unreachable for valid commands.

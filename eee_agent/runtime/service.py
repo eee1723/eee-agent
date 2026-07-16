@@ -24,18 +24,28 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Mapping
 
-from eee_agent.changesets.contracts import ApprovalDecision
+from eee_agent.changesets.contracts import ApprovalDecision, WorkspaceManifest
 from eee_agent.changesets.repository import ChangeSetRepository
 from eee_agent.changesets.service import (
     ChangeSetService,
     expired_error,
     summary_from_decision,
 )
+from eee_agent.changesets.workspace_service import (
+    WorkspaceFactProvider,
+    WorkspaceInspectionSummary,
+    WorkspaceLifecycleSummary,
+    WorkspaceService,
+)
 from eee_agent.core import (
     AgentError,
     AgentException,
     ErrorCategory,
     runtime_version_report,
+)
+from eee_agent.houdini_bridge.workspaces import (
+    WorkspaceInspectResult,
+    WorkspaceInspectionUnavailable,
 )
 from eee_agent.runtime.agent_runner import (
     RunnerCompleted,
@@ -84,6 +94,24 @@ _INTERRUPTED_ERROR = AgentError(
     category=ErrorCategory.INTERNAL_INVARIANT,
     message_for_user="The previous Runtime process stopped before this run completed.",
 )
+
+
+class _UnavailableWorkspaceFactProvider:
+    async def inspect_selection(
+        self, expected_scene_epoch: int | None
+    ) -> WorkspaceInspectResult:
+        raise WorkspaceInspectionUnavailable(
+            "Trusted workspace inspection is not currently available."
+        )
+
+    async def inspect_manifest(
+        self,
+        manifest: WorkspaceManifest,
+        expected_scene_epoch: int | None,
+    ) -> WorkspaceInspectResult:
+        raise WorkspaceInspectionUnavailable(
+            "Trusted workspace inspection is not currently available."
+        )
 
 
 def _checkpoint_cleanup_failed() -> AgentException:
@@ -167,6 +195,7 @@ class RuntimeService:
         graceful_timeout: float = _GRACEFUL_TIMEOUT_SECONDS,
         changeset_clock: "Callable[[], datetime] | None" = None,
         changeset_binding_provider: "Callable[[], object] | None" = None,
+        workspace_fact_provider: WorkspaceFactProvider | None = None,
     ) -> None:
         self._database = database
         self._paths = paths
@@ -191,10 +220,19 @@ class RuntimeService:
         # changeset/approval mutation, and it is constructed with injected
         # clock/binding seams. The binding provider stays None (fail-closed)
         # until a later task wires the read-only Bridge scene query.
+        changeset_repository = ChangeSetRepository(database, events=self._events)
         self._changesets = ChangeSetService(
-            ChangeSetRepository(database, events=self._events),
+            changeset_repository,
             clock=changeset_clock,
             binding_provider=changeset_binding_provider,  # type: ignore[arg-type]
+        )
+        self._workspaces = WorkspaceService(
+            changeset_repository,
+            provider=(
+                _UnavailableWorkspaceFactProvider()
+                if workspace_fact_provider is None
+                else workspace_fact_provider
+            ),
         )
 
     @property
@@ -216,6 +254,7 @@ class RuntimeService:
         graceful_timeout: float = _GRACEFUL_TIMEOUT_SECONDS,
         changeset_clock: "Callable[[], datetime] | None" = None,
         changeset_binding_provider: "Callable[[], object] | None" = None,
+        workspace_fact_provider: WorkspaceFactProvider | None = None,
     ) -> AsyncIterator["RuntimeService"]:
         """Open a service in the approved order and close it in reverse.
 
@@ -241,6 +280,7 @@ class RuntimeService:
                 graceful_timeout=graceful_timeout,
                 changeset_clock=changeset_clock,
                 changeset_binding_provider=changeset_binding_provider,
+                workspace_fact_provider=workspace_fact_provider,
             )
             await service._reconcile()
             checkpoints = CheckpointManager(paths.checkpoints_db)
@@ -594,6 +634,69 @@ class RuntimeService:
         """Reject a pending ChangeSet; returns the bounded approval summary."""
         return await self._decide_changeset(
             change_id, changeset_digest, approve=False
+        )
+
+    # ------------------------------------------------------------------
+    # trusted Workspace lifecycle operations
+    # ------------------------------------------------------------------
+
+    async def create_workspace(
+        self, session_id: str, *, expected_scene_epoch: int | None
+    ) -> WorkspaceLifecycleSummary:
+        result = await self._workspaces.create_committed(
+            session_id, expected_scene_epoch=expected_scene_epoch
+        )
+        for record in result.events:
+            await self._notify(record)
+        return result.summary
+
+    async def bind_workspace(
+        self,
+        session_id: str,
+        workspace_id: str,
+        *,
+        expected_manifest_revision: str,
+        expected_scene_epoch: int | None,
+    ) -> WorkspaceLifecycleSummary:
+        result = await self._workspaces.bind_committed(
+            session_id,
+            workspace_id,
+            expected_manifest_revision=expected_manifest_revision,
+            expected_scene_epoch=expected_scene_epoch,
+        )
+        for record in result.events:
+            await self._notify(record)
+        return result.summary
+
+    async def switch_workspace(
+        self,
+        session_id: str,
+        workspace_id: str,
+        *,
+        expected_active_workspace_id: str | None,
+        expected_scene_epoch: int | None,
+    ) -> WorkspaceLifecycleSummary:
+        result = await self._workspaces.switch_committed(
+            session_id,
+            workspace_id,
+            expected_active_workspace_id=expected_active_workspace_id,
+            expected_scene_epoch=expected_scene_epoch,
+        )
+        for record in result.events:
+            await self._notify(record)
+        return result.summary
+
+    async def inspect_workspace(
+        self,
+        session_id: str,
+        workspace_id: str | None,
+        *,
+        expected_scene_epoch: int | None,
+    ) -> WorkspaceInspectionSummary:
+        return await self._workspaces.inspect(
+            session_id,
+            workspace_id,
+            expected_scene_epoch=expected_scene_epoch,
         )
 
     # ------------------------------------------------------------------

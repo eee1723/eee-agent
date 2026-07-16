@@ -146,6 +146,65 @@ def test_create_builds_exact_selection_manifest_and_activates(db_path: Path) -> 
     _run(scenario())
 
 
+def test_create_committed_preserves_summary_and_exact_transaction_events(
+    db_path: Path,
+) -> None:
+    async def scenario() -> None:
+        provider = FakeProvider(_result())
+        db, _, service = await _fresh(db_path, provider)
+        try:
+            first = await service.create_committed(
+                SES, expected_scene_epoch=None
+            )
+            assert type(first.summary) is WorkspaceLifecycleSummary
+            assert first.summary.changed is True
+            assert [event.event_type for event in first.events] == [
+                "workspace.created"
+            ]
+
+            second = await service.create_committed(
+                SES, expected_scene_epoch=None
+            )
+            assert second.summary.changed is False
+            assert second.events == ()
+            assert await service.create(
+                SES, expected_scene_epoch=None
+            ) == second.summary
+
+            provider.selection = _result(
+                (_observation(path="/obj/renamed"),),
+                binding=_binding("hou_instance_2", 2),
+            )
+            bound = await service.bind_committed(
+                SES,
+                WS,
+                expected_manifest_revision=first.summary.workspace.revision,
+                expected_scene_epoch=2,
+            )
+            assert bound.summary.changed is True
+            assert [event.event_type for event in bound.events] == [
+                "workspace.bound"
+            ]
+
+            provider.manifest = _result(
+                (_observation(path="/obj/renamed"),),
+                mode="manifest",
+                binding=_binding("hou_instance_2", 2),
+            )
+            switched = await service.switch_committed(
+                SES,
+                WS,
+                expected_active_workspace_id=WS,
+                expected_scene_epoch=2,
+            )
+            assert switched.summary.changed is False
+            assert switched.events == ()
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
 @pytest.mark.parametrize(
     ("observations", "code"),
     [

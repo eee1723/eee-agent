@@ -258,6 +258,51 @@ def test_async_main_passes_graceful_timeout_to_service(
     assert captured.get("graceful_timeout") == 7.0
 
 
+def test_async_main_constructs_workspace_provider_from_state_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import eee_agent.runtime.__main__ as main_mod
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("EEE_RUNTIME_HOME", str(home))
+    _hermetic_provider_env(monkeypatch)
+    sentinel = object()
+    constructed: list[Path] = []
+    captured: dict = {}
+    original_open = main_mod.RuntimeService.open
+
+    def fake_provider(state_dir):
+        constructed.append(Path(state_dir))
+        return sentinel
+
+    def spying_open(*args, **kwargs):
+        captured["workspace_fact_provider"] = kwargs.get(
+            "workspace_fact_provider", "MISSING"
+        )
+        return original_open(*args, **kwargs)
+
+    monkeypatch.setattr(main_mod, "BridgeWorkspaceFactProvider", fake_provider)
+    monkeypatch.setattr(main_mod.RuntimeService, "open", spying_open)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(async_main(["serve"]))
+        try:
+            discovery = home / "state" / "runtime.json"
+            for _ in range(200):
+                if discovery.exists():
+                    break
+                await asyncio.sleep(0.05)
+            assert discovery.exists(), "Runtime did not start"
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(task, timeout=15)
+
+    asyncio.run(scenario())
+    assert constructed == [home / "state"]
+    assert captured["workspace_fact_provider"] is sentinel
+
+
 def test_serve_until_shutdown_cleans_identity_after_server_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

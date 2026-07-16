@@ -20,6 +20,12 @@ from eee_agent.core import (
     ErrorCategory,
     runtime_version_report,
 )
+from eee_agent.houdini_bridge.contracts import SceneBinding
+from eee_agent.houdini_bridge.workspaces import (
+    WorkspaceInspectResult,
+    WorkspaceInspectionUnavailable,
+    WorkspaceNodeObservation,
+)
 from eee_agent.runtime.agent_runner import RunnerCompleted, RunnerEvent
 from eee_agent.runtime.checkpoints import CheckpointManager
 from eee_agent.runtime.models import (
@@ -1794,3 +1800,318 @@ def test_shutdown_uses_instance_graceful_timeout(paths: RuntimePaths) -> None:
         _run(scenario())
 
     assert 3.5 in captured
+
+
+# --------------------------------------------------------------------------
+# trusted Workspace lifecycle wiring
+# --------------------------------------------------------------------------
+
+
+class FakeWorkspaceProvider:
+    def __init__(self) -> None:
+        self.selection: WorkspaceInspectResult | BaseException | None = None
+        self.manifest: WorkspaceInspectResult | BaseException | None = None
+        self.selection_epochs: list[int | None] = []
+        self.manifest_calls: list[tuple[object, int | None]] = []
+
+    async def inspect_selection(
+        self, expected_scene_epoch: int | None
+    ) -> WorkspaceInspectResult:
+        self.selection_epochs.append(expected_scene_epoch)
+        value = self.selection
+        if isinstance(value, BaseException):
+            raise value
+        if value is None:
+            raise AssertionError("selection result was not configured")
+        return value
+
+    async def inspect_manifest(
+        self, manifest, expected_scene_epoch: int | None
+    ) -> WorkspaceInspectResult:
+        self.manifest_calls.append((manifest, expected_scene_epoch))
+        value = self.manifest
+        if isinstance(value, BaseException):
+            raise value
+        if value is None:
+            raise AssertionError("manifest result was not configured")
+        return value
+
+
+def _workspace_result(
+    *,
+    workspace_id: str,
+    run_id: str,
+    mode: str = "selection",
+    path: str = "/obj/ws",
+    epoch: int = 7,
+) -> WorkspaceInspectResult:
+    return WorkspaceInspectResult.build(
+        binding=SceneBinding(
+            instance_id="hou_instance_1",
+            scene_epoch=epoch,
+            hip_path=None,
+            observed_revision=f"scene-{epoch}",
+        ),
+        mode=mode,
+        observations=(
+            WorkspaceNodeObservation(
+                path=path,
+                node_type="geo",
+                parent_path="/obj",
+                is_locked=False,
+                workspace_id=workspace_id,
+                node_id="n_root",
+                capability="modeling",
+                role="root",
+                schema_version=1,
+                created_by_run=run_id,
+            ),
+        ),
+    )
+
+
+def test_workspace_create_notifies_only_committed_event_and_noop_notifies_none(
+    paths: RuntimePaths,
+) -> None:
+    runner = FakeRunner(_success_items("done"))
+    provider = FakeWorkspaceProvider()
+    workspace_id = f"ws_{'a' * 32}"
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths,
+            runner_factory=_factory_for(runner),
+            workspace_fact_provider=provider,
+        ) as service:
+            session = await service.create_session("Workspace")
+            run = await service.start_run(session.session_id, "inspect")
+            await service.wait_for_run(run.run_id)
+            provider.selection = _workspace_result(
+                workspace_id=workspace_id, run_id=run.run_id
+            )
+            seen = []
+            service.subscribe(seen.append)
+
+            first = await service.create_workspace(
+                session.session_id, expected_scene_epoch=7
+            )
+            assert first.changed is True
+            assert first.workspace.workspace_id == workspace_id
+            assert provider.selection_epochs == [7]
+            assert [event.event_type for event in seen] == ["workspace.created"]
+            committed = seen[0]
+            replay = await service.replay(
+                session.session_id, after_seq=committed.seq - 1, limit=10
+            )
+            assert replay.events == (committed,)
+
+            seen.clear()
+            second = await service.create_workspace(
+                session.session_id, expected_scene_epoch=7
+            )
+            assert second.changed is False
+            assert seen == []
+
+    _run(scenario())
+
+
+def test_workspace_callback_failure_isolated_after_successful_commit(
+    paths: RuntimePaths,
+) -> None:
+    runner = FakeRunner(_success_items("done"))
+    provider = FakeWorkspaceProvider()
+    workspace_id = f"ws_{'b' * 32}"
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths,
+            runner_factory=_factory_for(runner),
+            workspace_fact_provider=provider,
+        ) as service:
+            session = await service.create_session("Workspace")
+            run = await service.start_run(session.session_id, "inspect")
+            await service.wait_for_run(run.run_id)
+            provider.selection = _workspace_result(
+                workspace_id=workspace_id, run_id=run.run_id
+            )
+            good_seen = []
+
+            def bad_callback(_record):
+                raise RuntimeError("callback boom")
+
+            service.subscribe(bad_callback)
+            service.subscribe(good_seen.append)
+            summary = await service.create_workspace(
+                session.session_id, expected_scene_epoch=None
+            )
+            assert summary.changed is True
+            assert [event.event_type for event in good_seen] == [
+                "workspace.created"
+            ]
+            replay = await service.replay(
+                session.session_id, after_seq=0, limit=100
+            )
+            assert "workspace.created" in [
+                event.event_type for event in replay.events
+            ]
+
+    _run(scenario())
+
+
+def test_workspace_provider_failure_emits_no_event_or_half_state(
+    paths: RuntimePaths,
+) -> None:
+    runner = FakeRunner(_success_items("done"))
+    provider = FakeWorkspaceProvider()
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths,
+            runner_factory=_factory_for(runner),
+            workspace_fact_provider=provider,
+        ) as service:
+            session = await service.create_session("Workspace")
+            provider.selection = WorkspaceInspectionUnavailable("offline")
+            seen = []
+            service.subscribe(seen.append)
+            with pytest.raises(AgentException) as exc:
+                await service.create_workspace(
+                    session.session_id, expected_scene_epoch=None
+                )
+            assert exc.value.error.code == "bridge.capability_unavailable"
+            assert seen == []
+            replay = await service.replay(
+                session.session_id, after_seq=0, limit=100
+            )
+            assert not any(
+                event.event_type.startswith("workspace.")
+                for event in replay.events
+            )
+
+    _run(scenario())
+
+
+def test_missing_workspace_provider_fails_closed_for_mutation(
+    paths: RuntimePaths,
+) -> None:
+    runner = FakeRunner(_success_items("done"))
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths, runner_factory=_factory_for(runner)
+        ) as service:
+            session = await service.create_session("Workspace")
+            with pytest.raises(AgentException) as exc:
+                await service.create_workspace(
+                    session.session_id, expected_scene_epoch=None
+                )
+            assert exc.value.error.code == "bridge.capability_unavailable"
+
+    _run(scenario())
+
+
+def test_workspace_bind_switch_and_inspect_delegate_without_duplicate_events(
+    paths: RuntimePaths,
+) -> None:
+    runner = FakeRunner(_success_items("done"))
+    provider = FakeWorkspaceProvider()
+    workspace_id = f"ws_{'c' * 32}"
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths,
+            runner_factory=_factory_for(runner),
+            workspace_fact_provider=provider,
+        ) as service:
+            session = await service.create_session("Workspace")
+            run = await service.start_run(session.session_id, "inspect")
+            await service.wait_for_run(run.run_id)
+            provider.selection = _workspace_result(
+                workspace_id=workspace_id, run_id=run.run_id
+            )
+            created = await service.create_workspace(
+                session.session_id, expected_scene_epoch=7
+            )
+
+            provider.selection = _workspace_result(
+                workspace_id=workspace_id,
+                run_id=run.run_id,
+                path="/obj/renamed",
+                epoch=8,
+            )
+            seen = []
+            service.subscribe(seen.append)
+            bound = await service.bind_workspace(
+                session.session_id,
+                workspace_id,
+                expected_manifest_revision=created.workspace.revision,
+                expected_scene_epoch=8,
+            )
+            assert bound.changed is True
+            assert provider.selection_epochs[-1] == 8
+            assert [event.event_type for event in seen] == ["workspace.bound"]
+
+            provider.manifest = _workspace_result(
+                workspace_id=workspace_id,
+                run_id=run.run_id,
+                mode="manifest",
+                path="/obj/renamed",
+                epoch=8,
+            )
+            inspected = await service.inspect_workspace(
+                session.session_id,
+                None,
+                expected_scene_epoch=8,
+            )
+            assert inspected.status.value == "Healthy"
+            assert provider.manifest_calls[-1][1] == 8
+
+            seen.clear()
+            switched = await service.switch_workspace(
+                session.session_id,
+                workspace_id,
+                expected_active_workspace_id=workspace_id,
+                expected_scene_epoch=8,
+            )
+            assert switched.changed is False
+            assert seen == []
+
+    _run(scenario())
+
+
+def test_missing_provider_inspect_reports_bridge_unavailable_after_restart(
+    paths: RuntimePaths,
+) -> None:
+    provider = FakeWorkspaceProvider()
+    workspace_id = f"ws_{'d' * 32}"
+
+    async def scenario() -> None:
+        first_runner = FakeRunner(_success_items("done"))
+        async with RuntimeService.open(
+            paths,
+            runner_factory=_factory_for(first_runner),
+            workspace_fact_provider=provider,
+        ) as service:
+            session = await service.create_session("Workspace")
+            run = await service.start_run(session.session_id, "inspect")
+            await service.wait_for_run(run.run_id)
+            provider.selection = _workspace_result(
+                workspace_id=workspace_id, run_id=run.run_id
+            )
+            await service.create_workspace(
+                session.session_id, expected_scene_epoch=7
+            )
+
+        second_runner = FakeRunner(_success_items("done"))
+        async with RuntimeService.open(
+            paths, runner_factory=_factory_for(second_runner)
+        ) as reopened:
+            inspected = await reopened.inspect_workspace(
+                session.session_id,
+                workspace_id,
+                expected_scene_epoch=None,
+            )
+            assert inspected.status.value == "BridgeUnavailable"
+            assert inspected.active_workspace_id == workspace_id
+
+    _run(scenario())

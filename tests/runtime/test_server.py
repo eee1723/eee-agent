@@ -21,6 +21,14 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
 from eee_agent.core import AgentError, AgentException, ErrorCategory
+from eee_agent.changesets import (
+    OwnedNodeRef,
+    WorkspaceHealth,
+    WorkspaceInspectionSummary,
+    WorkspaceLifecycleSummary,
+    WorkspaceManifest,
+    WorkspaceSummary,
+)
 from eee_agent.runtime.auth import create_identity
 from eee_agent.runtime.events import ReplayResult
 from eee_agent.runtime.models import (
@@ -41,6 +49,9 @@ from eee_agent.runtime.server import RuntimeWebSocketServer
 NOW = datetime(2026, 7, 14, 2, 30, 0, tzinfo=timezone.utc)
 SID = f"ses_{'a' * 32}"
 RID = f"run_{'b' * 32}"
+WID = f"ws_{'c' * 32}"
+OTHER_WID = f"ws_{'d' * 32}"
+WORKSPACE_REVISION = "e" * 64
 
 
 def _run(coro):
@@ -74,6 +85,57 @@ def _event(
     return EventRecord(
         f"evt_{seq:032d}", sid, rid, seq, event_type, NOW,
         payload or {"i": seq}, RetentionClass.DURABLE,
+    )
+
+
+def _workspace_summary(*, changed: bool = True) -> WorkspaceLifecycleSummary:
+    return WorkspaceLifecycleSummary(
+        workspace=WorkspaceSummary(
+            workspace_id=WID,
+            revision=WORKSPACE_REVISION,
+            node_count=1,
+            instance_id="hou_instance_1",
+            scene_epoch=7,
+            active=True,
+        ),
+        active_workspace_id=WID,
+        state_revision=1,
+        changed=changed,
+    )
+
+
+def _workspace_inspection() -> WorkspaceInspectionSummary:
+    node = OwnedNodeRef(
+        node_id="n_root",
+        path="/obj/ws",
+        node_type="geo",
+        parent_path="/obj",
+        capability="modeling",
+        role="root",
+    )
+    manifest = WorkspaceManifest.build(
+        workspace_id=WID,
+        session_id=SID,
+        instance_id="hou_instance_1",
+        scene_epoch=7,
+        roots=(node,),
+        nodes=(node,),
+        created_by_run=RID,
+        updated_at=NOW,
+    )
+    summary = WorkspaceSummary(
+        workspace_id=WID,
+        revision=manifest.revision,
+        node_count=1,
+        instance_id="hou_instance_1",
+        scene_epoch=7,
+        active=True,
+    )
+    return WorkspaceInspectionSummary(
+        workspaces=(summary,),
+        active_workspace_id=WID,
+        target_manifest=manifest,
+        status=WorkspaceHealth.HEALTHY,
     )
 
 
@@ -111,6 +173,9 @@ class FakeService:
         }
         self.approve_side_effect: Any = None
         self.reject_side_effect: Any = None
+        self.workspace_lifecycle_result = _workspace_summary()
+        self.workspace_inspection_result = _workspace_inspection()
+        self.workspace_side_effect: Any = None
 
     def _record(self, name: str, **kwargs: Any) -> None:
         self.calls.append((name, kwargs))
@@ -181,6 +246,73 @@ class FakeService:
             self.reject_side_effect = None
             raise exc
         return self.reject_result
+
+    async def create_workspace(
+        self, session_id: str, *, expected_scene_epoch: int | None
+    ) -> WorkspaceLifecycleSummary:
+        self._record(
+            "create_workspace",
+            session_id=session_id,
+            expected_scene_epoch=expected_scene_epoch,
+        )
+        if self.workspace_side_effect is not None:
+            raise self.workspace_side_effect
+        return self.workspace_lifecycle_result
+
+    async def bind_workspace(
+        self,
+        session_id: str,
+        workspace_id: str,
+        *,
+        expected_manifest_revision: str,
+        expected_scene_epoch: int | None,
+    ) -> WorkspaceLifecycleSummary:
+        self._record(
+            "bind_workspace",
+            session_id=session_id,
+            workspace_id=workspace_id,
+            expected_manifest_revision=expected_manifest_revision,
+            expected_scene_epoch=expected_scene_epoch,
+        )
+        if self.workspace_side_effect is not None:
+            raise self.workspace_side_effect
+        return self.workspace_lifecycle_result
+
+    async def switch_workspace(
+        self,
+        session_id: str,
+        workspace_id: str,
+        *,
+        expected_active_workspace_id: str | None,
+        expected_scene_epoch: int | None,
+    ) -> WorkspaceLifecycleSummary:
+        self._record(
+            "switch_workspace",
+            session_id=session_id,
+            workspace_id=workspace_id,
+            expected_active_workspace_id=expected_active_workspace_id,
+            expected_scene_epoch=expected_scene_epoch,
+        )
+        if self.workspace_side_effect is not None:
+            raise self.workspace_side_effect
+        return self.workspace_lifecycle_result
+
+    async def inspect_workspace(
+        self,
+        session_id: str,
+        workspace_id: str | None,
+        *,
+        expected_scene_epoch: int | None,
+    ) -> WorkspaceInspectionSummary:
+        self._record(
+            "inspect_workspace",
+            session_id=session_id,
+            workspace_id=workspace_id,
+            expected_scene_epoch=expected_scene_epoch,
+        )
+        if self.workspace_side_effect is not None:
+            raise self.workspace_side_effect
+        return self.workspace_inspection_result
 
     async def replay(self, session_id: str, *, after_seq: int, limit: int):
         self._record(
@@ -733,6 +865,291 @@ def test_changeset_apply_remains_rejected(service, identity) -> None:
                 )
                 assert resp["ok"] is False
                 assert resp["error"]["code"] == "protocol.unknown_command"
+    _run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("command_type", "payload", "method", "expected_call", "expected_result"),
+    [
+        (
+            "workspace.create",
+            {"session_id": SID, "expected_scene_epoch": None},
+            "create_workspace",
+            {"session_id": SID, "expected_scene_epoch": None},
+            lambda service: service.workspace_lifecycle_result.to_dict(),
+        ),
+        (
+            "workspace.bind",
+            {
+                "session_id": SID,
+                "workspace_id": WID,
+                "expected_manifest_revision": WORKSPACE_REVISION,
+                "expected_scene_epoch": 7,
+            },
+            "bind_workspace",
+            {
+                "session_id": SID,
+                "workspace_id": WID,
+                "expected_manifest_revision": WORKSPACE_REVISION,
+                "expected_scene_epoch": 7,
+            },
+            lambda service: service.workspace_lifecycle_result.to_dict(),
+        ),
+        (
+            "workspace.switch",
+            {
+                "session_id": SID,
+                "workspace_id": WID,
+                "expected_active_workspace_id": OTHER_WID,
+                "expected_scene_epoch": None,
+            },
+            "switch_workspace",
+            {
+                "session_id": SID,
+                "workspace_id": WID,
+                "expected_active_workspace_id": OTHER_WID,
+                "expected_scene_epoch": None,
+            },
+            lambda service: service.workspace_lifecycle_result.to_dict(),
+        ),
+        (
+            "workspace.inspect",
+            {
+                "session_id": SID,
+                "workspace_id": None,
+                "expected_scene_epoch": 1,
+            },
+            "inspect_workspace",
+            {
+                "session_id": SID,
+                "workspace_id": None,
+                "expected_scene_epoch": 1,
+            },
+            lambda service: service.workspace_inspection_result.to_dict(),
+        ),
+    ],
+)
+def test_workspace_commands_route_exact_payload_and_serialize_summary(
+    service,
+    identity,
+    command_type,
+    payload,
+    method,
+    expected_call,
+    expected_result,
+) -> None:
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(
+                _uri(s),
+                additional_headers=_headers(identity),
+                compression=None,
+            ) as ws:
+                resp = await _request(ws, "r1", command_type, payload)
+                assert resp["ok"] is True
+                assert resp["result"] == expected_result(service)
+                assert _last(service, method) == expected_call
+
+    _run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("command_type", "payload"),
+    [
+        ("workspace.create", {"session_id": SID}),
+        (
+            "workspace.create",
+            {
+                "session_id": SID,
+                "expected_scene_epoch": None,
+                "manifest": {},
+            },
+        ),
+        (
+            "workspace.create",
+            {"session_id": f"run_{'a' * 32}", "expected_scene_epoch": None},
+        ),
+        (
+            "workspace.create",
+            {"session_id": SID.upper(), "expected_scene_epoch": None},
+        ),
+        (
+            "workspace.create",
+            {"session_id": SID, "expected_scene_epoch": True},
+        ),
+        (
+            "workspace.create",
+            {"session_id": SID, "expected_scene_epoch": 0},
+        ),
+        (
+            "workspace.bind",
+            {
+                "session_id": SID,
+                "workspace_id": WID,
+                "expected_manifest_revision": WORKSPACE_REVISION,
+            },
+        ),
+        (
+            "workspace.bind",
+            {
+                "session_id": SID,
+                "workspace_id": f"ses_{'c' * 32}",
+                "expected_manifest_revision": WORKSPACE_REVISION,
+                "expected_scene_epoch": None,
+            },
+        ),
+        (
+            "workspace.bind",
+            {
+                "session_id": SID,
+                "workspace_id": WID,
+                "expected_manifest_revision": "E" * 64,
+                "expected_scene_epoch": None,
+            },
+        ),
+        (
+            "workspace.bind",
+            {
+                "session_id": SID,
+                "workspace_id": WID,
+                "expected_manifest_revision": "e" * 63,
+                "expected_scene_epoch": None,
+            },
+        ),
+        (
+            "workspace.bind",
+            {
+                "session_id": SID,
+                "workspace_id": WID,
+                "expected_manifest_revision": WORKSPACE_REVISION,
+                "expected_scene_epoch": None,
+                "nodes": [],
+            },
+        ),
+        (
+            "workspace.switch",
+            {
+                "session_id": SID,
+                "workspace_id": WID,
+                "expected_active_workspace_id": 1,
+                "expected_scene_epoch": None,
+            },
+        ),
+        (
+            "workspace.switch",
+            {
+                "session_id": SID,
+                "workspace_id": WID,
+                "expected_active_workspace_id": f"run_{'d' * 32}",
+                "expected_scene_epoch": None,
+            },
+        ),
+        (
+            "workspace.switch",
+            {
+                "session_id": SID,
+                "workspace_id": WID,
+                "expected_active_workspace_id": None,
+                "expected_scene_epoch": -1,
+            },
+        ),
+        (
+            "workspace.inspect",
+            {
+                "session_id": SID,
+                "workspace_id": True,
+                "expected_scene_epoch": None,
+            },
+        ),
+        (
+            "workspace.inspect",
+            {
+                "session_id": SID,
+                "workspace_id": WID,
+                "expected_scene_epoch": None,
+                "paths": ["/obj/ws"],
+            },
+        ),
+        (
+            "workspace.inspect",
+            {
+                "session_id": SID,
+                "workspace_id": WID,
+                "expected_scene_epoch": None,
+                "metadata": {"role": "root", "capability": "modeling"},
+            },
+        ),
+    ],
+    ids=[
+        "create-missing-epoch",
+        "create-manifest-upload",
+        "create-wrong-session-kind",
+        "create-uppercase-session",
+        "create-bool-epoch",
+        "create-zero-epoch",
+        "bind-missing-epoch",
+        "bind-wrong-workspace-kind",
+        "bind-uppercase-digest",
+        "bind-short-digest",
+        "bind-node-upload",
+        "switch-active-non-string",
+        "switch-active-wrong-kind",
+        "switch-negative-epoch",
+        "inspect-workspace-bool",
+        "inspect-path-upload",
+        "inspect-metadata-upload",
+    ],
+)
+def test_workspace_commands_reject_non_exact_payload_before_service(
+    service, identity, command_type, payload
+) -> None:
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(
+                _uri(s),
+                additional_headers=_headers(identity),
+                compression=None,
+            ) as ws:
+                resp = await _request(ws, "r1", command_type, payload)
+                assert resp["ok"] is False
+                assert resp["error"]["code"] == "protocol.invalid_envelope"
+
+    _run(scenario())
+    workspace_methods = {
+        "create_workspace",
+        "bind_workspace",
+        "switch_workspace",
+        "inspect_workspace",
+    }
+    assert not any(name in workspace_methods for name, _ in service.calls)
+
+
+def test_workspace_command_maps_structured_service_error(service, identity) -> None:
+    service.workspace_side_effect = AgentException(
+        AgentError(
+            code="workspace.identity_conflict",
+            category=ErrorCategory.VALIDATION,
+            message_for_user="The live workspace identity conflicts.",
+        )
+    )
+
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(
+                _uri(s),
+                additional_headers=_headers(identity),
+                compression=None,
+            ) as ws:
+                resp = await _request(
+                    ws,
+                    "r1",
+                    "workspace.create",
+                    {"session_id": SID, "expected_scene_epoch": None},
+                )
+                assert resp["ok"] is False
+                assert resp["error"]["code"] == "workspace.identity_conflict"
+                assert "Traceback" not in json.dumps(resp)
+
     _run(scenario())
 
 

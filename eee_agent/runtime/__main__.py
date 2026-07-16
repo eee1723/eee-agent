@@ -23,6 +23,9 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from eee_agent.core import AgentException
+from eee_agent.houdini_bridge.workspace_provider import (
+    BridgeWorkspaceFactProvider,
+)
 from eee_agent.runtime.agent_runner import build_agent_runner
 from eee_agent.runtime.auth import (
     RuntimeIdentity,
@@ -199,10 +202,12 @@ async def async_main(argv: Sequence[str] | None = None) -> int:
 
     with RuntimeLock(paths.lock_file):
         identity = create_identity()
+        workspace_fact_provider = BridgeWorkspaceFactProvider(paths.state_dir)
         async with RuntimeService.open(
             paths,
             runner_factory=build_agent_runner,
             graceful_timeout=args.graceful_timeout,
+            workspace_fact_provider=workspace_fact_provider,
         ) as service:
             server = RuntimeWebSocketServer(
                 service, identity, host=args.host, port=args.port

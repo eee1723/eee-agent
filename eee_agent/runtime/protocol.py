@@ -34,16 +34,16 @@ COMMAND_TYPES = frozenset(
         "run.force_stop",
         "changeset.approve",
         "changeset.reject",
+        "workspace.create",
+        "workspace.bind",
+        "workspace.switch",
+        "workspace.inspect",
     }
 )
 
 DEFERRED_COMMAND_TYPES = frozenset(
     {
         "session.fork",
-        "workspace.create",
-        "workspace.bind",
-        "workspace.switch",
-        "workspace.inspect",
         "visual_policy.resolve",
         "artifact.reveal",
         "artifact.open",

@@ -15,6 +15,7 @@ from typing import Awaitable, Callable
 
 import pytest
 
+from eee_agent.core import AgentException
 from eee_agent.houdini_bridge.auth import BridgeIdentity, create_bridge_identity
 from eee_agent.houdini_bridge.client import BridgeClient, BridgeClientError
 from eee_agent.houdini_bridge.contracts import (
@@ -939,6 +940,37 @@ def test_workspace_provider_maps_exact_identity_conflict(
     monkeypatch.setattr(provider, "_handoff_exists", lambda: True)
     with pytest.raises(WorkspaceInspectionConflict):
         asyncio.run(provider.inspect_selection(None))
+    assert fake.exited == 1
+
+
+def test_workspace_provider_maps_stale_scene_to_runtime_agent_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake = _ProviderClient(
+        error=BridgeClientError(
+            code="bridge.stale_scene",
+            category="stale_scene",
+            message_for_user="The Houdini scene changed; refresh first.",
+            retryable=True,
+            technical_detail_ref="bridge:req-stale",
+        )
+    )
+    monkeypatch.setattr(
+        BridgeClient,
+        "from_state_dir",
+        staticmethod(lambda _state_dir: fake),
+    )
+    provider = BridgeWorkspaceFactProvider(tmp_path)
+    monkeypatch.setattr(provider, "_handoff_exists", lambda: True)
+    with pytest.raises(AgentException) as exc:
+        asyncio.run(provider.inspect_selection(7))
+    assert exc.value.error.code == "bridge.stale_scene"
+    assert exc.value.error.category.value == "stale_scene"
+    assert exc.value.error.message_for_user == (
+        "The Houdini scene changed; refresh first."
+    )
+    assert exc.value.error.retryable is True
+    assert exc.value.error.technical_detail_ref == "bridge:req-stale"
     assert fake.exited == 1
 
 

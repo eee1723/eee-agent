@@ -21,7 +21,7 @@ from eee_agent.houdini_bridge.workspaces import (
     WorkspaceInspectionUnavailable,
     WorkspaceNodeObservation,
 )
-from eee_agent.runtime.models import canonical_json_dumps
+from eee_agent.runtime.models import EventRecord, canonical_json_dumps
 
 _MAX_SESSION_WORKSPACES = 1024
 _MAX_INSPECTION_SUMMARY_BYTES = 512 * 1024
@@ -119,6 +119,22 @@ class WorkspaceLifecycleSummary:
             "state_revision": self.state_revision,
             "changed": self.changed,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkspaceLifecycleCommit:
+    """Internal post-commit lifecycle result used by Runtime notification."""
+
+    summary: WorkspaceLifecycleSummary
+    events: tuple[EventRecord, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.summary) is not WorkspaceLifecycleSummary:
+            raise TypeError("summary must be an exact WorkspaceLifecycleSummary")
+        if type(self.events) is not tuple or any(
+            type(event) is not EventRecord for event in self.events
+        ):
+            raise TypeError("events must be a tuple of exact EventRecord values")
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,6 +379,10 @@ def _lifecycle(result: WorkspaceMutationResult) -> WorkspaceLifecycleSummary:
     )
 
 
+def _committed(result: WorkspaceMutationResult) -> _WorkspaceLifecycleCommit:
+    return _WorkspaceLifecycleCommit(_lifecycle(result), result.events)
+
+
 def _live_health(
     manifest: WorkspaceManifest, result: WorkspaceInspectResult
 ) -> WorkspaceHealth:
@@ -443,6 +463,15 @@ class WorkspaceService:
     async def create(
         self, session_id: str, *, expected_scene_epoch: int | None
     ) -> WorkspaceLifecycleSummary:
+        return (
+            await self.create_committed(
+                session_id, expected_scene_epoch=expected_scene_epoch
+            )
+        ).summary
+
+    async def create_committed(
+        self, session_id: str, *, expected_scene_epoch: int | None
+    ) -> _WorkspaceLifecycleCommit:
         sid = _require_id_value(session_id, IdKind.SESSION, "session_id")
         epoch = _require_epoch(expected_scene_epoch)
         await self._repository.list_workspace_state(sid)
@@ -464,7 +493,9 @@ class WorkspaceService:
             created_by_run=observations[0].created_by_run,  # type: ignore[arg-type]
             updated_at=_require_utc(self._clock()),
         )
-        return _lifecycle(await self._repository.create_workspace_lifecycle(manifest))
+        return _committed(
+            await self._repository.create_workspace_lifecycle(manifest)
+        )
 
     async def bind(
         self,
@@ -474,6 +505,23 @@ class WorkspaceService:
         expected_manifest_revision: str,
         expected_scene_epoch: int | None,
     ) -> WorkspaceLifecycleSummary:
+        return (
+            await self.bind_committed(
+                session_id,
+                workspace_id,
+                expected_manifest_revision=expected_manifest_revision,
+                expected_scene_epoch=expected_scene_epoch,
+            )
+        ).summary
+
+    async def bind_committed(
+        self,
+        session_id: str,
+        workspace_id: str,
+        *,
+        expected_manifest_revision: str,
+        expected_scene_epoch: int | None,
+    ) -> _WorkspaceLifecycleCommit:
         sid = _require_id_value(session_id, IdKind.SESSION, "session_id")
         wid = _require_id_value(workspace_id, IdKind.WORKSPACE, "workspace_id")
         expected = _require_revision(expected_manifest_revision)
@@ -517,7 +565,7 @@ class WorkspaceService:
             created_by_run=stored.created_by_run,
             updated_at=_require_utc(self._clock()),
         )
-        return _lifecycle(
+        return _committed(
             await self._repository.bind_workspace(
                 refreshed, expected_manifest_revision=expected
             )
@@ -531,6 +579,23 @@ class WorkspaceService:
         expected_active_workspace_id: str | None,
         expected_scene_epoch: int | None,
     ) -> WorkspaceLifecycleSummary:
+        return (
+            await self.switch_committed(
+                session_id,
+                workspace_id,
+                expected_active_workspace_id=expected_active_workspace_id,
+                expected_scene_epoch=expected_scene_epoch,
+            )
+        ).summary
+
+    async def switch_committed(
+        self,
+        session_id: str,
+        workspace_id: str,
+        *,
+        expected_active_workspace_id: str | None,
+        expected_scene_epoch: int | None,
+    ) -> _WorkspaceLifecycleCommit:
         sid = _require_id_value(session_id, IdKind.SESSION, "session_id")
         wid = _require_id_value(workspace_id, IdKind.WORKSPACE, "workspace_id")
         expected_active = (
@@ -561,7 +626,7 @@ class WorkspaceService:
             raise _identity_conflict()
         if health is not WorkspaceHealth.HEALTHY:
             raise _revision_conflict()
-        return _lifecycle(
+        return _committed(
             await self._repository.switch_workspace(
                 sid,
                 wid,

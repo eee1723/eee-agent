@@ -69,6 +69,10 @@ def test_command_types_match_plan() -> None:
             "run.force_stop",
             "changeset.approve",
             "changeset.reject",
+            "workspace.create",
+            "workspace.bind",
+            "workspace.switch",
+            "workspace.inspect",
         }
     )
 
@@ -77,10 +81,6 @@ def test_deferred_command_types_match_plan() -> None:
     assert DEFERRED_COMMAND_TYPES == frozenset(
         {
             "session.fork",
-            "workspace.create",
-            "workspace.bind",
-            "workspace.switch",
-            "workspace.inspect",
             "visual_policy.resolve",
             "artifact.reveal",
             "artifact.open",
