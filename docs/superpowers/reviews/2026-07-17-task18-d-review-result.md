@@ -17,6 +17,6 @@
 
 ## Measured gate
 
-`2161 passed, 1 skipped`; lock, compileall, and diff checks passed. The
+`2162 passed, 1 skipped`; lock, compileall, and diff checks passed. The
 dedicated hython smoke passed Applied/Cook/metadata/manifest/idempotent replay
 and rollback cleanup in a fresh disposable namespace.

@@ -26,7 +26,7 @@ interactive Houdini UI verification remains deferred by user request.
 
 ## Evidence
 
-- `uv run --frozen --extra eval pytest -q` -> `2161 passed, 1 skipped`
+- `uv run --frozen --extra eval pytest -q` -> `2162 passed, 1 skipped`
 - modeling focused gate -> `52` compiler/proposal/bootstrap/validation tests plus
   persistence/context coverage
 - `uv lock --check` -> passed
