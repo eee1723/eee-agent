@@ -64,6 +64,39 @@ def test_runtime_panel_keeps_client_only_import_boundary() -> None:
     assert 'addTab(self._build_scene_tab(), "SCENE")' in source
 
 
+def test_runtime_panel_bootstraps_snapshot_before_live_subscription() -> None:
+    source = (ROOT / "houdini_side" / "runtime_panel.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    client = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "RuntimeObserverClient"
+    )
+    activate = next(
+        node
+        for node in client.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_activate_session"
+    )
+    activate_source = ast.get_source_segment(source, activate) or ""
+    assert "session.bootstrap_snapshot" in activate_source
+    assert '"session.subscribe"' not in activate_source
+
+    handler = next(
+        node
+        for node in client.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_handle_response"
+    )
+    handler_source = ast.get_source_segment(source, handler) or ""
+    bootstrap_index = handler_source.index("session.bootstrap_snapshot")
+    subscribe_index = handler_source.index('"session.subscribe"', bootstrap_index)
+    assert subscribe_index > bootstrap_index
+
+
 def test_legacy_chat_panel_remains_present_as_rollback() -> None:
     assert (ROOT / "houdini_side" / "chat_panel.py").is_file()
 

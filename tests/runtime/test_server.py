@@ -1346,6 +1346,46 @@ def test_subscribe_no_gap_replay_then_live(service, identity) -> None:
     _run(scenario())
 
 
+def test_subscribe_replay_above_outbound_queue_uses_backpressure(
+    service, identity
+) -> None:
+    service.replay_result = ReplayResult(
+        events=tuple(_event(seq) for seq in range(1, 301)),
+        replay_floor_seq=0,
+        last_seq=300,
+        snapshot_required=False,
+    )
+
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(
+                _uri(s),
+                additional_headers=_headers(identity),
+                compression=None,
+            ) as ws:
+                await ws.send(
+                    encode_envelope(
+                        _cmd(
+                            "r1",
+                            "session.subscribe",
+                            {"session_id": SID, "last_seq": 0},
+                        )
+                    )
+                )
+                response = json.loads(await ws.recv())
+                assert response["ok"] is True
+                events = [
+                    json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                    for _ in range(300)
+                ]
+                assert [event["seq"] for event in events] == list(
+                    range(1, 301)
+                )
+        assert not service._callbacks
+
+    _run(scenario())
+
+
 def test_gap_subscribe_sends_snapshot_then_only_events_after_boundary(
     service, identity
 ) -> None:
@@ -1631,26 +1671,6 @@ def test_incompatible_protocol_responds_then_closes_1008(service, identity) -> N
                 except (ConnectionClosed, asyncio.TimeoutError):
                     pass
     _run(scenario())
-
-
-def test_initial_replay_queuefull_closes_1008(service, identity) -> None:
-    events = tuple(_event(i) for i in range(1, 300))
-    service.replay_result = ReplayResult(
-        events=events, replay_floor_seq=0, last_seq=299, snapshot_required=False,
-    )
-
-    async def scenario():
-        async with _server(service, identity) as s:
-            async with connect(_uri(s), additional_headers=_headers(identity), compression=None) as ws:
-                await ws.send(encode_envelope(_cmd("r1", "session.subscribe", {"session_id": SID, "last_seq": 0})))
-                with pytest.raises(ConnectionClosed) as exc:
-                    while True:
-                        await asyncio.wait_for(ws.recv(), timeout=3)
-                assert exc.value.rcvd.code == 1008
-                assert "runtime.slow_consumer" in (exc.value.rcvd.reason or "")
-        assert not service._callbacks
-    _run(scenario())
-    assert not any(n == "stop_run" for n, _ in service.calls)
 
 
 def test_subscribe_live_events_buffered_during_init(service, identity) -> None:

@@ -32,6 +32,7 @@ from eee_agent.runtime.protocol import (
 )
 
 _QUEUE_MAX = 256
+_INITIAL_QUEUE_TIMEOUT_SECONDS = 5.0
 _SLOW_CODE = 1008
 _SLOW_REASON = "runtime.slow_consumer"
 _INCOMPATIBLE_REASON = "protocol.incompatible_version"
@@ -358,6 +359,27 @@ class RuntimeWebSocketServer:
             ctx.queue.put_nowait(envelope)
         except asyncio.QueueFull:
             ctx.slow_consumer = True
+
+    async def _put_initial(self, ctx: _ClientContext, envelope: object) -> bool:
+        """Backpressure subscription bootstrap instead of false slow-consumer.
+
+        A valid replay may contain up to 1000 events while the live outbound
+        queue intentionally holds only 256. Subscription initialization used
+        to enqueue the whole replay without yielding, so any history above 255
+        events filled the queue before the sender task could run and closed a
+        healthy loopback client as ``runtime.slow_consumer``.
+        """
+        if ctx.closed or ctx.closing or ctx.slow_consumer:
+            return False
+        try:
+            await asyncio.wait_for(
+                ctx.queue.put(envelope),
+                timeout=_INITIAL_QUEUE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            ctx.slow_consumer = True
+            return False
+        return True
 
     async def _sender(self, ctx: _ClientContext) -> None:
         # The single task that calls websocket.send; no concurrent sends.
@@ -705,24 +727,35 @@ class RuntimeWebSocketServer:
             if ctx.slow_consumer:
                 return  # init aborted; finally cleans up
             # Response first, then snapshot (if gap), then replay events.
-            self._put(
+            if not await self._put_initial(
                 ctx,
-                success_response(req, {"session_id": session_id, "last_seq": boundary}),
-            )
+                success_response(
+                    req,
+                    {"session_id": session_id, "last_seq": boundary},
+                ),
+            ):
+                return
             if snapshot_to_send is not None:
-                self._put(
+                if not await self._put_initial(
                     ctx,
                     _control_event(
                         "session.snapshot", session_id, _snapshot_to_dict(snapshot_to_send)
                     ),
-                )
+                ):
+                    return
             for ev in replay.events:
-                self._put(ctx, _event_envelope_from_record(ev))
+                if not await self._put_initial(
+                    ctx, _event_envelope_from_record(ev)
+                ):
+                    return
             sub.last_delivered = boundary
             # Flush live events committed during init (deduped by seq > boundary).
             for record in sorted(sub.buffer, key=lambda r: r.seq):
                 if record.seq > sub.last_delivered:
-                    self._put(ctx, _event_envelope_from_record(record))
+                    if not await self._put_initial(
+                        ctx, _event_envelope_from_record(record)
+                    ):
+                        return
                     sub.last_delivered = record.seq
             sub.buffer.clear()
             if ctx.slow_consumer:

@@ -350,6 +350,9 @@ class RuntimeObserverClient(QtCore.QObject):
 
     def reconnect_now(self) -> None:
         self._attempt = 0
+        self._current_session_id = None
+        self._current_session_title = ""
+        self.sessionChanged.emit("", "Loading Session", 0)
         socket = self._socket
         self._socket = None
         if socket is not None:
@@ -466,6 +469,9 @@ class RuntimeObserverClient(QtCore.QObject):
         if self.sender() is not self._socket:
             return
         self._attempt = 0
+        self._current_session_id = None
+        self._current_session_title = ""
+        self.sessionChanged.emit("", "Loading Session", 0)
         self.connectionChanged.emit("online", "Runtime connected")
         self._send("runtime.ping", {}, "ping")
         self._send("session.list", {"include_archived": False}, "session.list")
@@ -476,6 +482,9 @@ class RuntimeObserverClient(QtCore.QObject):
             return
         if self._stopping:
             return
+        self._current_session_id = None
+        self._current_session_title = ""
+        self.sessionChanged.emit("", "Runtime disconnected", 0)
         self.connectionChanged.emit("offline", "Runtime disconnected")
         self._pending.clear()
         self._schedule()
@@ -558,7 +567,7 @@ class RuntimeObserverClient(QtCore.QObject):
             self.commandSucceeded.emit(purpose, result)
             self.reconnect_now()
             return
-        if purpose == "session.snapshot":
+        if purpose in ("session.snapshot", "session.bootstrap_snapshot"):
             try:
                 self._runtime_state.load_snapshot(result)
                 snapshot = self._runtime_state.snapshot()
@@ -568,6 +577,19 @@ class RuntimeObserverClient(QtCore.QObject):
             except PanelClientError as exc:
                 self.connectionChanged.emit("error", str(exc))
                 return
+            if purpose == "session.bootstrap_snapshot":
+                session_id = snapshot["session_id"]
+                if session_id != self._current_session_id:
+                    return
+                cursor = snapshot["last_seq"]
+                self._send(
+                    "session.subscribe",
+                    {"session_id": session_id, "last_seq": cursor},
+                    "session.subscribe",
+                )
+                self.sessionChanged.emit(
+                    session_id, self._current_session_title, cursor
+                )
             self.runtimeSnapshotChanged.emit(snapshot)
             return
         if purpose == "changeset.list":
@@ -623,23 +645,21 @@ class RuntimeObserverClient(QtCore.QObject):
         self._preferred_session_id = session_id
         self._current_session_id = session_id
         self._current_session_title = title
-        cursor = self._cursors.last_seq(session_id)
-        self.sessionChanged.emit(session_id, title, cursor)
-        self._send(
-            "session.subscribe",
-            {"session_id": session_id, "last_seq": cursor},
-            "session.subscribe",
-        )
-        self._request_snapshot()
+        # Bootstrap from one bounded snapshot, then subscribe from that exact
+        # boundary. Events committed between the snapshot and subscribe are
+        # replayed by the server, so this is gap-free without replaying an
+        # entire high-volume Session from seq 0 into Qt.
+        self.sessionChanged.emit("", f"Loading {title}", 0)
+        self._request_snapshot(purpose="session.bootstrap_snapshot")
         self.refresh_changesets()
 
-    def _request_snapshot(self) -> None:
+    def _request_snapshot(self, *, purpose: str = "session.snapshot") -> None:
         if self._current_session_id is None:
             return
         self._send(
             "session.snapshot",
             {"session_id": self._current_session_id},
-            "session.snapshot",
+            purpose,
         )
 
     def _schedule_changeset_refresh(self) -> None:
