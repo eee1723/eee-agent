@@ -1,7 +1,8 @@
 """Application-database persistence for typed ChangeSet records (Task 16-B1).
 
 A focused, transaction-safe repository over the schema-v2 tables
-(``workspaces``, ``changesets``, ``approvals``, ``change_receipts``). It
+(``workspaces``, ``session_workspace_state``, ``changesets``, ``approvals``,
+``change_receipts``). It
 round-trips the frozen Task 16-A DTOs without changing their canonical JSON or
 digest, enforces foreign keys and unique identities, and exposes
 compare-and-set / single-use-consumption primitives for the later approval
@@ -165,6 +166,51 @@ class DecisionResult:
     approval: ApprovalRecord
     changeset_state: ChangeSetState
     events: tuple[EventRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceStateRecord:
+    """Persisted active-Workspace pointer for one Runtime Session."""
+
+    session_id: str
+    active_workspace_id: str
+    state_revision: int
+    updated_at: datetime
+
+    def __post_init__(self) -> None:
+        _require_id_value(self.session_id, IdKind.SESSION)
+        _require_id_value(self.active_workspace_id, IdKind.WORKSPACE)
+        if type(self.state_revision) is not int:
+            raise TypeError("state_revision must be an exact integer")
+        if self.state_revision < 1:
+            raise ValueError("state_revision must be >= 1")
+        object.__setattr__(
+            self,
+            "updated_at",
+            _require_utc_datetime(self.updated_at, "updated_at"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceMutationResult:
+    """One committed Workspace lifecycle mutation and its durable events."""
+
+    manifest: WorkspaceManifest
+    state: WorkspaceStateRecord | None
+    events: tuple[EventRecord, ...]
+    changed: bool
+
+    def __post_init__(self) -> None:
+        if type(self.manifest) is not WorkspaceManifest:
+            raise TypeError("manifest must be an exact WorkspaceManifest")
+        if self.state is not None and type(self.state) is not WorkspaceStateRecord:
+            raise TypeError("state must be an exact WorkspaceStateRecord or None")
+        if type(self.events) is not tuple or any(
+            type(event) is not EventRecord for event in self.events
+        ):
+            raise TypeError("events must be a tuple of exact EventRecord values")
+        if type(self.changed) is not bool:
+            raise TypeError("changed must be an exact bool")
 
 
 # --------------------------------------------------------------------------
@@ -631,6 +677,34 @@ def _workspace_exists() -> AgentException:
     return _err("runtime.duplicate_workspace", "The workspace already exists.")
 
 
+def _workspace_identity_conflict() -> AgentException:
+    return _err(
+        "workspace.identity_conflict",
+        "The workspace identity conflicts with persisted state.",
+    )
+
+
+def _workspace_session_mismatch() -> AgentException:
+    return _err(
+        "workspace.session_mismatch",
+        "The workspace or creating run belongs to another Session.",
+    )
+
+
+def _workspace_revision_conflict() -> AgentException:
+    return _err(
+        "workspace.revision_conflict",
+        "The workspace manifest changed before this update could be applied.",
+    )
+
+
+def _workspace_active_conflict() -> AgentException:
+    return _err(
+        "workspace.active_conflict",
+        "The active workspace changed before this update could be applied.",
+    )
+
+
 def _changeset_exists() -> AgentException:
     return _err("runtime.duplicate_changeset", "The ChangeSet already exists.")
 
@@ -768,6 +842,83 @@ def _verify_payload(payload_json: str, stored_digest: str) -> None:
         raise _record_corrupt()
 
 
+def _manifest_from_row(row) -> WorkspaceManifest:
+    _verify_payload(row["payload_json"], row["digest"])
+    manifest = _decode_manifest(_loads_canonical(row["payload_json"]))
+    if row["payload_json"] != canonical_json_dumps(manifest.to_dict()):
+        raise _record_corrupt()
+    if (
+        row["workspace_id"] != manifest.workspace_id
+        or row["session_id"] != manifest.session_id
+        or row["instance_id"] != manifest.instance_id
+        or row["scene_epoch"] != manifest.scene_epoch
+        or row["revision"] != manifest.revision
+        or row["created_by_run"] != manifest.created_by_run
+        or row["updated_at"] != manifest.updated_at.isoformat()
+        or row["schema_version"] != manifest.schema_version
+    ):
+        raise _record_corrupt()
+    return manifest
+
+
+def _workspace_state_from_row(row) -> WorkspaceStateRecord:
+    return WorkspaceStateRecord(
+        session_id=row["session_id"],
+        active_workspace_id=row["active_workspace_id"],
+        state_revision=row["state_revision"],
+        updated_at=_decode_dt(row["updated_at"], "WorkspaceStateRecord.updated_at"),
+    )
+
+
+def _require_revision(value: object, label: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{label} must be an exact string")
+    if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
+        raise ValueError(f"{label} must be a lowercase SHA-256")
+    return value
+
+
+def _same_bind_identity(old: WorkspaceManifest, new: WorkspaceManifest) -> bool:
+    if (
+        old.workspace_id != new.workspace_id
+        or old.session_id != new.session_id
+        or old.created_by_run != new.created_by_run
+    ):
+        return False
+    old_nodes = {node.node_id: node for node in old.nodes}
+    new_nodes = {node.node_id: node for node in new.nodes}
+    if set(old_nodes) != set(new_nodes):
+        return False
+    if {root.node_id for root in old.roots} != {root.node_id for root in new.roots}:
+        return False
+    for node_id, before in old_nodes.items():
+        after = new_nodes[node_id]
+        if (
+            before.node_type != after.node_type
+            or before.capability != after.capability
+            or before.role != after.role
+        ):
+            return False
+    return True
+
+
+async def _fetch_workspace_row(conn, workspace_id: str):
+    cursor = await conn.execute(
+        f"SELECT {_WORKSPACE_COLUMNS} FROM workspaces WHERE workspace_id = ?",
+        (workspace_id,),
+    )
+    return await cursor.fetchone()
+
+
+async def _fetch_workspace_state_row(conn, session_id: str):
+    cursor = await conn.execute(
+        "SELECT session_id, active_workspace_id, state_revision, updated_at "
+        "FROM session_workspace_state WHERE session_id = ?",
+        (session_id,),
+    )
+    return await cursor.fetchone()
+
+
 def _check_approval_row_identity(row, approval: ApprovalRecord) -> None:
     """Verify the denormalized approval columns match the decoded payload DTO.
 
@@ -815,9 +966,10 @@ def _coerce_states(states: object) -> list[ChangeSetState]:
 class ChangeSetRepository:
     """Strict, transaction-safe persistence for typed ChangeSet records.
 
-    Repository methods never emit events and never touch the events table; event
-    orchestration belongs to the later approval service. Every mutation performs
-    its checks and writes inside one
+    Plain persistence methods never emit events. The focused combined Workspace
+    lifecycle and ChangeSet approval primitives use the injected EventStore's
+    caller-owned append helper so coupled state and durable events commit in the
+    same transaction. Every mutation performs its checks and writes inside one
     :meth:`RuntimeDatabase.write_transaction`, so concurrent callers serialize
     and a failed transaction leaves all affected rows unchanged.
     """
@@ -829,10 +981,10 @@ class ChangeSetRepository:
         events: "EventStore | None" = None,
     ) -> None:
         self._database = database
-        # Optional EventStore used only by the combined proposal/decision
-        # primitives so the matching durable events commit in the SAME
-        # transaction as the changeset/approval mutation. The plain
-        # insert/get/update/consume primitives never touch the events table.
+        # Optional EventStore used by the combined Workspace lifecycle and
+        # proposal/decision primitives so matching durable events commit in the
+        # SAME transaction as their state mutation. Plain insert/get/update/
+        # consume primitives never touch the events table.
         self._events = events
 
     # --- workspace manifests ---------------------------------------------
@@ -876,8 +1028,7 @@ class ChangeSetRepository:
         )
         if row is None:
             raise _workspace_not_found()
-        _verify_payload(row["payload_json"], row["digest"])
-        return _decode_manifest(_loads_canonical(row["payload_json"]))
+        return _manifest_from_row(row)
 
     async def list_workspaces(self, session_id: str) -> tuple[WorkspaceManifest, ...]:
         sid = _require_id_value(session_id, IdKind.SESSION)
@@ -889,9 +1040,280 @@ class ChangeSetRepository:
                 (sid,),
             )
             rows = list(await cursor.fetchall())
-        return tuple(
-            _decode_row(row, "payload_json", "digest", _decode_manifest) for row in rows
+        return tuple(_manifest_from_row(row) for row in rows)
+
+    async def create_workspace_lifecycle(
+        self, manifest: WorkspaceManifest
+    ) -> WorkspaceMutationResult:
+        """Atomically create, initially activate, and event a Workspace."""
+        if type(manifest) is not WorkspaceManifest:
+            raise TypeError("manifest must be an exact WorkspaceManifest")
+        payload = canonical_json_dumps(manifest.to_dict())
+        digest = _storage_digest(manifest)
+        events_store = self._events
+        if events_store is None:
+            raise TypeError(
+                "ChangeSetRepository.create_workspace_lifecycle requires an EventStore"
+            )
+        async with self._database.write_transaction() as conn:
+            await self._require_session(conn, manifest.session_id)
+            run_cursor = await conn.execute(
+                "SELECT session_id FROM runs WHERE run_id = ?",
+                (manifest.created_by_run,),
+            )
+            run_row = await run_cursor.fetchone()
+            if run_row is None:
+                raise _run_not_found()
+            if run_row["session_id"] != manifest.session_id:
+                raise _workspace_session_mismatch()
+
+            existing_row = await _fetch_workspace_row(conn, manifest.workspace_id)
+            state_row = await _fetch_workspace_state_row(conn, manifest.session_id)
+            if existing_row is not None:
+                existing = _manifest_from_row(existing_row)
+                if existing.session_id != manifest.session_id:
+                    raise _workspace_session_mismatch()
+                if existing.revision != manifest.revision:
+                    raise _workspace_identity_conflict()
+                if state_row is None:
+                    raise _workspace_active_conflict()
+                state = _workspace_state_from_row(state_row)
+                if state.active_workspace_id != manifest.workspace_id:
+                    raise _workspace_active_conflict()
+                return WorkspaceMutationResult(existing, state, (), False)
+            if state_row is not None:
+                raise _workspace_active_conflict()
+
+            await conn.execute(
+                f"INSERT INTO workspaces({_WORKSPACE_COLUMNS}) VALUES "
+                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    manifest.workspace_id,
+                    manifest.session_id,
+                    manifest.instance_id,
+                    manifest.scene_epoch,
+                    manifest.revision,
+                    manifest.created_by_run,
+                    manifest.updated_at.isoformat(),
+                    digest,
+                    payload,
+                    manifest.schema_version,
+                ),
+            )
+            await conn.execute(
+                "INSERT INTO session_workspace_state(session_id, "
+                "active_workspace_id, state_revision, updated_at) VALUES (?, ?, 1, ?)",
+                (
+                    manifest.session_id,
+                    manifest.workspace_id,
+                    manifest.updated_at.isoformat(),
+                ),
+            )
+            state = WorkspaceStateRecord(
+                manifest.session_id,
+                manifest.workspace_id,
+                1,
+                manifest.updated_at,
+            )
+            event = await events_store._append_conn(
+                conn,
+                session_id=manifest.session_id,
+                run_id=manifest.created_by_run,
+                event_type="workspace.created",
+                payload=_workspace_event_payload(manifest, state, active=True),
+                retention_class=RetentionClass.DURABLE,
+            )
+            return WorkspaceMutationResult(manifest, state, (event,), True)
+
+    async def bind_workspace(
+        self,
+        manifest: WorkspaceManifest,
+        *,
+        expected_manifest_revision: str,
+    ) -> WorkspaceMutationResult:
+        """Atomically compare/update a manifest and append ``workspace.bound``."""
+        if type(manifest) is not WorkspaceManifest:
+            raise TypeError("manifest must be an exact WorkspaceManifest")
+        expected = _require_revision(
+            expected_manifest_revision, "expected_manifest_revision"
         )
+        payload = canonical_json_dumps(manifest.to_dict())
+        digest = _storage_digest(manifest)
+        events_store = self._events
+        if events_store is None:
+            raise TypeError("ChangeSetRepository.bind_workspace requires an EventStore")
+        async with self._database.write_transaction() as conn:
+            await self._require_session(conn, manifest.session_id)
+            row = await _fetch_workspace_row(conn, manifest.workspace_id)
+            if row is None:
+                raise _workspace_not_found()
+            stored = _manifest_from_row(row)
+            if stored.session_id != manifest.session_id:
+                raise _workspace_session_mismatch()
+            run_cursor = await conn.execute(
+                "SELECT session_id FROM runs WHERE run_id = ?",
+                (stored.created_by_run,),
+            )
+            run_row = await run_cursor.fetchone()
+            if run_row is None:
+                raise _run_not_found()
+            if run_row["session_id"] != stored.session_id:
+                raise _workspace_session_mismatch()
+            if stored.revision != expected:
+                raise _workspace_revision_conflict()
+            if not _same_bind_identity(stored, manifest):
+                raise _workspace_identity_conflict()
+            state_row = await _fetch_workspace_state_row(conn, manifest.session_id)
+            state = (
+                None if state_row is None else _workspace_state_from_row(state_row)
+            )
+            if stored.revision == manifest.revision:
+                return WorkspaceMutationResult(stored, state, (), False)
+            await conn.execute(
+                "UPDATE workspaces SET instance_id = ?, scene_epoch = ?, revision = ?, "
+                "updated_at = ?, digest = ?, payload_json = ?, schema_version = ? "
+                "WHERE workspace_id = ? AND revision = ?",
+                (
+                    manifest.instance_id,
+                    manifest.scene_epoch,
+                    manifest.revision,
+                    manifest.updated_at.isoformat(),
+                    digest,
+                    payload,
+                    manifest.schema_version,
+                    manifest.workspace_id,
+                    expected,
+                ),
+            )
+            active = state is not None and state.active_workspace_id == manifest.workspace_id
+            event = await events_store._append_conn(
+                conn,
+                session_id=manifest.session_id,
+                run_id=manifest.created_by_run,
+                event_type="workspace.bound",
+                payload=_workspace_event_payload(
+                    manifest,
+                    state,
+                    active=active,
+                    old_revision=stored.revision,
+                ),
+                retention_class=RetentionClass.DURABLE,
+            )
+            return WorkspaceMutationResult(manifest, state, (event,), True)
+
+    async def switch_workspace(
+        self,
+        session_id: str,
+        workspace_id: str,
+        *,
+        expected_active_workspace_id: str | None,
+        expected_manifest_revision: str,
+        updated_at: datetime,
+    ) -> WorkspaceMutationResult:
+        """Atomically compare/switch the Session active Workspace pointer."""
+        sid = _require_id_value(session_id, IdKind.SESSION)
+        wid = _require_id_value(workspace_id, IdKind.WORKSPACE)
+        if expected_active_workspace_id is None:
+            expected_active = None
+        else:
+            expected_active = _require_id_value(
+                expected_active_workspace_id, IdKind.WORKSPACE
+            )
+        expected_revision = _require_revision(
+            expected_manifest_revision, "expected_manifest_revision"
+        )
+        moment = _require_utc_datetime(updated_at, "updated_at")
+        events_store = self._events
+        if events_store is None:
+            raise TypeError("ChangeSetRepository.switch_workspace requires an EventStore")
+        async with self._database.write_transaction() as conn:
+            await self._require_session(conn, sid)
+            row = await _fetch_workspace_row(conn, wid)
+            if row is None:
+                raise _workspace_not_found()
+            manifest = _manifest_from_row(row)
+            if manifest.session_id != sid:
+                raise _workspace_session_mismatch()
+            if manifest.revision != expected_revision:
+                raise _workspace_revision_conflict()
+            run_cursor = await conn.execute(
+                "SELECT session_id FROM runs WHERE run_id = ?",
+                (manifest.created_by_run,),
+            )
+            run_row = await run_cursor.fetchone()
+            if run_row is None:
+                raise _run_not_found()
+            if run_row["session_id"] != sid:
+                raise _workspace_session_mismatch()
+            state_row = await _fetch_workspace_state_row(conn, sid)
+            if state_row is None:
+                if expected_active is not None:
+                    raise _workspace_active_conflict()
+                state = WorkspaceStateRecord(sid, wid, 1, moment)
+                await conn.execute(
+                    "INSERT INTO session_workspace_state(session_id, "
+                    "active_workspace_id, state_revision, updated_at) "
+                    "VALUES (?, ?, 1, ?)",
+                    (sid, wid, moment.isoformat()),
+                )
+                previous = None
+            else:
+                before = _workspace_state_from_row(state_row)
+                if before.active_workspace_id != expected_active:
+                    raise _workspace_active_conflict()
+                if before.active_workspace_id == wid:
+                    return WorkspaceMutationResult(manifest, before, (), False)
+                previous = before.active_workspace_id
+                state = WorkspaceStateRecord(
+                    sid, wid, before.state_revision + 1, moment
+                )
+                await conn.execute(
+                    "UPDATE session_workspace_state SET active_workspace_id = ?, "
+                    "state_revision = ?, updated_at = ? WHERE session_id = ?",
+                    (wid, state.state_revision, moment.isoformat(), sid),
+                )
+            event = await events_store._append_conn(
+                conn,
+                session_id=sid,
+                run_id=None,
+                event_type="workspace.updated",
+                payload=_workspace_event_payload(
+                    manifest, state, active=True, previous_workspace_id=previous
+                ),
+                retention_class=RetentionClass.DURABLE,
+            )
+            return WorkspaceMutationResult(manifest, state, (event,), True)
+
+    async def get_active_workspace(
+        self, session_id: str
+    ) -> WorkspaceStateRecord | None:
+        sid = _require_id_value(session_id, IdKind.SESSION)
+        async with self._database.write_transaction() as conn:
+            await self._require_session(conn, sid)
+            row = await _fetch_workspace_state_row(conn, sid)
+        return None if row is None else _workspace_state_from_row(row)
+
+    async def list_workspace_state(
+        self, session_id: str
+    ) -> tuple[tuple[WorkspaceManifest, ...], WorkspaceStateRecord | None]:
+        sid = _require_id_value(session_id, IdKind.SESSION)
+        async with self._database.write_transaction() as conn:
+            await self._require_session(conn, sid)
+            cursor = await conn.execute(
+                f"SELECT {_WORKSPACE_COLUMNS} FROM workspaces "
+                "WHERE session_id = ? ORDER BY workspace_id",
+                (sid,),
+            )
+            manifests = tuple(_manifest_from_row(row) for row in await cursor.fetchall())
+            state_row = await _fetch_workspace_state_row(conn, sid)
+            state = (
+                None if state_row is None else _workspace_state_from_row(state_row)
+            )
+            if state is not None and state.active_workspace_id not in {
+                manifest.workspace_id for manifest in manifests
+            }:
+                raise _record_corrupt()
+            return manifests, state
 
     # --- changesets ------------------------------------------------------
 
@@ -1737,6 +2159,32 @@ def _state_changed_payload(
         "from": from_state.value,
         "to": to_state.value,
     }
+
+
+def _workspace_event_payload(
+    manifest: WorkspaceManifest,
+    state: WorkspaceStateRecord | None,
+    *,
+    active: bool,
+    old_revision: str | None = None,
+    previous_workspace_id: str | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "session_id": manifest.session_id,
+        "workspace_id": manifest.workspace_id,
+        "revision": manifest.revision,
+        "node_count": len(manifest.nodes),
+        "instance_id": manifest.instance_id,
+        "scene_epoch": manifest.scene_epoch,
+        "active": active,
+        "state_revision": None if state is None else state.state_revision,
+    }
+    if old_revision is not None:
+        payload["old_revision"] = old_revision
+        payload["new_revision"] = manifest.revision
+    if previous_workspace_id is not None:
+        payload["previous_workspace_id"] = previous_workspace_id
+    return payload
 
 
 def _proposed_payload(

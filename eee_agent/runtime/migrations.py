@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Exact schema v1 DDL from the approved design spec section 7.3. No IF NOT
 # EXISTS: a partially-wrong schema must surface, not be silently masked.
@@ -138,11 +138,30 @@ CREATE TABLE change_receipts (
 CREATE INDEX change_receipts_by_status ON change_receipts(status, change_id);
 """
 
+# Exact schema v3 DDL (Task 16-B2b). Additive only: it adds the composite
+# parent key required by SQLite and the per-Session active Workspace pointer.
+# Accepted v1/v2 script text remains byte-for-byte unchanged.
+MIGRATION_V3_SQL = """
+CREATE UNIQUE INDEX workspaces_identity_by_session
+    ON workspaces(workspace_id, session_id);
+
+CREATE TABLE session_workspace_state (
+    session_id TEXT PRIMARY KEY
+        REFERENCES sessions(session_id) ON DELETE CASCADE,
+    active_workspace_id TEXT NOT NULL,
+    state_revision INTEGER NOT NULL CHECK (state_revision >= 1),
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(active_workspace_id, session_id)
+        REFERENCES workspaces(workspace_id, session_id)
+);
+"""
+
 # Ordered migrations. Each entry is (version, SQL script). The orchestrator
 # splits the script into statements and runs them in one atomic transaction.
 MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, MIGRATION_V1_SQL),
     (2, MIGRATION_V2_SQL),
+    (3, MIGRATION_V3_SQL),
 )
 
 

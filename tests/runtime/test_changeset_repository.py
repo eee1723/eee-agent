@@ -9,6 +9,8 @@ synchronous black box, mirroring the existing Runtime repository tests.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -38,6 +40,8 @@ from eee_agent.changesets.repository import (
     ChangeSetState,
     ChangeSetRepository,
     StoredChangeSet,
+    WorkspaceMutationResult,
+    WorkspaceStateRecord,
 )
 from eee_agent.core import AgentException
 from eee_agent.houdini_bridge.contracts import SceneBinding
@@ -297,14 +301,22 @@ def _err_code(exc: BaseException) -> str:
 # --------------------------------------------------------------------------
 
 
-def test_schema_v2_creates_the_four_changeset_tables(db_path: Path) -> None:
+def test_schema_v3_preserves_changeset_tables_and_adds_workspace_state(
+    db_path: Path,
+) -> None:
     async def scenario() -> None:
         db = await RuntimeDatabase.open(db_path)
         try:
             names = await db.table_names()
-            for table in ("workspaces", "changesets", "approvals", "change_receipts"):
+            for table in (
+                "workspaces",
+                "changesets",
+                "approvals",
+                "change_receipts",
+                "session_workspace_state",
+            ):
                 assert table in names
-            assert await db.schema_version() == 2
+            assert await db.schema_version() == 3
         finally:
             await db.close()
 
@@ -389,6 +401,468 @@ def test_get_workspace_missing_raises(db_path: Path) -> None:
         try:
             with pytest.raises(AgentException):
                 await repo.get_workspace(f"ws_{'0' * 32}")
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+# --------------------------------------------------------------------------
+# schema-v3 workspace lifecycle primitives
+# --------------------------------------------------------------------------
+
+
+def test_create_workspace_lifecycle_commits_manifest_state_and_event(
+    db_path: Path,
+) -> None:
+    async def scenario() -> None:
+        db, _ = await fresh_repo(db_path)
+        repo = ChangeSetRepository(db, events=EventStore(db))
+        try:
+            result = await repo.create_workspace_lifecycle(_manifest())
+            assert type(result) is WorkspaceMutationResult
+            assert result.changed is True
+            assert result.manifest.workspace_id == WS
+            assert type(result.state) is WorkspaceStateRecord
+            assert result.state.active_workspace_id == WS
+            assert result.state.state_revision == 1
+            assert [event.event_type for event in result.events] == ["workspace.created"]
+            assert set(result.events[0].payload) == {
+                "session_id",
+                "workspace_id",
+                "revision",
+                "node_count",
+                "instance_id",
+                "scene_epoch",
+                "active",
+                "state_revision",
+            }
+            assert "roots" not in result.events[0].payload
+            assert "nodes" not in result.events[0].payload
+            assert (await repo.get_active_workspace(SES)).active_workspace_id == WS
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_create_workspace_lifecycle_exact_retry_is_event_free(db_path: Path) -> None:
+    async def scenario() -> None:
+        db, _ = await fresh_repo(db_path)
+        repo = ChangeSetRepository(db, events=EventStore(db))
+        try:
+            first = await repo.create_workspace_lifecycle(_manifest())
+            second = await repo.create_workspace_lifecycle(_manifest(updated_at=LATER))
+            assert first.changed is True
+            assert second.changed is False
+            assert second.events == ()
+            assert second.manifest.updated_at == first.manifest.updated_at
+            assert (await db.fetchone("SELECT COUNT(*) AS c FROM events"))["c"] == 1
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_create_workspace_lifecycle_rejects_run_from_another_session(
+    db_path: Path,
+) -> None:
+    async def scenario() -> None:
+        db, _ = await fresh_repo(db_path)
+        other_session = f"ses_{'7' * 32}"
+        await add_session(db, other_session)
+        other_run = f"run_{'8' * 32}"
+        await add_run(db, other_run, other_session)
+        repo = ChangeSetRepository(db, events=EventStore(db))
+        try:
+            with pytest.raises(AgentException) as exc:
+                await repo.create_workspace_lifecycle(
+                    _manifest(created_by_run=other_run)
+                )
+            assert _err_code(exc.value) == "workspace.session_mismatch"
+            assert (await db.fetchone("SELECT COUNT(*) AS c FROM workspaces"))["c"] == 0
+            assert (await db.fetchone("SELECT COUNT(*) AS c FROM events"))["c"] == 0
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_bind_workspace_compare_update_and_noop(db_path: Path) -> None:
+    async def scenario() -> None:
+        db, _ = await fresh_repo(db_path)
+        repo = ChangeSetRepository(db, events=EventStore(db))
+        try:
+            created = await repo.create_workspace_lifecycle(_manifest())
+            moved_root = _owned(path="/obj/renamed")
+            moved_child = _owned(
+                node_id="n_child_0",
+                path="/obj/renamed/c0",
+                parent_path="/obj/renamed",
+                role="member",
+            )
+            refreshed = _manifest(
+                instance_id="hou_instance_2",
+                scene_epoch=2,
+                roots=[moved_root],
+                nodes=[moved_root, moved_child],
+                updated_at=LATER,
+            )
+            bound = await repo.bind_workspace(
+                refreshed, expected_manifest_revision=created.manifest.revision
+            )
+            assert bound.changed is True
+            assert [event.event_type for event in bound.events] == ["workspace.bound"]
+            assert bound.state.state_revision == 1
+            noop = await repo.bind_workspace(
+                _manifest(
+                    instance_id="hou_instance_2",
+                    scene_epoch=2,
+                    roots=[moved_root],
+                    nodes=[moved_root, moved_child],
+                    updated_at=LATER + timedelta(seconds=1),
+                ),
+                expected_manifest_revision=refreshed.revision,
+            )
+            assert noop.changed is False
+            assert noop.events == ()
+            assert noop.manifest.updated_at == LATER
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_bind_workspace_rejects_stale_revision_without_event(db_path: Path) -> None:
+    async def scenario() -> None:
+        db, _ = await fresh_repo(db_path)
+        repo = ChangeSetRepository(db, events=EventStore(db))
+        try:
+            await repo.create_workspace_lifecycle(_manifest())
+            with pytest.raises(AgentException) as exc:
+                await repo.bind_workspace(
+                    _manifest(), expected_manifest_revision="f" * 64
+                )
+            assert _err_code(exc.value) == "workspace.revision_conflict"
+            assert (await db.fetchone("SELECT COUNT(*) AS c FROM events"))["c"] == 1
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_switch_workspace_uses_active_cas_and_suppresses_noop(db_path: Path) -> None:
+    async def scenario() -> None:
+        db, _ = await fresh_repo(db_path)
+        repo = ChangeSetRepository(db, events=EventStore(db))
+        other_ws = f"ws_{'3' * 32}"
+        try:
+            await repo.create_workspace_lifecycle(_manifest())
+            other_manifest = _manifest(workspace_id=other_ws)
+            await repo.insert_workspace(other_manifest)
+            switched = await repo.switch_workspace(
+                SES,
+                other_ws,
+                expected_active_workspace_id=WS,
+                expected_manifest_revision=other_manifest.revision,
+                updated_at=LATER,
+            )
+            assert switched.changed is True
+            assert switched.state.active_workspace_id == other_ws
+            assert switched.state.state_revision == 2
+            assert [event.event_type for event in switched.events] == ["workspace.updated"]
+            noop = await repo.switch_workspace(
+                SES,
+                other_ws,
+                expected_active_workspace_id=other_ws,
+                expected_manifest_revision=other_manifest.revision,
+                updated_at=LATER + timedelta(seconds=1),
+            )
+            assert noop.changed is False
+            assert noop.events == ()
+            assert noop.state.updated_at == LATER
+            with pytest.raises(AgentException) as exc:
+                await repo.switch_workspace(
+                    SES,
+                    WS,
+                    expected_active_workspace_id=WS,
+                    expected_manifest_revision=_manifest().revision,
+                    updated_at=LATER + timedelta(seconds=2),
+                )
+            assert _err_code(exc.value) == "workspace.active_conflict"
+            assert (await repo.get_active_workspace(SES)).active_workspace_id == other_ws
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_switch_rejects_manifest_changed_after_live_verification(db_path: Path) -> None:
+    async def scenario() -> None:
+        db, _ = await fresh_repo(db_path)
+        repo = ChangeSetRepository(db, events=EventStore(db))
+        target_ws = f"ws_{'3' * 32}"
+        try:
+            await repo.create_workspace_lifecycle(_manifest())
+            target = _manifest(workspace_id=target_ws)
+            await repo.insert_workspace(target)
+            moved_root = _owned(path="/obj/moved")
+            moved_child = _owned(
+                node_id="n_child_0",
+                path="/obj/moved/c0",
+                parent_path="/obj/moved",
+                role="member",
+            )
+            rebound = _manifest(
+                workspace_id=target_ws,
+                roots=[moved_root],
+                nodes=[moved_root, moved_child],
+                updated_at=LATER,
+            )
+            await repo.bind_workspace(
+                rebound, expected_manifest_revision=target.revision
+            )
+            with pytest.raises(AgentException) as exc:
+                await repo.switch_workspace(
+                    SES,
+                    target_ws,
+                    expected_active_workspace_id=WS,
+                    expected_manifest_revision=target.revision,
+                    updated_at=LATER + timedelta(seconds=1),
+                )
+            assert _err_code(exc.value) == "workspace.revision_conflict"
+            assert (await repo.get_active_workspace(SES)).active_workspace_id == WS
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_workspace_lifecycle_event_failure_rolls_back_state(db_path: Path) -> None:
+    class FailingEventStore(EventStore):
+        async def _append_conn(self, *args, **kwargs):  # type: ignore[override]
+            raise RuntimeError("injected event failure")
+
+    async def scenario() -> None:
+        db, _ = await fresh_repo(db_path)
+        repo = ChangeSetRepository(db, events=FailingEventStore(db))
+        try:
+            with pytest.raises(RuntimeError, match="injected"):
+                await repo.create_workspace_lifecycle(_manifest())
+            assert (await db.fetchone("SELECT COUNT(*) AS c FROM workspaces"))["c"] == 0
+            assert (
+                await db.fetchone(
+                    "SELECT COUNT(*) AS c FROM session_workspace_state"
+                )
+            )["c"] == 0
+            assert (await db.fetchone("SELECT COUNT(*) AS c FROM events"))["c"] == 0
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_list_workspace_state_verifies_manifest_digest(db_path: Path) -> None:
+    async def scenario() -> None:
+        db, _ = await fresh_repo(db_path)
+        repo = ChangeSetRepository(db, events=EventStore(db))
+        try:
+            await repo.create_workspace_lifecycle(_manifest())
+            manifests, state = await repo.list_workspace_state(SES)
+            assert [manifest.workspace_id for manifest in manifests] == [WS]
+            assert state.active_workspace_id == WS
+            async with db.write_transaction() as conn:
+                await conn.execute(
+                    "UPDATE workspaces SET payload_json = '{}' WHERE workspace_id = ?",
+                    (WS,),
+                )
+            with pytest.raises(AgentException) as exc:
+                await repo.list_workspace_state(SES)
+            assert _err_code(exc.value) == "runtime.record_corrupt"
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_bind_rechecks_creating_run_session_inside_transaction(db_path: Path) -> None:
+    async def scenario() -> None:
+        db, _ = await fresh_repo(db_path)
+        repo = ChangeSetRepository(db, events=EventStore(db))
+        other_session = f"ses_{'7' * 32}"
+        try:
+            await add_session(db, other_session)
+            created = await repo.create_workspace_lifecycle(_manifest())
+            async with db.write_transaction() as conn:
+                await conn.execute(
+                    "UPDATE runs SET session_id = ? WHERE run_id = ?",
+                    (other_session, RUN),
+                )
+            with pytest.raises(AgentException) as exc:
+                await repo.bind_workspace(
+                    _manifest(updated_at=LATER),
+                    expected_manifest_revision=created.manifest.revision,
+                )
+            assert _err_code(exc.value) == "workspace.session_mismatch"
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_switch_rechecks_creating_run_session_inside_transaction(db_path: Path) -> None:
+    async def scenario() -> None:
+        db, _ = await fresh_repo(db_path)
+        repo = ChangeSetRepository(db, events=EventStore(db))
+        other_session = f"ses_{'7' * 32}"
+        try:
+            await add_session(db, other_session)
+            await repo.create_workspace_lifecycle(_manifest())
+            async with db.write_transaction() as conn:
+                await conn.execute(
+                    "UPDATE runs SET session_id = ? WHERE run_id = ?",
+                    (other_session, RUN),
+                )
+            with pytest.raises(AgentException) as exc:
+                await repo.switch_workspace(
+                    SES,
+                    WS,
+                    expected_active_workspace_id=WS,
+                    expected_manifest_revision=_manifest().revision,
+                    updated_at=LATER,
+                )
+            assert _err_code(exc.value) == "workspace.session_mismatch"
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_cancelled_workspace_event_append_rolls_back_manifest_and_state(
+    db_path: Path,
+) -> None:
+    entered = asyncio.Event()
+
+    class BlockingEventStore(EventStore):
+        async def _append_conn(self, *args, **kwargs):  # type: ignore[override]
+            entered.set()
+            await asyncio.Future()
+
+    async def scenario() -> None:
+        db, _ = await fresh_repo(db_path)
+        repo = ChangeSetRepository(db, events=BlockingEventStore(db))
+        try:
+            task = asyncio.create_task(repo.create_workspace_lifecycle(_manifest()))
+            await entered.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert (await db.fetchone("SELECT COUNT(*) AS c FROM workspaces"))["c"] == 0
+            assert (
+                await db.fetchone(
+                    "SELECT COUNT(*) AS c FROM session_workspace_state"
+                )
+            )["c"] == 0
+            assert (await db.fetchone("SELECT COUNT(*) AS c FROM events"))["c"] == 0
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_concurrent_switches_have_one_cas_winner(db_path: Path) -> None:
+    async def scenario() -> None:
+        db, _ = await fresh_repo(db_path)
+        repo = ChangeSetRepository(db, events=EventStore(db))
+        ws2 = f"ws_{'3' * 32}"
+        ws3 = f"ws_{'4' * 32}"
+        try:
+            await repo.create_workspace_lifecycle(_manifest())
+            manifest2 = _manifest(workspace_id=ws2)
+            manifest3 = _manifest(workspace_id=ws3)
+            await repo.insert_workspace(manifest2)
+            await repo.insert_workspace(manifest3)
+            results = await asyncio.gather(
+                repo.switch_workspace(
+                    SES,
+                    ws2,
+                    expected_active_workspace_id=WS,
+                    expected_manifest_revision=manifest2.revision,
+                    updated_at=LATER,
+                ),
+                repo.switch_workspace(
+                    SES,
+                    ws3,
+                    expected_active_workspace_id=WS,
+                    expected_manifest_revision=manifest3.revision,
+                    updated_at=LATER + timedelta(seconds=1),
+                ),
+                return_exceptions=True,
+            )
+            winners = [result for result in results if isinstance(result, WorkspaceMutationResult)]
+            losers = [result for result in results if isinstance(result, AgentException)]
+            assert len(winners) == 1
+            assert len(losers) == 1
+            assert _err_code(losers[0]) == "workspace.active_conflict"
+            state = await repo.get_active_workspace(SES)
+            assert state.active_workspace_id in {ws2, ws3}
+            assert state.state_revision == 2
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_active_workspace_state_survives_database_restart(db_path: Path) -> None:
+    async def scenario() -> None:
+        db, _ = await fresh_repo(db_path)
+        repo = ChangeSetRepository(db, events=EventStore(db))
+        await repo.create_workspace_lifecycle(_manifest())
+        await db.close()
+        reopened = await RuntimeDatabase.open(db_path)
+        try:
+            restored = await ChangeSetRepository(reopened).get_active_workspace(SES)
+            assert restored.active_workspace_id == WS
+            assert restored.state_revision == 1
+        finally:
+            await reopened.close()
+
+    _run(scenario())
+
+
+def test_migrated_v2_workspace_can_bind_without_state_then_switch_from_null(
+    db_path: Path,
+) -> None:
+    async def scenario() -> None:
+        db, _ = await fresh_repo(db_path)
+        plain = ChangeSetRepository(db)
+        repo = ChangeSetRepository(db, events=EventStore(db))
+        try:
+            stored = await plain.insert_workspace(_manifest())
+            root = _owned(path="/obj/rebound")
+            child = _owned(
+                node_id="n_child_0",
+                path="/obj/rebound/c0",
+                parent_path="/obj/rebound",
+                role="member",
+            )
+            refreshed = _manifest(
+                roots=[root], nodes=[root, child], updated_at=LATER
+            )
+            bound = await repo.bind_workspace(
+                refreshed, expected_manifest_revision=stored.revision
+            )
+            assert bound.changed is True
+            assert bound.state is None
+            switched = await repo.switch_workspace(
+                SES,
+                WS,
+                expected_active_workspace_id=None,
+                expected_manifest_revision=refreshed.revision,
+                updated_at=LATER + timedelta(seconds=1),
+            )
+            assert switched.state.active_workspace_id == WS
+            assert switched.state.state_revision == 1
         finally:
             await db.close()
 
@@ -1231,6 +1705,33 @@ def test_tampered_payload_digest_fails_closed(db_path: Path) -> None:
             await repo.get_workspace(WS)
         assert _err_code(exc.value) == "runtime.record_corrupt"
         await db.close()
+
+    _run(scenario())
+
+
+def test_equivalent_noncanonical_manifest_json_fails_closed(db_path: Path) -> None:
+    async def scenario() -> None:
+        db, repo = await fresh_repo(db_path)
+        try:
+            await repo.insert_workspace(_manifest())
+            row = await db.fetchone(
+                "SELECT payload_json FROM workspaces WHERE workspace_id = ?", (WS,)
+            )
+            value = json.loads(row["payload_json"])
+            pretty = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=False)
+            assert pretty != row["payload_json"]
+            digest = hashlib.sha256(pretty.encode("utf-8")).hexdigest()
+            async with db.write_transaction() as conn:
+                await conn.execute(
+                    "UPDATE workspaces SET payload_json = ?, digest = ? "
+                    "WHERE workspace_id = ?",
+                    (pretty, digest, WS),
+                )
+            with pytest.raises(AgentException) as exc:
+                await repo.get_workspace(WS)
+            assert _err_code(exc.value) == "runtime.record_corrupt"
+        finally:
+            await db.close()
 
     _run(scenario())
 

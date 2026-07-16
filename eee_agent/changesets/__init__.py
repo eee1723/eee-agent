@@ -42,6 +42,29 @@ from eee_agent.changesets.contracts import (
 )
 from eee_agent.changesets.policy import evaluate_policy
 
+_WORKSPACE_SERVICE_EXPORTS = frozenset(
+    {
+        "WorkspaceFactProvider",
+        "WorkspaceHealth",
+        "WorkspaceInspectionSummary",
+        "WorkspaceLifecycleSummary",
+        "WorkspaceService",
+        "WorkspaceSummary",
+    }
+)
+
+
+def __getattr__(name: str):
+    # Lazy to preserve the accepted changesets.contracts -> houdini_bridge
+    # import boundary: the Bridge workspace DTOs themselves import the manifest
+    # decoder, so eager service exports would create a package initialization
+    # cycle.
+    if name in _WORKSPACE_SERVICE_EXPORTS:
+        from eee_agent.changesets import workspace_service
+
+        return getattr(workspace_service, name)
+    raise AttributeError(name)
+
 __all__ = [
     "ApprovalDecision",
     "ApprovalRecord",
@@ -72,5 +95,11 @@ __all__ = [
     "WireSnapshot",
     "WorkspaceManifest",
     "WorkspaceRevisionEquals",
+    "WorkspaceFactProvider",
+    "WorkspaceHealth",
+    "WorkspaceInspectionSummary",
+    "WorkspaceLifecycleSummary",
+    "WorkspaceService",
+    "WorkspaceSummary",
     "evaluate_policy",
 ]

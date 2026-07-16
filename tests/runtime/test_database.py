@@ -91,14 +91,14 @@ async def add_event(
 
 
 # --------------------------------------------------------------------------
-# 1. empty database -> schema v2 (v1 tables preserved, four v2 tables added)
+# 1. empty database -> schema v3 (v1/v2 tables preserved, workspace state added)
 # --------------------------------------------------------------------------
 
-def test_empty_database_reaches_schema_v2(db_path: Path) -> None:
+def test_empty_database_reaches_schema_v3(db_path: Path) -> None:
     async def scenario() -> None:
         db = await RuntimeDatabase.open(db_path)
         try:
-            assert await db.schema_version() == 2
+            assert await db.schema_version() == 3
             names = await db.table_names()
             assert {
                 "schema_migrations",
@@ -110,6 +110,7 @@ def test_empty_database_reaches_schema_v2(db_path: Path) -> None:
                 "changesets",
                 "approvals",
                 "change_receipts",
+                "session_workspace_state",
             } <= names
             row = await db.fetchone(
                 "SELECT singleton_id, active_run_id, updated_at FROM runtime_state"
@@ -136,11 +137,11 @@ def test_reopen_does_not_rerun_migration(db_path: Path) -> None:
         await db.close()
         db2 = await RuntimeDatabase.open(db_path)
         try:
-            assert await db2.schema_version() == 2
+            assert await db2.schema_version() == 3
             rows = await db2.fetchall(
                 "SELECT version FROM schema_migrations ORDER BY version"
             )
-            assert [r["version"] for r in rows] == [1, 2]
+            assert [r["version"] for r in rows] == [1, 2, 3]
         finally:
             await db2.close()
 
@@ -185,7 +186,7 @@ def test_newer_schema_is_rejected_and_connection_closed(db_path: Path) -> None:
         db_path,
         "CREATE TABLE schema_migrations "
         "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
-        [3],
+        [4],
     )
     with pytest.raises(RuntimeError, match="newer than this Runtime"):
         _run(RuntimeDatabase.open(db_path))
@@ -193,7 +194,7 @@ def test_newer_schema_is_rejected_and_connection_closed(db_path: Path) -> None:
     # The failed open() must have released the file handle (Windows-safe).
     raw = sqlite3.connect(db_path)
     try:
-        assert raw.execute("SELECT version FROM schema_migrations").fetchone()[0] == 3
+        assert raw.execute("SELECT version FROM schema_migrations").fetchone()[0] == 4
     finally:
         raw.close()
 
@@ -865,7 +866,7 @@ def test_migration_rows_carry_sha256_checksum_of_script(db_path: Path) -> None:
             rows = await db.fetchall(
                 "SELECT version, checksum FROM schema_migrations ORDER BY version"
             )
-            assert [r["version"] for r in rows] == [1, 2]
+            assert [r["version"] for r in rows] == [1, 2, 3]
             expected = {
                 v: _expected_checksum(script) for v, script in migrations_mod.MIGRATIONS
             }
@@ -883,7 +884,7 @@ def test_legacy_v1_database_without_checksum_is_upgraded(db_path: Path) -> None:
     async def scenario() -> None:
         db = await RuntimeDatabase.open(db_path)
         try:
-            assert await db.schema_version() == 2
+            assert await db.schema_version() == 3
             # checksum column added and v1 backfilled with the known checksum.
             row = await db.fetchone(
                 "SELECT checksum FROM schema_migrations WHERE version = 1"
@@ -894,10 +895,16 @@ def test_legacy_v1_database_without_checksum_is_upgraded(db_path: Path) -> None:
                 "SELECT checksum FROM schema_migrations WHERE version = 2"
             )
             assert row2["checksum"] == _expected_checksum(migrations_mod.MIGRATION_V2_SQL)
-            # v1 data preserved; v2 tables now available.
+            # v1 data preserved; v2/v3 tables now available.
             assert (await db.fetchone("SELECT COUNT(*) AS c FROM sessions"))["c"] == 1
             names = await db.table_names()
-            assert {"workspaces", "changesets", "approvals", "change_receipts"} <= names
+            assert {
+                "workspaces",
+                "changesets",
+                "approvals",
+                "change_receipts",
+                "session_workspace_state",
+            } <= names
         finally:
             await db.close()
 
@@ -946,7 +953,7 @@ def test_reopened_database_revalidates_checksums(db_path: Path) -> None:
         # A normal reopen must re-read and re-validate every checksum.
         db2 = await RuntimeDatabase.open(db_path)
         try:
-            assert await db2.schema_version() == 2
+            assert await db2.schema_version() == 3
             assert (await db2.fetchone("SELECT COUNT(*) AS c FROM sessions"))["c"] == 1
         finally:
             await db2.close()
@@ -993,3 +1000,213 @@ def test_failed_v2_migration_leaves_no_partial_tables(db_path: Path) -> None:
     assert "changesets" not in tables
     assert versions == [1]  # v2 not recorded
     assert sessions == 1  # v1 data intact
+
+
+# --------------------------------------------------------------------------
+# 16. schema v3 active-workspace structure (Task 16-B2b)
+# --------------------------------------------------------------------------
+
+
+async def _add_raw_workspace(
+    db: RuntimeDatabase,
+    *,
+    workspace_id: str,
+    session_id: str,
+    run_id: str,
+) -> None:
+    async with db.write_transaction() as conn:
+        await conn.execute(
+            "INSERT INTO workspaces(workspace_id, session_id, instance_id, "
+            "scene_epoch, revision, created_by_run, updated_at, digest, "
+            "payload_json, schema_version) VALUES (?, ?, 'inst', 1, ?, ?, ?, ?, '{}', 1)",
+            (workspace_id, session_id, "a" * 64, run_id, NOW_ISO, "b" * 64),
+        )
+
+
+def test_schema_v3_composite_active_workspace_fk_is_session_scoped(
+    db_path: Path,
+) -> None:
+    async def scenario() -> None:
+        db = await RuntimeDatabase.open(db_path)
+        try:
+            other_session = f"ses_{'1' * 32}"
+            other_run = f"run_{'1' * 32}"
+            workspace = f"ws_{'2' * 32}"
+            await add_session(db)
+            await add_run(db)
+            await add_session(db, other_session)
+            await add_run(db, other_run, other_session)
+            await _add_raw_workspace(
+                db,
+                workspace_id=workspace,
+                session_id=SESSION_ID,
+                run_id=RUN_ID,
+            )
+            with pytest.raises(sqlite3.IntegrityError):
+                async with db.write_transaction() as conn:
+                    await conn.execute(
+                        "INSERT INTO session_workspace_state(session_id, "
+                        "active_workspace_id, state_revision, updated_at) "
+                        "VALUES (?, ?, 1, ?)",
+                        (other_session, workspace, NOW_ISO),
+                    )
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_schema_v3_preserves_accepted_v1_v2_script_checksums() -> None:
+    assert migrations_mod.migration_checksum(migrations_mod.MIGRATION_V1_SQL) == (
+        "bcbabc5b6dd01a18e34e2c42ca329c46c018e596b96a9131707725c78ea2206f"
+    )
+    assert migrations_mod.migration_checksum(migrations_mod.MIGRATION_V2_SQL) == (
+        "12e07ebd08d74b3a7f90f92853585b75d4ad3df562ec2ae1d4c8f69e87723e77"
+    )
+
+
+def test_existing_schema_v2_database_upgrades_to_v3_once(db_path: Path) -> None:
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.execute(
+            "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, "
+            "applied_at TEXT NOT NULL, checksum TEXT NOT NULL)"
+        )
+        for version, script in migrations_mod.MIGRATIONS[:2]:
+            for statement in migrations_mod.split_sql_statements(script):
+                raw.execute(statement)
+            if version == 1:
+                raw.execute(
+                    "INSERT INTO runtime_state(singleton_id, active_run_id, updated_at) "
+                    "VALUES (1, NULL, ?)",
+                    (NOW_ISO,),
+                )
+            raw.execute(
+                "INSERT INTO schema_migrations(version, applied_at, checksum) "
+                "VALUES (?, ?, ?)",
+                (version, NOW_ISO, migrations_mod.migration_checksum(script)),
+            )
+        raw.execute(
+            _SESSION_INSERT,
+            (SESSION_ID, "preserved", "active", NOW_ISO, NOW_ISO, 0, 0),
+        )
+        raw.commit()
+    finally:
+        raw.close()
+
+    async def scenario() -> None:
+        db = await RuntimeDatabase.open(db_path)
+        try:
+            assert await db.schema_version() == 3
+            assert (
+                await db.fetchone(
+                    "SELECT title FROM sessions WHERE session_id = ?", (SESSION_ID,)
+                )
+            )["title"] == "preserved"
+            rows = await db.fetchall(
+                "SELECT version FROM schema_migrations ORDER BY version"
+            )
+            assert [row["version"] for row in rows] == [1, 2, 3]
+            assert (
+                await db.fetchone(
+                    "SELECT COUNT(*) AS c FROM session_workspace_state"
+                )
+            )["c"] == 0
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_schema_v3_state_cascades_with_session(db_path: Path) -> None:
+    async def scenario() -> None:
+        db = await RuntimeDatabase.open(db_path)
+        try:
+            workspace = f"ws_{'2' * 32}"
+            await add_session(db)
+            await add_run(db)
+            await _add_raw_workspace(
+                db,
+                workspace_id=workspace,
+                session_id=SESSION_ID,
+                run_id=RUN_ID,
+            )
+            async with db.write_transaction() as conn:
+                await conn.execute(
+                    "INSERT INTO session_workspace_state(session_id, "
+                    "active_workspace_id, state_revision, updated_at) "
+                    "VALUES (?, ?, 1, ?)",
+                    (SESSION_ID, workspace, NOW_ISO),
+                )
+                await conn.execute(
+                    "DELETE FROM sessions WHERE session_id = ?", (SESSION_ID,)
+                )
+            assert (
+                await db.fetchone(
+                    "SELECT COUNT(*) AS c FROM session_workspace_state"
+                )
+            )["c"] == 0
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_failed_v3_migration_rolls_back_index_and_table(db_path: Path) -> None:
+    raw = sqlite3.connect(db_path)
+    try:
+        raw.execute(
+            "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, "
+            "applied_at TEXT NOT NULL, checksum TEXT NOT NULL)"
+        )
+        for version, script in migrations_mod.MIGRATIONS[:2]:
+            for statement in migrations_mod.split_sql_statements(script):
+                raw.execute(statement)
+            if version == 1:
+                raw.execute(
+                    "INSERT INTO runtime_state(singleton_id, active_run_id, updated_at) "
+                    "VALUES (1, NULL, ?)",
+                    (NOW_ISO,),
+                )
+            raw.execute(
+                "INSERT INTO schema_migrations(version, applied_at, checksum) "
+                "VALUES (?, ?, ?)",
+                (version, NOW_ISO, migrations_mod.migration_checksum(script)),
+            )
+        raw.commit()
+    finally:
+        raw.close()
+
+    bad_v3 = (
+        "CREATE UNIQUE INDEX workspaces_identity_by_session "
+        "ON workspaces(workspace_id, session_id);\n"
+        "CREATE TABLE tmp_v3_partial(x INTEGER);\n"
+        "INSERT INTO no_such_table(x) VALUES (1);"
+    )
+    original = migrations_mod.MIGRATIONS
+    migrations_mod.MIGRATIONS = (*original[:2], (3, bad_v3))  # type: ignore[assignment]
+    try:
+        with pytest.raises(sqlite3.Error):
+            _run(RuntimeDatabase.open(db_path))
+    finally:
+        migrations_mod.MIGRATIONS = original  # type: ignore[assignment]
+
+    raw = sqlite3.connect(db_path)
+    try:
+        names = {
+            row[0]
+            for row in raw.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table', 'index')"
+            ).fetchall()
+        }
+        versions = [
+            row[0]
+            for row in raw.execute(
+                "SELECT version FROM schema_migrations ORDER BY version"
+            ).fetchall()
+        ]
+    finally:
+        raw.close()
+    assert "workspaces_identity_by_session" not in names
+    assert "tmp_v3_partial" not in names
+    assert versions == [1, 2]
