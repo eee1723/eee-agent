@@ -6,17 +6,16 @@ don't re-discover them). Mirrors the auto-memory; kept in-repo so it travels wit
 
 ## Current development handoff
 
-The current cross-computer source of truth is
-`docs/handoffs/2026-07-16-runtime-b2b3-transfer.md`. The active development
-branch is `feature/runtime`. Task 16-B2b is Codex-accepted through `b2a1b80`
-after 325 focused, 621 cross-slice, and 2018 full offline tests plus a real
-Houdini 21.0.440 Workspace lifecycle smoke. Task 16-D1 remains accepted at
-`39f7346`. Task 16-E and Task 17 have not started and require separate bounded
-plans. Codex may implement a bounded slice directly; Claude Code is an optional
-worker only when the user explicitly chooses it and has quota. The current user
-preference is direct Codex implementation without Claude. Do not merge `main`
-or weaken the trusted Workspace, typed ChangeSet, approval, preflight,
-transactional Apply, or single-FIFO write boundaries while resuming work.
+The current source of truth is
+`docs/handoffs/2026-07-16-runtime-e-transfer.md`. The active branch is
+`feature/runtime`. Task 16-E is implemented, locally accepted, and included in
+the focused local Task 16-E commit after 2037 full offline tests, a hard-process
+receipt-recovery E2E, and the real Houdini 21.0.440 Task 16 smoke. It adds
+trusted Runtime Apply/recovery without a public Apply command or LLM write
+tool. Task 17 has not started and requires a separate bounded plan. Do not
+rewrite or discard the 16-E commit, merge `main`, or weaken the trusted
+Workspace, typed ChangeSet, approval, preflight, transactional Apply, receipt,
+recovery, or single-FIFO boundaries while resuming work.
 
 ## Golden rule
 **Verify, don't guess.** The user insists: when unsure about a Houdini/hou/deepagents

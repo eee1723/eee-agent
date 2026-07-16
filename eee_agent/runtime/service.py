@@ -3,15 +3,14 @@
 The service is the single coordination layer above the durable repositories
 (``SessionRepository``, ``RunRepository``, ``EventStore``), the LangGraph
 ``CheckpointManager``, and the provider-neutral ``AgentRunner``. It owns the
-application-database connection lifetime, the one in-memory active-run task
-reference, committed-event subscription delivery, restart reconciliation, and
-the successful-run event ordering.
+application-database connection lifetime, in-memory Run and typed Apply task
+references, committed-event subscription delivery, restart reconciliation,
+and successful Run/ChangeSet event ordering.
 
-It deliberately stays below the transport and identity layers: no network
-protocol, authentication, or exclusive process lock is implemented here (those
-arrive in later tasks). It never calls a live LLM or Houdini; the
-``RunnerFactory`` seam lets offline tests inject a controllable runner while
-production wires the real read-only graph.
+It deliberately stays below the Runtime transport and identity layers: no
+WebSocket authentication or exclusive process lock is implemented here. It
+never imports ``hou`` or returns a HOM object; injected runner and typed Bridge
+provider seams keep offline tests deterministic.
 """
 
 from __future__ import annotations
@@ -24,9 +23,21 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Mapping
 
-from eee_agent.changesets.contracts import ApprovalDecision, WorkspaceManifest
-from eee_agent.changesets.repository import ChangeSetRepository
+from eee_agent.changesets.contracts import (
+    ApprovalDecision,
+    ChangeSet,
+    PolicyDecision,
+    WorkspaceManifest,
+)
+from eee_agent.changesets.repository import (
+    ApplyCompletionResult,
+    ChangeSetRepository,
+    ProposalResult,
+)
 from eee_agent.changesets.service import (
+    ApplyOrchestrationError,
+    ChangeSetBridgeProvider,
+    ChangeSetRecoveryResult,
     ChangeSetService,
     expired_error,
     summary_from_decision,
@@ -195,6 +206,7 @@ class RuntimeService:
         graceful_timeout: float = _GRACEFUL_TIMEOUT_SECONDS,
         changeset_clock: "Callable[[], datetime] | None" = None,
         changeset_binding_provider: "Callable[[], object] | None" = None,
+        changeset_bridge_provider: ChangeSetBridgeProvider | None = None,
         workspace_fact_provider: WorkspaceFactProvider | None = None,
     ) -> None:
         self._database = database
@@ -208,6 +220,8 @@ class RuntimeService:
         self._events = EventStore(database)
         self._callbacks: set[EventCallback] = set()
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._apply_tasks: dict[str, asyncio.Task[ApplyCompletionResult]] = {}
+        self._pending_change_recovery: tuple[str, ...] = ()
         # Serializes run-state transitions: the from-state read, the transition
         # write, and the matching durable state-changed event append happen
         # atomically so a concurrent stop cannot make the recorded from-state
@@ -225,6 +239,7 @@ class RuntimeService:
             changeset_repository,
             clock=changeset_clock,
             binding_provider=changeset_binding_provider,  # type: ignore[arg-type]
+            bridge_provider=changeset_bridge_provider,
         )
         self._workspaces = WorkspaceService(
             changeset_repository,
@@ -254,6 +269,7 @@ class RuntimeService:
         graceful_timeout: float = _GRACEFUL_TIMEOUT_SECONDS,
         changeset_clock: "Callable[[], datetime] | None" = None,
         changeset_binding_provider: "Callable[[], object] | None" = None,
+        changeset_bridge_provider: ChangeSetBridgeProvider | None = None,
         workspace_fact_provider: WorkspaceFactProvider | None = None,
     ) -> AsyncIterator["RuntimeService"]:
         """Open a service in the approved order and close it in reverse.
@@ -280,6 +296,7 @@ class RuntimeService:
                 graceful_timeout=graceful_timeout,
                 changeset_clock=changeset_clock,
                 changeset_binding_provider=changeset_binding_provider,
+                changeset_bridge_provider=changeset_bridge_provider,
                 workspace_fact_provider=workspace_fact_provider,
             )
             await service._reconcile()
@@ -314,6 +331,21 @@ class RuntimeService:
                 raise checkpoint_cleanup_error
 
     async def _shutdown(self) -> None:
+        # A ChangeSet beyond the durable Applying boundary is independent of
+        # its caller. Give it the full graceful window before cancelling the
+        # client-side Bridge wait; cancellation leaves Applying for the next
+        # process to reconcile and never claims the scene is unchanged.
+        apply_items = [task for task in self._apply_tasks.values() if not task.done()]
+        if apply_items:
+            done, pending = await asyncio.wait(
+                apply_items, timeout=self._graceful_timeout
+            )
+            del done
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
         # Cancel in-memory run tasks and let them converge within the graceful
         # timeout. A task cancelled before it ever started never enters its
         # body, so its terminal-guarantee finally does not run either.
@@ -595,6 +627,72 @@ class RuntimeService:
     # ------------------------------------------------------------------
     # changeset approval operations
     # ------------------------------------------------------------------
+
+    async def propose_changeset_trusted(
+        self,
+        changeset: ChangeSet,
+        policy_decision: PolicyDecision,
+    ) -> ProposalResult:
+        """Persist a typed proposal from a trusted in-process compiler only."""
+        result = await self._changesets.propose(changeset, policy_decision)
+        for record in result.events:
+            await self._notify(record)
+        return result
+
+    async def apply_changeset_trusted(
+        self, change_id: str
+    ) -> ApplyCompletionResult:
+        """Join or start one trusted Apply task; caller cancellation is isolated."""
+        task = self._apply_tasks.get(change_id)
+        if task is None or task.done():
+            task = asyncio.create_task(self._apply_changeset_task(change_id))
+            self._apply_tasks[change_id] = task
+            task.add_done_callback(
+                lambda completed, cid=change_id: self._discard_apply_task(
+                    cid, completed
+                )
+            )
+        return await asyncio.shield(task)
+
+    async def _apply_changeset_task(
+        self, change_id: str
+    ) -> ApplyCompletionResult:
+        """Own Apply plus post-commit notifications independently of a waiter."""
+        try:
+            result = await self._changesets.apply(change_id)
+        except ApplyOrchestrationError as exc:
+            for record in exc.events:
+                await self._notify(record)
+            raise exc.cause from exc
+        for record in result.events:
+            await self._notify(record)
+        return result
+
+    def _discard_apply_task(
+        self,
+        change_id: str,
+        task: asyncio.Task[ApplyCompletionResult],
+    ) -> None:
+        if not task.cancelled():
+            # Mark a background exception retrieved even when the original
+            # waiter disconnected. Awaiting the task elsewhere still raises it.
+            task.exception()
+        if self._apply_tasks.get(change_id) is task:
+            self._apply_tasks.pop(change_id, None)
+
+    async def recover_changesets_trusted(
+        self,
+    ) -> tuple[ChangeSetRecoveryResult, ...]:
+        """Retry read-only reconciliation for every interrupted Apply."""
+        results = await self._changesets.recover_applying()
+        pending: list[str] = []
+        for result in results:
+            if result.pending:
+                pending.append(result.change_id)
+            for record in result.events:
+                await self._notify(record)
+        self._pending_change_recovery = tuple(pending)
+        return results
 
     async def _decide_changeset(
         self,
@@ -1030,3 +1128,4 @@ class RuntimeService:
                 {"error": _INTERRUPTED_ERROR.to_dict()},
                 RetentionClass.DURABLE,
             )
+        await self.recover_changesets_trusted()

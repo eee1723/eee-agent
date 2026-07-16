@@ -7,7 +7,7 @@ parms so a model can be reshaped without rebuilding.
 
 > **Read first each session:** `CLAUDE.md` (full context + gotchas) and the
 > current cross-computer handoff,
-> `docs/handoffs/2026-07-16-runtime-b2b3-transfer.md`. This README is the
+> `docs/handoffs/2026-07-16-runtime-e-transfer.md`. This README is the
 > orientation map; older handoffs retain milestone history.
 
 ## Architecture (three processes, deps isolated)
@@ -149,6 +149,11 @@ uv run --extra eval python -m eee_agent.runtime serve --help   # options
   not grant write permission. Explicit user intent outranks incidental
   selection, and ordinary nodes without all six EEE executor ownership mirrors
   are never silently adopted.
+- **Trusted ChangeSet Apply/recovery** - approved ChangeSets cross one durable
+  `Applying` boundary before typed Bridge I/O; terminal receipts commit with
+  state/events atomically, and restart recovery queries receipt/facts without
+  automatic replay. Apply remains an in-process trusted API, not a public raw
+  WebSocket command or LLM tool.
 - **Offline tests** — the full Runtime suite (incl. a real-subprocess restart E2E)
   runs with **no live LLM and no Houdini**. GLM-5.2 and Houdini read-only smokes
   are **manual only** and never block offline acceptance.
@@ -168,7 +173,7 @@ uv run --extra eval python -m eee_agent.runtime serve --help   # options
 | Observability | ✅ Phoenix one-click launcher + tool-error spans (runtime deps return in a later milestone) |
 | **Foundation milestone** | ✅ done — uv-locked deps, core contracts, provider registry (DeepSeek via official Anthropic endpoint), normalized events, explicit harness (no implicit `task`), `cli versions`. 369 tests pass. See `docs/handoffs/2026-07-13-foundation-migration.md` |
 | **Live end-to-end agent run on current machine** | ⏳ pending — bridge must be started in Houdini, then `selftest` + a `prompt` |
-| Runtime + typed Houdini ChangeSets | ✅ Complete through Task 16-B2b and D1 on `feature/runtime`; B2b activates the trusted Workspace lifecycle and D1 supports transactional create-under-created-parent plus create-then-set/connect. Task 16-E/UI have not started; branch is not merged. See `docs/handoffs/2026-07-16-runtime-b2b3-transfer.md` |
+| Runtime + typed Houdini ChangeSets | Complete through local Task 16-E acceptance on `feature/runtime`: trusted Workspace, ordered created references, transactional Apply, atomic receipts, and no-replay restart recovery. Task 16-E is committed locally but not pushed; Task 17 UI has not started. See `docs/handoffs/2026-07-16-runtime-e-transfer.md` |
 | B2 — per-component subagents | ⏳ deferred (largest change; after model swap) |
 | Eval framework | ⏳ scaffold (`eval/`), cases minimal |
 

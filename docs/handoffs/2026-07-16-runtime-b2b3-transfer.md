@@ -1,5 +1,9 @@
 # Runtime B2b-3 Cross-Computer Handoff - 2026-07-16
 
+> Historical handoff: Task 16-E was subsequently implemented in the local
+> working tree. Use `docs/handoffs/2026-07-16-runtime-e-transfer.md` as the
+> current source of truth.
+
 ## Start Here
 
 This is the current source of truth for moving EEE Agent Runtime development

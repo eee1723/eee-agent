@@ -71,6 +71,7 @@ _LAZY_WORKSPACES = {
 }
 
 __all__ = [
+    "BridgeChangeSetProvider",
     "APPLY_OPERATION",
     "ApplyRequest",
     "ApplyResponse",
@@ -120,6 +121,13 @@ __all__ = [
 
 def __getattr__(name: str) -> object:
     """Lazily resolve additive changeset symbols to avoid an import cycle."""
+    if name == "BridgeChangeSetProvider":
+        from eee_agent.houdini_bridge.changeset_provider import (
+            BridgeChangeSetProvider,
+        )
+
+        globals()[name] = BridgeChangeSetProvider
+        return BridgeChangeSetProvider
     if name in _LAZY_PREFLIGHT:
         from eee_agent.houdini_bridge import changesets as _mod
 

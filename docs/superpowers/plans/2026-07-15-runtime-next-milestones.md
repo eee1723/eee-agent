@@ -148,9 +148,10 @@ closes the residual intra-ChangeSet created-reference boundary: exact earlier
 created nodes may be set, connected, or used as create parents with JIT stale
 checks and the accepted rollback/freeze semantics. Its independent gate passed
 513 focused and 1872 full offline tests (the same optional WSL skip), plus a
-real Houdini 21.0.440 created-parent/created-endpoint smoke. B2b and 16-E remain
-unstarted and require separate bounded plans. See
-`docs/superpowers/reviews/2026-07-16-task16-d1-review-result.md`.
+real Houdini 21.0.440 created-parent/created-endpoint smoke. B2b was later
+accepted through `b2a1b80`; Task 16-E is implemented, locally accepted, and
+included in its focused local commit. See
+`docs/superpowers/reviews/2026-07-16-task16-e-review-result.md`.
 
 - Add immutable `ChangeSet`, precondition, approval, receipt, and validation contracts in a new milestone-specific spec.
 - Implement policy modes `OwnedWorkspace`, `ScopedPatch`, and `ProjectChange`; default-deny external nodes and all untyped effects.

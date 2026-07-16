@@ -2,7 +2,7 @@
 
 Run as::
 
-    python -m tests.runtime.runtime_process_fixture [complete|block|workspace|bridge|bridge_hang]
+    python -m tests.runtime.runtime_process_fixture [complete|block|workspace|bridge|bridge_hang|changeset_crash|changeset_recover]
 
 It opens the REAL ``RuntimeService`` and ``RuntimeWebSocketServer`` with a
 deterministic fake ``RunnerFactory`` (no live LLM and no in-process HOM),
@@ -29,15 +29,37 @@ Modes:
   Creating ``runtime_fixture_stop`` in ``state_dir`` requests a graceful exit.
 * ``bridge_hang``: the same production provider, but deliberately ignores the
   stop marker so parent-side launcher/worker process-tree cleanup can be tested.
+* ``changeset_crash``: persist Applying, record external Bridge receipt
+  evidence, then hard-exit before Runtime can commit the application receipt.
+* ``changeset_recover``: recover that Applying record from the external receipt
+  without invoking Apply a second time, then serve normally for readiness.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
+from eee_agent.changesets.contracts import (
+    ChangeReceipt,
+    ChangeSet,
+    CheckpointPlan,
+    ConditionResult,
+    NodeRef,
+    ParmValueEquals,
+    PermissionMode,
+    PolicyDecision,
+    ReceiptStatus,
+    RiskSummary,
+    SetParm,
+)
+from eee_agent.core import AgentError, AgentException, ErrorCategory
+from eee_agent.core.ids import IdKind, new_id
+from eee_agent.houdini_bridge.changesets import decode_change_receipt
 from eee_agent.houdini_bridge.contracts import SceneBinding
 from eee_agent.houdini_bridge.workspace_provider import (
     BridgeWorkspaceFactProvider,
@@ -56,6 +78,7 @@ from eee_agent.runtime.auth import (
 )
 from eee_agent.runtime.lock import RuntimeLock
 from eee_agent.runtime.models import RetentionClass
+from eee_agent.runtime.models import canonical_json_dumps
 from eee_agent.runtime.paths import RuntimePaths
 from eee_agent.runtime.server import RuntimeWebSocketServer
 from eee_agent.runtime.service import RuntimeService
@@ -65,6 +88,138 @@ _BIND_HOST = "127.0.0.1"
 _WORKSPACE_CONTROL = "workspace_fixture.json"
 _WORKSPACE_EVENT_ENTERED = "workspace_event_entered"
 _RUNTIME_FIXTURE_STOP = "runtime_fixture_stop"
+_CHANGESET_EFFECT = "changeset_effect.json"
+_CHANGESET_EFFECT_MARKER = "changeset_effect_committed"
+
+
+class _FileChangeSetProvider:
+    """Process-test Bridge evidence that survives the crashing Runtime."""
+
+    def __init__(self, state_dir: Path, *, crash_after_apply: bool) -> None:
+        self._state_dir = state_dir
+        self._path = state_dir / _CHANGESET_EFFECT
+        self._marker = state_dir / _CHANGESET_EFFECT_MARKER
+        self._crash_after_apply = crash_after_apply
+
+    @staticmethod
+    def _binding() -> SceneBinding:
+        return SceneBinding(
+            instance_id="hou_fixture_1",
+            scene_epoch=1,
+            hip_path=None,
+            observed_revision="fixture-scene-revision",
+        )
+
+    async def current_binding(self) -> SceneBinding:
+        return self._binding()
+
+    async def preflight(self, changeset, workspace):
+        raise AssertionError("receipt recovery must not preflight or replay")
+
+    async def apply(self, changeset: ChangeSet, workspace) -> ChangeReceipt:
+        count = 0
+        if self._path.exists():
+            count = int(json.loads(self._path.read_text(encoding="utf-8"))["apply_count"])
+        receipt = ChangeReceipt(
+            change_id=changeset.change_id,
+            status=ReceiptStatus.APPLIED,
+            instance_id=changeset.scene_binding.instance_id,
+            scene_epoch=changeset.scene_binding.scene_epoch,
+            before_revision=changeset.base_revision,
+            after_revision="b" * 64,
+            applied_op_ids=tuple(op.op_id for op in changeset.operations),
+            postcondition_results=(
+                ConditionResult(kind="parm.value_equals", passed=True),
+            ),
+            rollback_results=(),
+            scene_may_have_changed=False,
+            completed_at=datetime.now(timezone.utc),
+        )
+        self._path.write_text(
+            canonical_json_dumps(
+                {"apply_count": count + 1, "receipt": receipt.to_dict()}
+            ),
+            encoding="utf-8",
+        )
+        self._marker.write_text(changeset.change_id, encoding="utf-8")
+        if self._crash_after_apply:
+            os._exit(73)
+        return receipt
+
+    async def receipt(self, changeset: ChangeSet) -> ChangeReceipt:
+        try:
+            value = json.loads(self._path.read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise AgentException(
+                AgentError(
+                    code="changeset.receipt_unavailable",
+                    category=ErrorCategory.HOUDINI_BRIDGE,
+                    message_for_user="The fixture receipt is unavailable.",
+                )
+            ) from exc
+        receipt = decode_change_receipt(value["receipt"])
+        if receipt.change_id != changeset.change_id:
+            raise AssertionError("fixture receipt change_id mismatch")
+        return receipt
+
+
+async def _seed_crashing_changeset(service: RuntimeService) -> None:
+    session = await service.create_session("ChangeSet crash recovery")
+    run = await service.start_run(session.session_id, "seed trusted changeset")
+    run = await service.wait_for_run(run.run_id)
+    target = NodeRef(
+        node_id=None,
+        path="/obj/fixture",
+        expected_type="geo",
+        expected_workspace_id=None,
+    )
+    changeset = ChangeSet(
+        change_id=new_id(IdKind.CHANGE),
+        session_id=session.session_id,
+        run_id=run.run_id,
+        scene_binding=_FileChangeSetProvider._binding(),
+        workspace_id=None,
+        base_revision="a" * 64,
+        required_permission=PermissionMode.PROJECT_CHANGE,
+        scoped_node_ids=(),
+        operations=(
+            SetParm(
+                op_id="op_fixture_set",
+                target=target,
+                parm_name="tx",
+                value=1,
+                expected_old_value=0,
+            ),
+        ),
+        affected_nodes=(target,),
+        read_dependencies=(),
+        preconditions=(ParmValueEquals(target=target, parm_name="tx", value=0),),
+        expected_postconditions=(
+            ParmValueEquals(target=target, parm_name="tx", value=1),
+        ),
+        risk_summary=RiskSummary(
+            touches_external_nodes=True,
+            changes_wiring=False,
+            requires_backup=False,
+            operation_count=1,
+            effect_names=("parm.set",),
+            affected_paths=(target.path,),
+        ),
+        checkpoint_plan=CheckpointPlan(nodes=(), parameters=(), wires=()),
+        created_at=datetime.now(timezone.utc),
+    )
+    policy = PolicyDecision(
+        allowed=True,
+        mode=PermissionMode.PROJECT_CHANGE,
+        normalized_effects=("parm.set",),
+        approval_required=True,
+        backup_required=False,
+        denial_codes=(),
+        changeset_digest=changeset.digest,
+    )
+    await service.propose_changeset_trusted(changeset, policy)
+    await service.approve_changeset(changeset.change_id, changeset.digest)
+    await service.apply_changeset_trusted(changeset.change_id)
 
 
 class _CompletingFakeRunner:
@@ -236,6 +391,12 @@ def _runner_factory(mode: str):
 async def _serve(mode: str) -> None:
     paths = RuntimePaths.from_environment()
     paths.create_used_directories()
+    if mode == "changeset_crash":
+        for name in (_CHANGESET_EFFECT, _CHANGESET_EFFECT_MARKER):
+            try:
+                (paths.state_dir / name).unlink()
+            except FileNotFoundError:
+                pass
     with RuntimeLock(paths.lock_file):
         identity = create_identity()
         controlled_workspace_provider = (
@@ -247,6 +408,14 @@ async def _serve(mode: str) -> None:
             BridgeWorkspaceFactProvider(paths.state_dir)
             if mode in ("bridge", "bridge_hang")
             else controlled_workspace_provider
+        )
+        changeset_provider = (
+            _FileChangeSetProvider(
+                paths.state_dir,
+                crash_after_apply=mode == "changeset_crash",
+            )
+            if mode in ("changeset_crash", "changeset_recover")
+            else None
         )
         if controlled_workspace_provider is not None:
             try:
@@ -262,8 +431,12 @@ async def _serve(mode: str) -> None:
         async with RuntimeService.open(
             paths,
             runner_factory=_runner_factory(mode),
+            changeset_bridge_provider=changeset_provider,
             workspace_fact_provider=workspace_provider,
         ) as service:
+            if mode == "changeset_crash":
+                await _seed_crashing_changeset(service)
+                raise AssertionError("crash fixture Apply unexpectedly returned")
             if controlled_workspace_provider is not None:
                 original_append_conn = service._events._append_conn
 
@@ -338,6 +511,8 @@ def main() -> int:
         "workspace",
         "bridge",
         "bridge_hang",
+        "changeset_crash",
+        "changeset_recover",
     ):
         print(f"[fixture] unknown mode: {mode!r}", file=sys.stderr)
         return 2

@@ -169,6 +169,36 @@ class DecisionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ApplyStartResult:
+    """Committed transition across the Runtime write boundary."""
+
+    changeset: ChangeSet
+    approval: ApprovalRecord
+    events: tuple[EventRecord, ...]
+    reused_consumed_approval: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ApplyCompletionResult:
+    """Committed receipt, terminal state, and matching durable events."""
+
+    changeset: ChangeSet
+    receipt: ChangeReceipt
+    state: ChangeSetState
+    events: tuple[EventRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ApplyRecoveryResult:
+    """Committed no-write recovery back to explicit-retry eligibility."""
+
+    changeset: ChangeSet
+    approval: ApprovalRecord
+    state: ChangeSetState
+    events: tuple[EventRecord, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class WorkspaceStateRecord:
     """Persisted active-Workspace pointer for one Runtime Session."""
 
@@ -768,6 +798,14 @@ def _approval_binding_unavailable() -> AgentException:
     return _err(
         "bridge.capability_unavailable",
         "The current scene binding is not available.",
+    )
+
+
+def _approval_binding_mismatch() -> AgentException:
+    return _err(
+        "changeset.stale",
+        "The approved scene binding no longer matches the ChangeSet.",
+        category=ErrorCategory.STALE_SCENE,
     )
 
 
@@ -2019,6 +2057,168 @@ class ChangeSetRepository:
                 events,
             )
 
+    # --- combined transactional apply/recovery primitives ---------------
+
+    async def begin_apply(
+        self,
+        change_id: str,
+        *,
+        now: datetime,
+    ) -> ApplyStartResult:
+        """Consume approval and persist ``Applying`` before Bridge I/O.
+
+        A ChangeSet recovered to ``Approved`` retains its already-consumed
+        approval. An explicit trusted retry may cross the boundary again, but
+        the approval is never consumed or rewritten a second time.
+        """
+        events_store = self._events
+        if events_store is None:
+            raise TypeError("ChangeSetRepository.begin_apply requires an EventStore")
+        cid = _require_id_value(change_id, IdKind.CHANGE)
+        now_utc = _require_utc_datetime(now, "now")
+        async with self._database.write_transaction() as conn:
+            stored = await _fetch_stored_changeset(conn, cid)
+            if stored is None:
+                raise _changeset_not_found()
+            if stored.state is not ChangeSetState.APPROVED:
+                raise _cas_conflict()
+            approval = await _fetch_approval_record(conn, cid)
+            if approval is None:
+                raise _approval_required()
+            changeset = stored.changeset
+            if approval.changeset_digest != changeset.digest:
+                raise _approval_digest_mismatch()
+            binding = changeset.scene_binding
+            if (
+                approval.approved_instance_id != binding.instance_id
+                or approval.approved_scene_epoch != binding.scene_epoch
+            ):
+                raise _approval_binding_mismatch()
+
+            reused = approval.decision is ApprovalDecision.CONSUMED
+            if approval.decision is ApprovalDecision.APPROVED:
+                if now_utc > approval.expires_at:
+                    raise _approval_expired()
+                approval = await self._consume_approval_conn(conn, approval, now_utc)
+            elif not reused:
+                raise _approval_already_consumed()
+
+            await self._transition_state_conn(
+                conn, cid, ChangeSetState.APPROVED, ChangeSetState.APPLYING
+            )
+            event = await events_store._append_conn(
+                conn,
+                session_id=changeset.session_id,
+                run_id=changeset.run_id,
+                event_type="changeset.state_changed",
+                payload=_state_changed_payload(
+                    cid, ChangeSetState.APPROVED, ChangeSetState.APPLYING
+                ),
+                retention_class=RetentionClass.DURABLE,
+            )
+            return ApplyStartResult(changeset, approval, (event,), reused)
+
+    async def complete_apply(
+        self,
+        receipt: ChangeReceipt,
+    ) -> ApplyCompletionResult:
+        """Atomically persist a reconciled receipt, state, and events."""
+        if type(receipt) is not ChangeReceipt:
+            raise TypeError("receipt must be an exact ChangeReceipt")
+        events_store = self._events
+        if events_store is None:
+            raise TypeError("ChangeSetRepository.complete_apply requires an EventStore")
+        cid = receipt.change_id
+        target = _state_for_receipt(receipt.status)
+        async with self._database.write_transaction() as conn:
+            stored = await _fetch_stored_changeset(conn, cid)
+            if stored is None:
+                raise _changeset_not_found()
+            changeset = stored.changeset
+            if receipt.status in (
+                ReceiptStatus.APPLIED,
+                ReceiptStatus.ALREADY_APPLIED,
+                ReceiptStatus.ROLLED_BACK,
+            ) and (
+                receipt.instance_id != changeset.scene_binding.instance_id
+                or receipt.scene_epoch != changeset.scene_binding.scene_epoch
+            ):
+                raise _approval_binding_mismatch()
+
+            existing = await _fetch_receipt_record(conn, cid)
+            if existing is not None:
+                if _storage_digest(existing) != _storage_digest(receipt):
+                    raise _receipt_conflict()
+                if stored.state is not target:
+                    raise _record_corrupt()
+                return ApplyCompletionResult(changeset, existing, target, ())
+            if stored.state is not ChangeSetState.APPLYING:
+                raise _cas_conflict()
+
+            await self._insert_receipt_conn(conn, receipt)
+            await self._transition_state_conn(
+                conn, cid, ChangeSetState.APPLYING, target
+            )
+            state_event = await events_store._append_conn(
+                conn,
+                session_id=changeset.session_id,
+                run_id=changeset.run_id,
+                event_type="changeset.state_changed",
+                payload=_state_changed_payload(cid, ChangeSetState.APPLYING, target),
+                retention_class=RetentionClass.DURABLE,
+            )
+            outcome_event = await events_store._append_conn(
+                conn,
+                session_id=changeset.session_id,
+                run_id=changeset.run_id,
+                event_type=_event_for_receipt(receipt.status),
+                payload=_receipt_event_payload(changeset, receipt, target),
+                retention_class=RetentionClass.DURABLE,
+            )
+            return ApplyCompletionResult(
+                changeset, receipt, target, (state_event, outcome_event)
+            )
+
+    async def recover_to_approved(self, change_id: str) -> ApplyRecoveryResult:
+        """Persist a proven no-write recovery without replaying the ChangeSet."""
+        events_store = self._events
+        if events_store is None:
+            raise TypeError(
+                "ChangeSetRepository.recover_to_approved requires an EventStore"
+            )
+        cid = _require_id_value(change_id, IdKind.CHANGE)
+        async with self._database.write_transaction() as conn:
+            stored = await _fetch_stored_changeset(conn, cid)
+            if stored is None:
+                raise _changeset_not_found()
+            if stored.state is not ChangeSetState.APPLYING:
+                raise _cas_conflict()
+            approval = await _fetch_approval_record(conn, cid)
+            if approval is None or approval.decision is not ApprovalDecision.CONSUMED:
+                raise _record_corrupt()
+            await self._transition_state_conn(
+                conn, cid, ChangeSetState.APPLYING, ChangeSetState.APPROVED
+            )
+            event = await events_store._append_conn(
+                conn,
+                session_id=stored.changeset.session_id,
+                run_id=stored.changeset.run_id,
+                event_type="changeset.state_changed",
+                payload={
+                    **_state_changed_payload(
+                        cid, ChangeSetState.APPLYING, ChangeSetState.APPROVED
+                    ),
+                    "reason": "before_state_recovered",
+                },
+                retention_class=RetentionClass.DURABLE,
+            )
+            return ApplyRecoveryResult(
+                stored.changeset,
+                approval,
+                ChangeSetState.APPROVED,
+                (event,),
+            )
+
     # --- shared internal helpers -----------------------------------------
 
     @staticmethod
@@ -2107,6 +2307,67 @@ class ChangeSetRepository:
             ),
         )
 
+    @staticmethod
+    async def _consume_approval_conn(
+        conn,
+        approval: ApprovalRecord,
+        now: datetime,
+    ) -> ApprovalRecord:
+        """Connection-scoped exact Approved -> Consumed transition."""
+        consumed = ApprovalRecord(
+            schema_version=approval.schema_version,
+            approval_id=approval.approval_id,
+            change_id=approval.change_id,
+            changeset_digest=approval.changeset_digest,
+            decision=ApprovalDecision.CONSUMED,
+            decided_by="local_user",
+            requested_at=approval.requested_at,
+            decided_at=now,
+            expires_at=approval.expires_at,
+            approved_instance_id=approval.approved_instance_id,
+            approved_scene_epoch=approval.approved_scene_epoch,
+        )
+        payload = canonical_json_dumps(consumed.to_dict())
+        digest = _storage_digest(consumed)
+        cursor = await conn.execute(
+            "UPDATE approvals SET decision = ?, decided_by = ?, decided_at = ?, "
+            "updated_at = ?, digest = ?, payload_json = ? "
+            "WHERE change_id = ? AND approval_id = ? AND decision = ?",
+            (
+                ApprovalDecision.CONSUMED.value,
+                "local_user",
+                now.isoformat(),
+                now.isoformat(),
+                digest,
+                payload,
+                approval.change_id,
+                approval.approval_id,
+                ApprovalDecision.APPROVED.value,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise _cas_conflict()
+        return consumed
+
+    @staticmethod
+    async def _insert_receipt_conn(conn, receipt: ChangeReceipt) -> None:
+        payload = canonical_json_dumps(receipt.to_dict())
+        digest = _storage_digest(receipt)
+        await conn.execute(
+            f"INSERT INTO change_receipts({_RECEIPT_COLUMNS}) VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                receipt.change_id,
+                receipt.status.value,
+                receipt.instance_id,
+                receipt.scene_epoch,
+                digest,
+                payload,
+                receipt.completed_at.isoformat(),
+                receipt.schema_version,
+            ),
+        )
+
 
 def _stored_from_row(row) -> StoredChangeSet:
     _verify_payload(row["payload_json"], row["digest"])
@@ -2151,6 +2412,35 @@ async def _fetch_approval_record(conn, change_id: str) -> ApprovalRecord | None:
     return approval
 
 
+async def _fetch_receipt_record(conn, change_id: str) -> ChangeReceipt | None:
+    cursor = await conn.execute(
+        f"SELECT {_RECEIPT_COLUMNS} FROM change_receipts WHERE change_id = ?",
+        (change_id,),
+    )
+    row = await cursor.fetchone()
+    if row is None:
+        return None
+    return _decode_row(row, "payload_json", "digest", _decode_receipt)
+
+
+def _state_for_receipt(status: ReceiptStatus) -> ChangeSetState:
+    if status in (ReceiptStatus.APPLIED, ReceiptStatus.ALREADY_APPLIED):
+        return ChangeSetState.APPLIED
+    if status is ReceiptStatus.ROLLED_BACK:
+        return ChangeSetState.ROLLED_BACK
+    if status in (ReceiptStatus.PARTIAL, ReceiptStatus.CRITICAL_RECOVERY):
+        return ChangeSetState.CRITICAL_RECOVERY
+    raise TypeError("unsupported receipt status")
+
+
+def _event_for_receipt(status: ReceiptStatus) -> str:
+    if status in (ReceiptStatus.APPLIED, ReceiptStatus.ALREADY_APPLIED):
+        return "changeset.applied"
+    if status is ReceiptStatus.ROLLED_BACK:
+        return "changeset.rolled_back"
+    return "recovery.critical"
+
+
 def _state_changed_payload(
     change_id: str, from_state: ChangeSetState, to_state: ChangeSetState
 ) -> dict[str, object]:
@@ -2158,6 +2448,25 @@ def _state_changed_payload(
         "change_id": change_id,
         "from": from_state.value,
         "to": to_state.value,
+    }
+
+
+def _receipt_event_payload(
+    changeset: ChangeSet,
+    receipt: ChangeReceipt,
+    state: ChangeSetState,
+) -> dict[str, object]:
+    return {
+        "change_id": changeset.change_id,
+        "changeset_digest": changeset.digest,
+        "state": state.value,
+        "receipt_status": receipt.status.value,
+        "instance_id": receipt.instance_id,
+        "scene_epoch": receipt.scene_epoch,
+        "before_revision": receipt.before_revision,
+        "after_revision": receipt.after_revision,
+        "applied_op_ids": list(receipt.applied_op_ids),
+        "scene_may_have_changed": receipt.scene_may_have_changed,
     }
 
 

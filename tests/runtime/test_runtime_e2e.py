@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -42,6 +43,8 @@ _DISCOVERY_POLL_TIMEOUT = 30.0
 _DISCOVERY_POLL_INTERVAL = 0.05
 _WORKSPACE_CONTROL = "workspace_fixture.json"
 _WORKSPACE_EVENT_ENTERED = "workspace_event_entered"
+_CHANGESET_EFFECT = "changeset_effect.json"
+_CHANGESET_EFFECT_MARKER = "changeset_effect_committed"
 
 
 def _cmd(request_id: str, type_: str, payload: dict) -> dict:
@@ -297,6 +300,15 @@ def _remove_workspace_control(home: Path) -> None:
         (home / "state" / _WORKSPACE_CONTROL).unlink()
     except FileNotFoundError:
         pass
+
+
+def _wait_for_file(path: Path, *, timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        time.sleep(0.02)
+    raise AssertionError(f"fixture file did not appear: {path.name}")
 
 
 def test_workspace_control_publication_uses_atomic_replace(
@@ -684,7 +696,72 @@ def test_restart_reconciles_interrupted_run_as_failed(runtime_home: Path) -> Non
 
 
 # --------------------------------------------------------------------------
-# 3. trusted Workspace lifecycle through the public process boundary
+# 3. ChangeSet crash after Bridge effect, receipt-only restart recovery
+# --------------------------------------------------------------------------
+
+
+def test_restart_recovers_changeset_receipt_without_duplicate_apply(
+    runtime_home: Path,
+) -> None:
+    crash = _FixtureProcess(runtime_home, mode="changeset_crash")
+    crash.start()
+    marker = runtime_home / "state" / _CHANGESET_EFFECT_MARKER
+    try:
+        _wait_for_file(marker)
+        assert crash.proc is not None
+        crash.proc.wait(timeout=10)
+    finally:
+        crash.stop()
+
+    db_path = runtime_home / "state" / "app.sqlite"
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        applying = conn.execute(
+            "SELECT change_id, state FROM changesets"
+        ).fetchone()
+        assert applying is not None
+        change_id = applying["change_id"]
+        assert applying["state"] == "Applying"
+        approval = conn.execute(
+            "SELECT decision FROM approvals WHERE change_id = ?", (change_id,)
+        ).fetchone()
+        assert approval["decision"] == "Consumed"
+        assert conn.execute(
+            "SELECT COUNT(*) FROM change_receipts WHERE change_id = ?", (change_id,)
+        ).fetchone()[0] == 0
+
+    recovery = _FixtureProcess(runtime_home, mode="changeset_recover")
+    recovery.start()
+    try:
+        recovery.wait_for_discovery()
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            stored = conn.execute(
+                "SELECT state FROM changesets WHERE change_id = ?", (change_id,)
+            ).fetchone()
+            assert stored["state"] == "Applied"
+            receipt = conn.execute(
+                "SELECT status FROM change_receipts WHERE change_id = ?",
+                (change_id,),
+            ).fetchone()
+            assert receipt["status"] == "Applied"
+            events = conn.execute(
+                "SELECT event_type FROM events WHERE event_type IN "
+                "('changeset.applied', 'recovery.critical') ORDER BY seq"
+            ).fetchall()
+            assert [row["event_type"] for row in events] == ["changeset.applied"]
+    finally:
+        recovery.stop()
+
+    evidence = json.loads(
+        (runtime_home / "state" / _CHANGESET_EFFECT).read_text(encoding="utf-8")
+    )
+    assert evidence["apply_count"] == 1
+    assert evidence["receipt"]["change_id"] == change_id
+
+
+# --------------------------------------------------------------------------
+# 4. trusted Workspace lifecycle through the public process boundary
 # --------------------------------------------------------------------------
 
 
