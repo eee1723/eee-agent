@@ -19,6 +19,13 @@ def houdini_21_minimal_catalog() -> NodeCatalog:
     return NodeCatalog(
         entries=(
             NodeTypeDefinition(
+                node_type="geo",
+                parameters=(),
+                max_inputs=1,
+                max_output_index=0,
+                can_parent_nodes=True,
+            ),
+            NodeTypeDefinition(
                 node_type="box",
                 parameters=(
                     ParmDefinition("sizex", 1.0),

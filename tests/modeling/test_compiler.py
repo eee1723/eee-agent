@@ -26,6 +26,8 @@ from eee_agent.modeling.compiler import (
     NodeCatalog,
     NodeTypeDefinition,
     ParmDefinition,
+    WorkspaceBootstrapContext,
+    compile_bootstrap_procedural_spec,
     compile_procedural_spec,
 )
 from eee_agent.modeling.contracts import (
@@ -112,6 +114,13 @@ def _profile(**overrides: object) -> QualityProfile:
 def _catalog() -> NodeCatalog:
     return NodeCatalog(
         entries=(
+            NodeTypeDefinition(
+                node_type="geo",
+                parameters=(),
+                max_inputs=1,
+                max_output_index=0,
+                can_parent_nodes=True,
+            ),
             NodeTypeDefinition(
                 node_type="box",
                 parameters=(
@@ -202,6 +211,30 @@ def _compile(**overrides: object):
     return compile_procedural_spec(**values)
 
 
+def _compile_bootstrap(**overrides: object):
+    brief = overrides.pop("brief", _brief())
+    spec = overrides.pop(
+        "spec", _spec(brief, workspace_root_node_id="bootstrap_root")
+    )
+    values: dict[str, object] = {
+        "brief": brief,
+        "spec": spec,
+        "quality_profile": _profile(),
+        "catalog": _catalog(),
+        "bootstrap": WorkspaceBootstrapContext(
+            workspace_id=WS,
+            root_name="eee_model",
+        ),
+        "scene_binding": _binding(observed_revision="a" * 64),
+        "session_id": SES,
+        "run_id": RUN,
+        "change_id": CHG,
+        "created_at": NOW,
+    }
+    values.update(overrides)
+    return compile_bootstrap_procedural_spec(**values)
+
+
 def test_compile_is_deterministic_and_policy_allowed() -> None:
     first = _compile()
     second = _compile()
@@ -212,6 +245,61 @@ def test_compile_is_deterministic_and_policy_allowed() -> None:
     assert changeset.required_permission is PermissionMode.OWNED_WORKSPACE
     assert changeset.workspace_id == WS
     assert evaluate_policy(changeset, workspace=_workspace()).allowed is True
+
+
+def test_bootstrap_compile_is_deterministic_project_change() -> None:
+    first = _compile_bootstrap()
+    second = _compile_bootstrap()
+    assert first.to_dict() == second.to_dict()
+    changeset = first.changeset
+    assert changeset.workspace_id is None
+    assert changeset.required_permission is PermissionMode.PROJECT_CHANGE
+    assert changeset.base_revision == "a" * 64
+    assert evaluate_policy(changeset, workspace=None).allowed is True
+    assert [type(op) for op in changeset.operations] == [
+        CreateNode,
+        CreateNode,
+        CreateNode,
+        SetParm,
+        SetParm,
+        ConnectInput,
+    ]
+    root = changeset.operations[0]
+    assert isinstance(root, CreateNode)
+    assert root.parent.path == "/obj"
+    assert root.node_type == "geo"
+    assert root.node_name == "eee_model"
+    assert root.workspace_id == WS
+    assert changeset.affected_nodes[0].path == "/obj/eee_model"
+    assert changeset.risk_summary.touches_external_nodes is True
+    assert not any(
+        isinstance(item, WorkspaceRevisionEquals)
+        for item in changeset.preconditions
+    )
+
+
+def test_bootstrap_compile_binds_sentinel_catalog_and_workspace_identity() -> None:
+    with pytest.raises(ModelingCompileError) as exc:
+        _compile_bootstrap(spec=_spec(workspace_root_node_id="n_workspace"))
+    assert exc.value.code == "modeling.bootstrap_root_invalid"
+
+    catalog = NodeCatalog(
+        entries=tuple(
+            item for item in _catalog().entries if item.node_type != "geo"
+        )
+    )
+    with pytest.raises(ModelingCompileError) as exc:
+        _compile_bootstrap(catalog=catalog)
+    assert exc.value.code == "modeling.bootstrap_catalog_invalid"
+
+    other = WorkspaceBootstrapContext(
+        workspace_id=f"ws_{'9' * 32}",
+        root_name="eee_model",
+    )
+    assert (
+        _compile_bootstrap().changeset.affected_nodes
+        != _compile_bootstrap(bootstrap=other).changeset.affected_nodes
+    )
 
 
 def test_compile_derives_operations_defaults_conditions_and_risk() -> None:

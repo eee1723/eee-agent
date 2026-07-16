@@ -6,6 +6,8 @@ from eee_agent.modeling.compiler import (
     NodeCatalog,
     NodeTypeDefinition,
     ParmDefinition,
+    WorkspaceBootstrapContext,
+    compile_bootstrap_procedural_spec,
     compile_procedural_spec,
 )
 from eee_agent.modeling.catalog import (
@@ -60,6 +62,8 @@ __all__ = [
     "RepairTicket",
     "UnitSystem",
     "ValidatorKind",
+    "WorkspaceBootstrapContext",
+    "compile_bootstrap_procedural_spec",
     "compile_procedural_spec",
     "houdini_21_minimal_catalog",
     "houdini_21_minimal_quality_profile",

@@ -1,8 +1,15 @@
 # Task 18-D Empty-scene Workspace Bootstrap Plan
 
+**Status:** D1 pure compiler implemented locally; D2 durable finalization is
+next. Focused modeling gate: 38 passed.
+
 **Design:** `docs/superpowers/specs/2026-07-17-task18-d-empty-scene-bootstrap-design.md`
 
 ## Slice D1 - contracts and pure compiler
+
+**Completed:** `WorkspaceBootstrapContext`, verified `geo` catalog entry, and
+deterministic `ProjectChange` bootstrap compilation are implemented without
+Runtime/Bridge/database imports.
 
 - Add exact frozen bootstrap context/result contracts under
   `eee_agent/modeling`.
@@ -46,4 +53,3 @@ uv lock --check
 uv run --frozen --extra eval python -m compileall -q eee_agent houdini_side tests
 git diff --check
 ```
-

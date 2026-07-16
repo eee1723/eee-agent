@@ -25,6 +25,7 @@ from eee_agent.changesets.contracts import (
     WorkspaceRevisionEquals,
 )
 from eee_agent.changesets.policy import evaluate_policy
+from eee_agent.core.ids import IdKind, require_id
 from eee_agent.houdini_bridge.contracts import SceneBinding
 from eee_agent.modeling.contracts import (
     ModelingBrief,
@@ -195,6 +196,42 @@ class CompilationResult:
             "spec_digest": self.spec_digest,
             "catalog_digest": self.catalog_digest,
             "changeset": self.changeset.to_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceBootstrapContext:
+    """Trusted facts for compiling the first owned graph in an empty scene."""
+
+    workspace_id: str
+    root_name: str
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        if type(self.schema_version) is not int or self.schema_version != 1:
+            raise ValueError("WorkspaceBootstrapContext.schema_version must be 1")
+        require_id(self.workspace_id, IdKind.WORKSPACE)
+        probe = NodeSpec(
+            node_key="bootstrap_root",
+            node_type="geo",
+            node_name=self.root_name,
+            parent_node=None,
+            parameters=(),
+            inputs=(),
+        )
+        object.__setattr__(self, "root_name", probe.node_name)
+
+    @property
+    def digest(self) -> str:
+        return hashlib.sha256(
+            canonical_json_dumps(self.to_dict()).encode("utf-8")
+        ).hexdigest()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "workspace_id": self.workspace_id,
+            "root_name": self.root_name,
         }
 
 
@@ -592,11 +629,270 @@ def compile_procedural_spec(
     )
 
 
+def compile_bootstrap_procedural_spec(
+    *,
+    brief: ModelingBrief,
+    spec: ProceduralSpec,
+    quality_profile: QualityProfile,
+    catalog: NodeCatalog,
+    bootstrap: WorkspaceBootstrapContext,
+    scene_binding: SceneBinding,
+    session_id: str,
+    run_id: str,
+    change_id: str,
+    created_at: datetime,
+) -> CompilationResult:
+    """Compile the first owned graph without a provisional WorkspaceManifest."""
+    if type(brief) is not ModelingBrief:
+        raise TypeError("brief must be an exact ModelingBrief")
+    if type(spec) is not ProceduralSpec:
+        raise TypeError("spec must be an exact ProceduralSpec")
+    if type(quality_profile) is not QualityProfile:
+        raise TypeError("quality_profile must be an exact QualityProfile")
+    if type(catalog) is not NodeCatalog:
+        raise TypeError("catalog must be an exact NodeCatalog")
+    if type(bootstrap) is not WorkspaceBootstrapContext:
+        raise TypeError("bootstrap must be an exact WorkspaceBootstrapContext")
+    if type(scene_binding) is not SceneBinding:
+        raise TypeError("scene_binding must be an exact SceneBinding")
+    if spec.brief_digest != brief.digest:
+        raise _error(
+            "modeling.brief_mismatch",
+            "The ProceduralSpec does not bind the supplied ModelingBrief.",
+        )
+    if spec.quality_profile_id != quality_profile.profile_id:
+        raise _error(
+            "modeling.profile_mismatch",
+            "The ProceduralSpec does not bind the supplied QualityProfile.",
+        )
+    if spec.workspace_root_node_id != "bootstrap_root":
+        raise _error(
+            "modeling.bootstrap_root_invalid",
+            "A bootstrap ProceduralSpec must use the bootstrap_root sentinel.",
+        )
+
+    ordered = _topological_nodes(spec)
+    if len(ordered) + 1 > quality_profile.max_compiled_nodes:
+        raise _error(
+            "modeling.node_budget_exceeded",
+            "The bootstrap graph exceeds the QualityProfile node budget.",
+        )
+    definitions = _validate_catalog(ordered, catalog)
+    root_definition = catalog.by_type.get("geo")
+    if root_definition is None or not root_definition.can_parent_nodes:
+        raise _error(
+            "modeling.bootstrap_catalog_invalid",
+            "The trusted catalog does not contain the verified geo root.",
+        )
+
+    spec_digest = spec.digest
+    stable_seed = hashlib.sha256(
+        f"{spec_digest}:{bootstrap.digest}".encode("utf-8")
+    ).hexdigest()
+    parent_ref = NodeRef(
+        node_id=None,
+        path="/obj",
+        expected_type="obj",
+        expected_workspace_id=None,
+    )
+    root_ref = NodeRef(
+        node_id=f"n_{_stable_suffix(stable_seed, 'node', 'bootstrap_root')}",
+        path=f"/obj/{bootstrap.root_name}",
+        expected_type="geo",
+        expected_workspace_id=bootstrap.workspace_id,
+    )
+    root_create = CreateNode(
+        op_id=f"op_create_{_stable_suffix(stable_seed, 'create', 'bootstrap_root')}",
+        parent=parent_ref,
+        node_id=root_ref.node_id or "",
+        node_type="geo",
+        node_name=bootstrap.root_name,
+        workspace_id=bootstrap.workspace_id,
+        capability="modeling",
+        role="root",
+    )
+
+    node_refs: dict[str, NodeRef] = {}
+    create_ops: list[CreateNode] = [root_create]
+    created_paths: set[str] = {root_ref.path}
+    roles = {component.component_id: component.role for component in spec.components}
+    for item in ordered:
+        logical_parent = item.spec.parent_node
+        node_parent = root_ref if logical_parent is None else node_refs[logical_parent]
+        path = f"{node_parent.path.rstrip('/')}/{item.spec.node_name}"
+        if path in created_paths:
+            raise _error(
+                "modeling.path_collision",
+                f"Compiled node path {path!r} is duplicated.",
+            )
+        created_paths.add(path)
+        node_id = f"n_{_stable_suffix(stable_seed, 'node', item.qualified_key)}"
+        ref = NodeRef(
+            node_id=node_id,
+            path=path,
+            expected_type=item.spec.node_type,
+            expected_workspace_id=bootstrap.workspace_id,
+        )
+        node_refs[item.qualified_key] = ref
+        create_ops.append(
+            CreateNode(
+                op_id=(
+                    f"op_create_"
+                    f"{_stable_suffix(stable_seed, 'create', item.qualified_key)}"
+                ),
+                parent=node_parent,
+                node_id=node_id,
+                node_type=item.spec.node_type,
+                node_name=item.spec.node_name,
+                workspace_id=bootstrap.workspace_id,
+                capability="modeling",
+                role=roles[item.component_id],
+            )
+        )
+
+    parm_ops: list[SetParm] = []
+    wire_ops: list[ConnectInput] = []
+    parm_postconditions: list[ParmValueEquals] = []
+    wire_postconditions: list[WireInputEquals] = []
+    for item in ordered:
+        target = node_refs[item.qualified_key]
+        defaults = definitions[item.qualified_key].parameters_by_name
+        for assignment in item.spec.parameters:
+            default = defaults[assignment.parm_name].default_value
+            parm_ops.append(
+                SetParm(
+                    op_id=(
+                        f"op_parm_"
+                        f"{_stable_suffix(stable_seed, 'parm', item.qualified_key + '.' + assignment.parm_name)}"
+                    ),
+                    target=target,
+                    parm_name=assignment.parm_name,
+                    value=assignment.value,
+                    expected_old_value=default,
+                )
+            )
+            parm_postconditions.append(
+                ParmValueEquals(
+                    target=target,
+                    parm_name=assignment.parm_name,
+                    value=assignment.value,
+                )
+            )
+        for binding in item.spec.inputs:
+            source = node_refs[binding.source_node]
+            wire_ops.append(
+                ConnectInput(
+                    op_id=(
+                        f"op_wire_"
+                        f"{_stable_suffix(stable_seed, 'wire', item.qualified_key + '.' + str(binding.input_index))}"
+                    ),
+                    target=target,
+                    input_index=binding.input_index,
+                    source=source,
+                    source_output_index=binding.source_output_index,
+                    expected_old_source=None,
+                )
+            )
+            wire_postconditions.append(
+                WireInputEquals(
+                    target=target,
+                    input_index=binding.input_index,
+                    source=WireRef(
+                        source=source,
+                        source_output_index=binding.source_output_index,
+                    ),
+                )
+            )
+
+    operations = tuple([*create_ops, *parm_ops, *wire_ops])
+    affected_nodes = (root_ref,) + tuple(
+        node_refs[item.qualified_key] for item in ordered
+    )
+    if len(operations) > _MAX_CHANGESET_OPERATIONS:
+        raise _error(
+            "modeling.operation_budget_exceeded",
+            "The bootstrap graph exceeds the typed ChangeSet operation budget.",
+        )
+    if len(affected_nodes) + 2 > _MAX_CHANGESET_CONDITIONS:
+        raise _error(
+            "modeling.condition_budget_exceeded",
+            "The bootstrap graph exceeds the typed ChangeSet precondition budget.",
+        )
+    if (
+        len(affected_nodes)
+        + len(parm_postconditions)
+        + len(wire_postconditions)
+        > _MAX_CHANGESET_CONDITIONS
+    ):
+        raise _error(
+            "modeling.condition_budget_exceeded",
+            "The bootstrap graph exceeds the typed ChangeSet postcondition budget.",
+        )
+    preconditions = (
+        SceneBindingEquals(
+            instance_id=scene_binding.instance_id,
+            scene_epoch=scene_binding.scene_epoch,
+        ),
+        NodeIdentityEquals(node=parent_ref),
+        *(NodeAbsent(path=ref.path, node_id=ref.node_id or "") for ref in affected_nodes),
+    )
+    postconditions = (
+        *(NodeIdentityEquals(node=ref) for ref in affected_nodes),
+        *parm_postconditions,
+        *wire_postconditions,
+    )
+    effect_names = tuple(sorted({operation.effect.value for operation in operations}))
+    try:
+        changeset = ChangeSet(
+            change_id=change_id,
+            session_id=session_id,
+            run_id=run_id,
+            scene_binding=scene_binding,
+            workspace_id=None,
+            base_revision=scene_binding.observed_revision,
+            required_permission=PermissionMode.PROJECT_CHANGE,
+            scoped_node_ids=(),
+            operations=operations,
+            affected_nodes=affected_nodes,
+            read_dependencies=(parent_ref,),
+            preconditions=preconditions,
+            expected_postconditions=postconditions,
+            risk_summary=RiskSummary(
+                touches_external_nodes=True,
+                changes_wiring=bool(wire_ops),
+                requires_backup=False,
+                operation_count=len(operations),
+                effect_names=effect_names,
+                affected_paths=tuple(ref.path for ref in affected_nodes),
+            ),
+            checkpoint_plan=CheckpointPlan(nodes=(), parameters=(), wires=()),
+            created_at=created_at,
+        )
+    except (TypeError, ValueError) as exc:
+        raise _error(
+            "modeling.changeset_invalid",
+            "The bootstrap graph could not satisfy the typed ChangeSet contract.",
+        ) from exc
+    decision = evaluate_policy(changeset, workspace=None)
+    if not decision.allowed:
+        raise _error(
+            "modeling.policy_denied",
+            "The bootstrap ChangeSet was denied by the trusted policy engine.",
+        )
+    return CompilationResult(
+        spec_digest=spec_digest,
+        catalog_digest=catalog.digest,
+        changeset=changeset,
+    )
+
+
 __all__ = [
     "CompilationResult",
     "ModelingCompileError",
     "NodeCatalog",
     "NodeTypeDefinition",
     "ParmDefinition",
+    "WorkspaceBootstrapContext",
+    "compile_bootstrap_procedural_spec",
     "compile_procedural_spec",
 ]
