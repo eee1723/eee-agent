@@ -1,5 +1,8 @@
 # Task 18-A Strict Modeling Foundation Plan
 
+**Status:** Accepted locally at `09ea256` after focused 237-test and full
+2132-test offline gates. Task 18-B is not started.
+
 **Goal:** Add strict model-facing modeling contracts and a deterministic,
 catalog-gated compiler that produces an existing trusted typed ChangeSet
 without exposing write authority.
@@ -106,4 +109,3 @@ evidence, and commit Task 18-A as one focused implementation commit plus a
 status/acceptance documentation commit.
 
 Do not start Task 18-B or request real Houdini testing as a side effect.
-

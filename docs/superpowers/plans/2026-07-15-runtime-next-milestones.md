@@ -218,6 +218,13 @@ covered offline until Task 18 can produce trusted proposals.
 
 ## Task 18: Strict modeling capability
 
+**Current state:** Task 18-A (strict Brief/Spec/Component/QualityProfile/
+RepairTicket contracts and catalog-gated deterministic compiler) is accepted
+locally at `09ea256` after 237 focused and 2132 full offline tests. Task 18-B
+(Runtime proposal capability) has not started and requires its own bounded
+design/plan plus a Houdini-verified production catalog before real approval/
+Apply testing.
+
 **Dependency:** Tasks 15–17.
 
 - Define Brief/Spec/Component schemas, compiler output, staging, reconciler, deterministic validators, repair tickets, repair budget, QualityProfile, and Golden Cases.
