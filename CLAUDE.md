@@ -7,9 +7,9 @@ don't re-discover them). Mirrors the auto-memory; kept in-repo so it travels wit
 ## Current development handoff
 
 The current source of truth is
-`docs/handoffs/2026-07-16-modeling-18a-transfer.md`. The active branch is
-`feature/runtime`. Task 16-E, Task 17-A, Task 17-B, and Task 18-A are
-accepted. Task 17-B
+`docs/handoffs/2026-07-16-modeling-18b-transfer.md`. The active branch is
+`feature/runtime`. Task 16-E, Task 17-A, Task 17-B, Task 18-A, and the pure
+Task 18-B proposal seam are accepted. Task 17-B
 was implemented in `13e0782`: the docked panel now creates
 and selects Sessions, starts/stops Runs, recovers bounded Run state/output,
 lists bounded durable ChangeSet summaries, and sends exact approve/reject
@@ -36,8 +36,10 @@ The acceptance result is
 `docs/superpowers/reviews/2026-07-16-task17-b-review-result.md`. Task 18-A
 strict contracts and deterministic compiler are accepted at `09ea256`, with
 design/plan `d37fba1`; its result is
-`docs/superpowers/reviews/2026-07-16-task18-a-review-result.md`. Task 18-B has
-not started and requires its own bounded design and plan. Do not
+`docs/superpowers/reviews/2026-07-16-task18-a-review-result.md`. The Task 18-B
+seam is `23379df`, with review
+`docs/superpowers/reviews/2026-07-16-task18-b-review-result.md`; Runtime graph
+integration and real proposal testing have not started. Do not
 rewrite or discard the accepted Task 16-E/17-A commits, `13e0782`, or
 the Task 17-B hotfixes
 `423a0e4`/`15b6c00`/`73c6214`/`7d8d552`/`5174378`,
