@@ -50,6 +50,13 @@ merge
 Workspace, typed ChangeSet, approval, preflight, transactional Apply, receipt,
 recovery, or single-FIFO boundaries while resuming work.
 
+The autonomous continuation roadmap is
+`docs/superpowers/plans/2026-07-17-autonomous-modeling-roadmap.md`. The user has
+deferred interactive Houdini verification and authorized independent progress
+using offline tests plus disposable Houdini 21.0.440 hython. Execute Task 18-D
+through 18-H in dependency order; defer only genuine GUI/focus/IME/visual
+acceptance. The empty-scene ownership bootstrap is the immediate active slice.
+
 ## Golden rule
 **Verify, don't guess.** The user insists: when unsure about a Houdini/hou/deepagents
 fact, verify by inspecting the local Houdini install or the web — never assert from

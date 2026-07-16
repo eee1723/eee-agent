@@ -37,6 +37,11 @@ Workspace creation still requires a selected graph whose nodes already carry
 EEE ownership metadata; a clean empty scene cannot bootstrap ownership. That
 bootstrap/apply slice is intentionally the next design boundary.
 
+The real test returned `The selection does not contain trusted EEE-owned
+nodes.`, confirming this boundary. Interactive Houdini verification is now
+deferred while autonomous offline/hython work follows
+`docs/superpowers/plans/2026-07-17-autonomous-modeling-roadmap.md`.
+
 ## Manual Houdini gate (required next)
 
 Restart the Runtime from the current checkout:

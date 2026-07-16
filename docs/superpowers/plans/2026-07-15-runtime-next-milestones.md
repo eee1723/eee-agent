@@ -226,6 +226,10 @@ integration and a Houdini-verified minimal catalog are implemented locally;
 real proposal/approval testing remains the next gate. See
 `docs/handoffs/2026-07-16-modeling-18c-transfer.md`.
 
+The empty-scene test exposed the expected ownership bootstrap cycle. Task
+18-D through Task 19 are now decomposed for autonomous offline/hython progress
+in `docs/superpowers/plans/2026-07-17-autonomous-modeling-roadmap.md`.
+
 **Dependency:** Tasks 15–17.
 
 - Define Brief/Spec/Component schemas, compiler output, staging, reconciler, deterministic validators, repair tickets, repair budget, QualityProfile, and Golden Cases.
