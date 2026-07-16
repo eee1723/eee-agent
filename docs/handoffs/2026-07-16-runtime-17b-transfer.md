@@ -8,14 +8,15 @@
 - Task 17-B design: `cc96acc`
 - Task 17-B implementation: `13e0782`
 - Qt WebSocket delivery fix: `423a0e4`
-- Focused frame-delivery hotfix gate: 172 passed
-- Full offline baseline: 2104 passed, 1 skipped
+- High-volume Session recovery fix: `15b6c00`
+- Focused panel/server recovery gate: 173 passed
+- Full offline baseline: 2105 passed, 1 skipped
 - Real Houdini Task 17-B gate: pending
 
-Do not rewrite the accepted Task 16-E/17-A commits, `13e0782`, or `423a0e4`,
-merge `main`, push, or weaken the trusted Workspace, typed ChangeSet, approval,
-preflight, transactional Apply, receipt, recovery, loopback authentication,
-or single-main-thread-FIFO boundaries.
+Do not rewrite the accepted Task 16-E/17-A commits, `13e0782`, `423a0e4`, or
+`15b6c00`, merge `main`, push, or weaken the trusted Workspace, typed
+ChangeSet, approval, preflight, transactional Apply, receipt, recovery,
+loopback authentication, or single-main-thread-FIFO boundaries.
 
 ## First real-test finding and correction
 
@@ -37,6 +38,31 @@ missed.
 Using Houdini 21.0.440's bundled PySide6 against the still-running old Runtime,
 the corrected full panel observed both existing Sessions, selected the newest,
 recovered its snapshot, rendered `READY`, enabled Start, and left Stop disabled.
+
+## Panel-reopen finding and correction
+
+The first real read-only Run completed successfully in `TEST` and produced
+more than 300 persisted events. A newly opened panel had no in-memory cursor,
+subscribed from seq 0, and caused Runtime to enqueue the entire replay without
+yielding. Because the outbound queue holds 256 items, Runtime incorrectly
+closed the healthy loopback client as `runtime.slow_consumer`, producing the
+observed ONLINE/OFFLINE and control flashing.
+
+`15b6c00` corrects both recovery layers:
+
+- the panel requests one bounded Session snapshot first, then subscribes from
+  that exact `snapshot_seq`; events committed between the two operations are
+  replayed, so there is no gap;
+- Runtime subscription initialization uses bounded asynchronous backpressure,
+  so a legal replay up to the protocol's 1000-event limit is not rejected by
+  the smaller live queue;
+- Session-dependent controls remain disabled while the snapshot bootstrap is
+  incomplete.
+
+Against the still-running pre-fix Runtime and the real `TEST` Session at seq
+368, the corrected complete panel switched Sessions with zero OFFLINE
+transitions, restored `Completed`, enabled Start, disabled Stop, and accepted
+text input.
 
 ## What Task 17-B adds
 
@@ -88,13 +114,13 @@ use the authenticated Secure Bridge.
 ## Verification evidence
 
 ```text
-Focused hotfix gate:      172 passed
-Full offline suite:       2104 passed, 1 skipped
+Focused recovery gate:    173 passed
+Full offline suite:       2105 passed, 1 skipped
 uv lock --check:          passed, 69 packages
 compileall:               passed
 git diff --check:         passed
 Boundary source scan:     no Apply/workspace-create/SQLite/rpyc/eval/exec path
-Live old-Runtime Qt test: 2 Sessions, selected/snapshot/READY/Start enabled
+Live high-volume Qt test: seq 368/Completed/Start/input/zero OFFLINE
 ```
 
 The only skipped test is the existing optional WSL/Windows environment probe.

@@ -173,10 +173,13 @@ summaries, and sends exact approve/reject decisions. The approval surface never
 receives raw operations or parameter values and there is no public Apply
 command. The first real test exposed binary Runtime frames being missed by
 Qt's text-only signal; `423a0e4` makes new servers send text frames and keeps
-binary compatibility in the panel. The focused hotfix gate passes 172 tests
-and the full suite passes 2104 tests with the same single optional WSL skip.
-Populated Run and approval states were also rendered with Houdini 21.0.440's
-bundled PySide6 at a narrow dock size. Real Houdini
+binary compatibility in the panel. Panel reopen then exposed a 256-item
+outbound queue rejecting the TEST Session's 315+ event replay; `15b6c00`
+bootstraps the panel from a bounded snapshot before subscribing and applies
+backpressure to server replay initialization. The focused recovery gate passes
+173 tests and the full suite passes 2105 tests with the same single optional
+WSL skip. Populated Run and approval states were also rendered with Houdini
+21.0.440's bundled PySide6 at a narrow dock size. Real Houdini
 Run/reconnect/stop/empty-approval acceptance is the remaining Task 17-B gate.
 
 ### 17-A: Read-only selection inspector (earliest Houdini UI test)

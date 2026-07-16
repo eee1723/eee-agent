@@ -15,11 +15,14 @@ lists bounded durable ChangeSet summaries, and sends exact approve/reject
 decisions without exposing Apply. The first real test exposed binary Runtime
 WebSocket frames being ignored by Qt's text-only signal; `423a0e4` makes new
 servers send text frames and keeps binary compatibility in the panel. Its full
-offline baseline is 2104 passed, 1 skipped; the focused panel/server hotfix
-gate passes 172 tests. Real
+panel-reopen test then exposed a 256-item outbound queue rejecting the TEST
+Session's 315+ event replay; `15b6c00` bootstraps Qt from a snapshot boundary
+and adds server-side replay backpressure. Its full offline baseline is 2105
+passed, 1 skipped; the focused panel/server recovery gate passes 173 tests.
+Real
 Houdini Run/reconnect/stop/empty-approval acceptance is the next gate. Do not
 rewrite or discard the accepted Task 16-E/17-A commits, `13e0782`, or
-`423a0e4`, merge
+the Task 17-B hotfixes `423a0e4`/`15b6c00`, merge
 `main`, or weaken the trusted
 Workspace, typed ChangeSet, approval, preflight, transactional Apply, receipt,
 recovery, or single-FIFO boundaries while resuming work.
