@@ -4,8 +4,12 @@ from dataclasses import replace
 
 import pytest
 
-from eee_agent.modeling.contracts import ValidatorKind
-from eee_agent.modeling.validation import ValidationStatus, validate_compilation
+from eee_agent.modeling.contracts import RepairBudget, RepairStatus, ValidatorKind
+from eee_agent.modeling.validation import (
+    ValidationStatus,
+    issue_repair_ticket,
+    validate_compilation,
+)
 from tests.modeling.test_compiler import _brief, _catalog, _compile, _profile, _spec
 
 
@@ -46,3 +50,34 @@ def test_compilation_report_fails_when_catalog_digest_is_stale() -> None:
     spec_result = next(item for item in report.results if item.validator is ValidatorKind.SPEC_CONTRACT)
     assert spec_result.status is ValidationStatus.FAILED
     assert spec_result.code == "modeling.spec.invalid"
+
+
+def test_repair_ticket_consumes_two_attempts_then_exhausts() -> None:
+    budget = RepairBudget(max_attempts_per_stage=2, attempts=())
+    digest = "a" * 64
+    for attempt in (1, 2):
+        budget, ticket = issue_repair_ticket(
+            budget=budget,
+            ticket_id=f"repair_graph_{attempt}",
+            validator=ValidatorKind.GRAPH,
+            failure_code="modeling.graph.invalid",
+            message="Graph evidence is stale.",
+            evidence_digests=(digest,),
+            failed_parameter_samples=(),
+            replay_boundary_digest=digest,
+        )
+        assert ticket.attempt == attempt
+        assert ticket.status is RepairStatus.OPEN
+    unchanged, exhausted = issue_repair_ticket(
+        budget=budget,
+        ticket_id="repair_graph_3",
+        validator=ValidatorKind.GRAPH,
+        failure_code="modeling.graph.invalid",
+        message="Graph evidence is stale.",
+        evidence_digests=(digest,),
+        failed_parameter_samples=(),
+        replay_boundary_digest=digest,
+    )
+    assert unchanged == budget
+    assert exhausted.attempt == 2
+    assert exhausted.status is RepairStatus.EXHAUSTED

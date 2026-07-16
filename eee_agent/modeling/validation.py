@@ -20,6 +20,7 @@ from eee_agent.modeling.contracts import (
     ProceduralSpec,
     QualityProfile,
     RepairBudget,
+    RepairStatus,
     RepairTicket,
     ValidatorKind,
 )
@@ -228,10 +229,54 @@ def validate_compilation(
     )
 
 
+def issue_repair_ticket(
+    *,
+    budget: RepairBudget,
+    ticket_id: str,
+    validator: ValidatorKind,
+    failure_code: str,
+    message: str,
+    evidence_digests: tuple[str, ...],
+    failed_parameter_samples: tuple[str, ...],
+    replay_boundary_digest: str,
+) -> tuple[RepairBudget, RepairTicket]:
+    """Consume one stage budget and produce an explicit repair request.
+
+    Exhaustion is represented as a ticket rather than an exception so Runtime
+    can persist the failure and stop without silently mutating the proposal.
+    """
+    if type(budget) is not RepairBudget:
+        raise TypeError("budget must be an exact RepairBudget")
+    if type(validator) is not ValidatorKind:
+        raise TypeError("validator must be an exact ValidatorKind")
+    remaining = budget.remaining(validator)
+    if remaining > 0:
+        next_budget = budget.record(validator)
+        attempt = next_budget.used(validator)
+        status = "Open"
+    else:
+        next_budget = budget
+        attempt = max(1, budget.max_attempts_per_stage)
+        status = "Exhausted"
+    ticket = RepairTicket(
+        ticket_id=ticket_id,
+        validator=validator,
+        failure_code=failure_code,
+        message=message,
+        evidence_digests=evidence_digests,
+        failed_parameter_samples=failed_parameter_samples,
+        replay_boundary_digest=replay_boundary_digest,
+        attempt=attempt,
+        status=RepairStatus(status),
+    )
+    return next_budget, ticket
+
+
 __all__ = [
     "EvidenceRef",
     "ValidationReport",
     "ValidationStatus",
     "ValidatorResult",
+    "issue_repair_ticket",
     "validate_compilation",
 ]

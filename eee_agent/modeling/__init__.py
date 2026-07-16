@@ -47,6 +47,7 @@ from eee_agent.modeling.validation import (
     ValidationReport,
     ValidationStatus,
     ValidatorResult,
+    issue_repair_ticket,
     validate_compilation,
 )
 
@@ -76,6 +77,7 @@ __all__ = [
     "ValidationReport",
     "ValidationStatus",
     "ValidatorResult",
+    "issue_repair_ticket",
     "UnitSystem",
     "ValidatorKind",
     "WorkspaceBootstrapContext",
