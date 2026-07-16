@@ -20,12 +20,16 @@ Session's 315+ event replay; `15b6c00` bootstraps Qt from a snapshot boundary
 and adds server-side replay backpressure. `73c6214` replaces the static Session
 title prompt with an IME-enabled non-blocking dialog, explicitly enables IME
 for Run Request, and persists the last selected Session with highest-`last_seq`
-fallback. Its full offline baseline is 2106 passed, 1 skipped; the focused
-panel/server gate passes 174 tests.
+fallback. The real IME retest showed candidate-confirmation Enter still
+accepted the dialog; `7d8d552` removes Return acceptance, disables default
+buttons, and consumes Enter in the title editor so only an explicit OK click
+creates the Session. Its full offline baseline is 2106 passed, 1 skipped; the
+focused panel/server gate passes 174 tests.
 Real
 Houdini Run/reconnect/stop/empty-approval acceptance is the next gate. Do not
 rewrite or discard the accepted Task 16-E/17-A commits, `13e0782`, or
-the Task 17-B hotfixes `423a0e4`/`15b6c00`/`73c6214`, merge
+the Task 17-B hotfixes `423a0e4`/`15b6c00`/`73c6214`/`7d8d552`,
+merge
 `main`, or weaken the trusted
 Workspace, typed ChangeSet, approval, preflight, transactional Apply, receipt,
 recovery, or single-FIFO boundaries while resuming work.

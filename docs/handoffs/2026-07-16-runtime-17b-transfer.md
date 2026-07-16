@@ -10,14 +10,15 @@
 - Qt WebSocket delivery fix: `423a0e4`
 - High-volume Session recovery fix: `15b6c00`
 - Chinese IME and Session preference fix: `73c6214`
+- IME candidate-confirmation fix: `7d8d552`
 - Focused panel/server gate: 174 passed
 - Full offline baseline: 2106 passed, 1 skipped
 - Real Houdini Task 17-B gate: pending
 
 Do not rewrite the accepted Task 16-E/17-A commits, `13e0782`, `423a0e4`,
-`15b6c00`, or `73c6214`, merge `main`, push, or weaken the trusted Workspace,
-typed ChangeSet, approval, preflight, transactional Apply, receipt, recovery,
-loopback authentication, or single-main-thread-FIFO boundaries.
+`15b6c00`, `73c6214`, or `7d8d552`, merge `main`, push, or weaken the trusted
+Workspace, typed ChangeSet, approval, preflight, transactional Apply, receipt,
+recovery, loopback authentication, or single-main-thread-FIFO boundaries.
 
 ## First real-test finding and correction
 
@@ -85,6 +86,18 @@ Houdini 21.0.440's bundled PySide6 accepted committed Chinese text in both
 editors. Preference verification showed: no preference selects `TEST`; a manual
 selection persists into a new panel; the local preference was restored to
 `TEST` after the test.
+
+The first real IME retest then identified a narrower interaction: Windows IME
+uses Enter to confirm a candidate, while the title editor still connected
+`returnPressed` to dialog acceptance and the OK button remained a QDialog
+default. One committed character therefore immediately closed the dialog.
+
+`7d8d552` removes the Return binding, disables auto/default behavior on both
+dialog buttons, and consumes Return/Enter key events while the title editor has
+focus. The exact Houdini PySide6 regression committed four Chinese characters,
+sent Enter after each one, and verified that the dialog stayed visible, kept
+focus, retained the complete title, emitted no accepted result, and accepted
+only after a mouse click on OK.
 
 ## What Task 17-B adds
 
