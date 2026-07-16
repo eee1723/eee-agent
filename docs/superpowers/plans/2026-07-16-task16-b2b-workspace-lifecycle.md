@@ -16,10 +16,13 @@
 - Accepted implementation base: `6a4fd09`.
 - Accepted B2b design commit: `e135088`.
 - Design authority: `docs/superpowers/specs/2026-07-16-task16-b2b-workspace-lifecycle-design.md`.
-- Codex owns the plan, prompts, review checklist, independent review, final
-  verification, and documentation commits.
-- The implementation worker owns only RED/GREEN code and focused test commits
-  within each slice's authorized file list.
+- Codex owns the plan, prompts, review checklist, implementation orchestration,
+  independent review, final verification, and documentation commits. Codex may
+  also implement a bounded slice directly.
+- Claude Code is an optional implementation worker, not a prerequisite. Use it
+  only when the user explicitly selects it and quota is available. Whether
+  Codex or an optional worker implements, RED/GREEN code and focused test
+  commits remain inside each slice's authorized file list.
 - Stop after B2b acceptance. Do not start Task 16-E, Task 17, Task 18, UI work,
   push, merge, rebase, amend accepted history, or delete worktrees.
 

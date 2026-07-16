@@ -10,9 +10,13 @@ The current cross-computer source of truth is
 `docs/handoffs/2026-07-16-runtime-d1-transfer.md`. The active development branch
 is `feature/runtime`. Task 16-D1 is Codex-accepted at `39f7346` after 513 focused
 and 1872 full offline tests (one existing optional WSL skip) plus a real Houdini
-21.0.440 transactional created-chain smoke. Task 16-B2b, Task 16-E, and Task 17
-have not started and require separate bounded plans. Do not merge `main` or
-weaken the typed ChangeSet/single-FIFO write boundary while resuming work.
+21.0.440 transactional created-chain smoke. Task 16-B2b has an accepted design
+at `e135088` and executable plan at `28b5dd9`; its B2b-1 implementation is the
+active slice. Task 16-E and Task 17 have not started and require separate
+bounded plans. Codex may implement a bounded slice directly; Claude Code is an
+optional worker only when the user explicitly chooses it and has quota. Do not
+merge `main` or weaken the typed ChangeSet/single-FIFO write boundary while
+resuming work.
 
 ## Golden rule
 **Verify, don't guess.** The user insists: when unsure about a Houdini/hou/deepagents

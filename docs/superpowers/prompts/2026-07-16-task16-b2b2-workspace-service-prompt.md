@@ -1,7 +1,8 @@
 # Task 16-B2b-2 Implementation Prompt
 
-Use Claude Code with explicit model `glm-5.2[1m]`. Execute only schema v3,
-atomic Workspace repository operations, and the provider-independent
+Use this prompt either for direct Codex implementation or, only when the user
+explicitly selects it, an optional external coding worker. Execute only schema
+v3, atomic Workspace repository operations, and the provider-independent
 `WorkspaceService`. Do not expose Runtime commands or start B2b-3/Task 16-E.
 
 ## Prerequisite

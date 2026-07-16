@@ -1,8 +1,10 @@
 # Task 16-B2b-1 Implementation Prompt
 
-Use Claude Code with explicit model `glm-5.2[1m]`. Execute only the strict
-`workspace.v1` Bridge inspection foundation. Do not modify Runtime persistence,
-activate public workspace commands, or start B2b-2/B2b-3/Task 16-E.
+Use this prompt either for direct Codex implementation or, only when the user
+explicitly selects it, an optional external coding worker. Execute only the
+strict `workspace.v1` Bridge inspection foundation. Do not modify Runtime
+persistence, activate public workspace commands, or start B2b-2/B2b-3/Task
+16-E.
 
 ## Objective
 

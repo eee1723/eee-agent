@@ -1,6 +1,7 @@
 # Task 16-B2b-3 Implementation Prompt
 
-Use Claude Code with explicit model `glm-5.2[1m]`. Execute only Runtime
+Use this prompt either for direct Codex implementation or, only when the user
+explicitly selects it, an optional external coding worker. Execute only Runtime
 protocol/server/service/CLI/process wiring and B2b acceptance smoke coverage.
 Do not start Task 16-E, Task 17, Task 18, UI, or unrelated cleanup.
 

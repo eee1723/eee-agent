@@ -39,16 +39,17 @@ Current milestone state:
 | Task 16-A contracts/policy | Complete, Codex accepted | `79f281d` |
 | Task 16-B1 persistence | Complete, Codex accepted | `54f2989` |
 | Task 16-B2a approvals | Complete, Codex accepted | `7b3bff8` |
-| Task 16-B2b workspace lifecycle | Not started; ready for a new bounded plan | Task 16 plan |
+| Task 16-B2b workspace lifecycle | Design/plan accepted; B2b-1 implementation active | `e135088`, `28b5dd9` |
 | Task 16-C preflight | Complete, Codex accepted | `6050a00` |
 | Task 16-D transactional apply | Complete, Codex accepted | `3435f4b` |
 | Task 16-D1 ordered created refs | Complete, Codex accepted | `39f7346` |
 | Task 16-E Runtime apply/recovery | Not started; requires a new bounded plan | Task 16 plan |
 | Task 17 UI | Not started in this branch slice | Roadmap |
 
-Do not begin B2b, 16-E, or UI work from a D/D1 prompt. Pick one next slice,
-write its own executable plan and review gate, then invoke Claude Code only for
-that bounded implementation.
+Do not begin 16-E or UI work from a D/D1 prompt. B2b uses its own accepted
+design, executable plan, prompts, and review gate. A bounded slice may be
+implemented directly by Codex. Claude Code is an optional implementation
+worker only when the user explicitly selects it and quota is available.
 
 ## D1 Accepted Behavior
 
@@ -183,10 +184,12 @@ restore baseline before changing files.
 Task 16-D1 is Codex-accepted at 39f7346. Its independent gate passed 513
 focused and 1872 full offline tests with one existing optional WSL skip, plus a
 real Houdini 21.0.440 created-parent/created-endpoint transactional smoke.
-Task 16-B2b, Task 16-E, and Task 17 have not started. Do not infer authority to
-start them. First choose exactly one bounded next slice and have Codex write its
-plan, prompt, file scope, and review checklist. Claude Code glm-5.2[1m] performs
-only the implementation; Codex reviews and runs independent acceptance.
+Task 16-B2b has an accepted design at e135088 and executable plan at 28b5dd9;
+B2b-1 is the active implementation slice. Task 16-E and Task 17 have not
+started. Do not infer authority to start them. Every new bounded slice still
+requires its own plan, prompt, file scope, and review checklist. Codex may
+implement directly; Claude Code is optional only when the user explicitly
+selects it. Codex always runs the independent acceptance.
 
 Do not merge main, force-push, transfer machine-local state, add arbitrary
 Houdini code/eval/delete surfaces, or weaken the accepted typed ChangeSet and
