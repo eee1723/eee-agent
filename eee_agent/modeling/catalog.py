@@ -68,6 +68,29 @@ def houdini_21_minimal_catalog() -> NodeCatalog:
                 max_output_index=0,
             ),
             NodeTypeDefinition(
+                node_type="normal",
+                parameters=(
+                    ParmDefinition("type", 1),
+                    ParmDefinition("cuspangle", 60.0),
+                    ParmDefinition("method", 1),
+                    ParmDefinition("normalize", 0),
+                    ParmDefinition("reverse", 0),
+                ),
+                max_inputs=1,
+                max_output_index=0,
+            ),
+            NodeTypeDefinition(
+                node_type="subdivide",
+                parameters=(
+                    ParmDefinition("algorithm", 2),
+                    ParmDefinition("iterations", 1),
+                    ParmDefinition("creaseweight", 0.0),
+                    ParmDefinition("bias", 1.0),
+                ),
+                max_inputs=2,
+                max_output_index=0,
+            ),
+            NodeTypeDefinition(
                 node_type="xform",
                 parameters=(
                     ParmDefinition("tx", 0.0),

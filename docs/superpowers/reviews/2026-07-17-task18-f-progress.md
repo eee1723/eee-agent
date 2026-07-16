@@ -18,7 +18,7 @@ not replay or invalidate an already durable Apply receipt.
 
 ## Evidence
 
-- full offline suite: `2168 passed, 1 skipped`;
+- full offline suite: `2169 passed, 1 skipped`;
 - focused modeling/recovery suite: `77 passed`;
 - Houdini 21.0.440 hython bootstrap smoke passed real cook, geometry facts,
   metadata, manifest, AlreadyApplied, and forced rollback cleanup;

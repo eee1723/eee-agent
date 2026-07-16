@@ -253,7 +253,60 @@ def houdini_21_minimal_golden_cases() -> tuple[GoldenCase, ...]:
         ),
         "OUT_MODEL",
     )
-    return box_chain, grid_chain, merged
+    surface = _case(
+        "subdivided_surface_output",
+        "Subdivide a box, compute normals, and expose a stable output node.",
+        (
+            ComponentSpec(
+                component_id="source",
+                role="generator",
+                depends_on=(),
+                nodes=(
+                    NodeSpec(
+                        node_key="box",
+                        node_type="box",
+                        node_name="box1",
+                        parent_node=None,
+                        parameters=(),
+                        inputs=(),
+                    ),
+                ),
+            ),
+            ComponentSpec(
+                component_id="surface",
+                role="surface",
+                depends_on=("source",),
+                nodes=(
+                    NodeSpec(
+                        node_key="subdivide",
+                        node_type="subdivide",
+                        node_name="subdivide1",
+                        parent_node=None,
+                        parameters=(ParmAssignment("iterations", 2),),
+                        inputs=(InputBinding(0, "source.box", 0),),
+                    ),
+                    NodeSpec(
+                        node_key="normal",
+                        node_type="normal",
+                        node_name="normal1",
+                        parent_node=None,
+                        parameters=(ParmAssignment("normalize", 1),),
+                        inputs=(InputBinding(0, "surface.subdivide", 0),),
+                    ),
+                    NodeSpec(
+                        node_key="out",
+                        node_type="null",
+                        node_name="OUT_MODEL",
+                        parent_node=None,
+                        parameters=(),
+                        inputs=(InputBinding(0, "surface.normal", 0),),
+                    ),
+                ),
+            ),
+        ),
+        "OUT_MODEL",
+    )
+    return box_chain, grid_chain, merged, surface
 
 
 __all__ = ["GoldenCase", "houdini_21_minimal_golden_cases"]

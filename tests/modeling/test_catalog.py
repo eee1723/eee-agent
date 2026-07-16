@@ -9,7 +9,9 @@ from eee_agent.modeling.catalog import (
 def test_houdini_21_minimal_catalog_contains_only_verified_safe_types() -> None:
     catalog = houdini_21_minimal_catalog()
     by_type = catalog.by_type
-    assert set(by_type) == {"box", "geo", "grid", "merge", "null", "xform"}
+    assert set(by_type) == {
+        "box", "geo", "grid", "merge", "normal", "null", "subdivide", "xform"
+    }
     assert "transform" not in by_type
     assert by_type["geo"].can_parent_nodes is True
     assert by_type["box"].parameters_by_name["sizex"].default_value == 1.0
@@ -17,6 +19,8 @@ def test_houdini_21_minimal_catalog_contains_only_verified_safe_types() -> None:
     assert by_type["merge"].max_inputs == 64
     assert by_type["xform"].parameters_by_name["sx"].default_value == 1.0
     assert by_type["null"].parameters_by_name["copyinput"].default_value == 1
+    assert by_type["normal"].parameters_by_name["cuspangle"].default_value == 60.0
+    assert by_type["subdivide"].parameters_by_name["iterations"].default_value == 1
 
 
 def test_houdini_21_minimal_quality_profile_is_deterministic() -> None:

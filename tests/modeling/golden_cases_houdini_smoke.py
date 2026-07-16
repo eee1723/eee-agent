@@ -72,7 +72,7 @@ def main() -> None:
             )
             if receipt.status.value != "Applied":
                 raise RuntimeError(
-                    f"GOLDEN FAIL {case.case_id}: {receipt.status.value}"
+                    f"GOLDEN FAIL {case.case_id}: {receipt.to_dict()}"
                 )
             query = adapter.scene_query(
                 include_selection=False,
@@ -100,7 +100,8 @@ def main() -> None:
                     f"GOLDEN FAIL {case.case_id}: manifest node count mismatch"
                 )
         print(
-            "GOLDEN CASES PASS: box, grid, merge, outputs, Cook/Geometry, manifests"
+            "GOLDEN CASES PASS: box, grid, merge, subdivide, normal, outputs, "
+            "Cook/Geometry, manifests"
         )
     finally:
         for root_path in roots:

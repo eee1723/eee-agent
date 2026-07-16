@@ -45,6 +45,7 @@ def test_minimal_golden_cases_compile_deterministically() -> None:
         "box_transform_output",
         "grid_transform_output",
         "merged_sources_output",
+        "subdivided_surface_output",
     ]
     for index, case in enumerate(cases, start=1):
         first = _compile(case, index)
