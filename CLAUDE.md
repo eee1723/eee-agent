@@ -23,12 +23,16 @@ for Run Request, and persists the last selected Session with highest-`last_seq`
 fallback. The real IME retest showed candidate-confirmation Enter still
 accepted the dialog; `7d8d552` removes Return acceptance, disables default
 buttons, and consumes Enter in the title editor so only an explicit OK click
-creates the Session. Its full offline baseline is 2106 passed, 1 skipped; the
-focused panel/server gate passes 174 tests.
+creates the Session. The next real test showed embedded `QPlainTextEdit` still
+failed Chinese input while the title `QLineEdit` worked; `5174378` replaces
+Run Request with an IME-safe 16000-character `QLineEdit` and consumes Enter so
+Runs start only by button. Its full offline baseline is 2106 passed, 1 skipped;
+the focused panel/server gate passes 174 tests.
 Real
 Houdini Run/reconnect/stop/empty-approval acceptance is the next gate. Do not
 rewrite or discard the accepted Task 16-E/17-A commits, `13e0782`, or
-the Task 17-B hotfixes `423a0e4`/`15b6c00`/`73c6214`/`7d8d552`,
+the Task 17-B hotfixes
+`423a0e4`/`15b6c00`/`73c6214`/`7d8d552`/`5174378`,
 merge
 `main`, or weaken the trusted
 Workspace, typed ChangeSet, approval, preflight, transactional Apply, receipt,

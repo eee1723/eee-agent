@@ -182,9 +182,12 @@ IME-enabled non-blocking owned dialog, explicitly enables IME on Run Request,
 and remembers the last selected Session with highest-event-boundary fallback.
 The real IME retest showed candidate-confirmation Enter still accepted the
 dialog; `7d8d552` removes Return acceptance, disables default dialog buttons,
-and consumes Enter in the title field. The current focused gate passes 174
-tests and the full suite passes 2106 tests with the same single optional WSL
-skip. Populated Run and approval states were also rendered with Houdini
+and consumes Enter in the title field. The next real test showed the embedded
+Run Request `QPlainTextEdit` still failed Chinese IME while `QLineEdit` worked;
+`5174378` moves Run Request to a dedicated 16000-character IME-safe line
+editor. The current focused gate passes 174 tests and the full suite passes
+2106 tests with the same single optional WSL skip. Populated Run and approval
+states were also rendered with Houdini
 21.0.440's bundled PySide6 at a narrow dock size. Real Houdini
 Run/reconnect/stop/empty-approval acceptance is the remaining Task 17-B gate.
 

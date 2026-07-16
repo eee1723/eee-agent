@@ -11,14 +11,16 @@
 - High-volume Session recovery fix: `15b6c00`
 - Chinese IME and Session preference fix: `73c6214`
 - IME candidate-confirmation fix: `7d8d552`
+- IME-safe Run Request editor: `5174378`
 - Focused panel/server gate: 174 passed
 - Full offline baseline: 2106 passed, 1 skipped
 - Real Houdini Task 17-B gate: pending
 
 Do not rewrite the accepted Task 16-E/17-A commits, `13e0782`, `423a0e4`,
-`15b6c00`, `73c6214`, or `7d8d552`, merge `main`, push, or weaken the trusted
-Workspace, typed ChangeSet, approval, preflight, transactional Apply, receipt,
-recovery, loopback authentication, or single-main-thread-FIFO boundaries.
+`15b6c00`, `73c6214`, `7d8d552`, or `5174378`, merge `main`, push, or weaken
+the trusted Workspace, typed ChangeSet, approval, preflight, transactional
+Apply, receipt, recovery, loopback authentication, or
+single-main-thread-FIFO boundaries.
 
 ## First real-test finding and correction
 
@@ -76,8 +78,8 @@ accidental long-title Session rather than the active `TEST` history.
 
 - the Session title prompt is now a panel-owned, non-blocking modal dialog
   rather than a nested static dialog;
-- its `QLineEdit` and the Run Request `QPlainTextEdit` explicitly enable Qt
-  input-method events and strong focus;
+- its title `QLineEdit` and the original Run Request editor explicitly enabled
+  Qt input-method events and strong focus;
 - the last selected Session ID is stored as a small Qt user preference;
 - when no valid preference exists, the active Session with the highest
   persisted `last_seq` is selected before timestamp tie-breaking.
@@ -98,6 +100,16 @@ focus. The exact Houdini PySide6 regression committed four Chinese characters,
 sent Enter after each one, and verified that the dialog stayed visible, kept
 focus, retained the complete title, emitted no accepted result, and accepted
 only after a mouse click on OK.
+
+The following real test confirmed the Session title dialog but found that the
+embedded Run Request `QPlainTextEdit` still lost Chinese IME composition.
+Because the Session title `QLineEdit` was proven working in the same Houdini
+process, `5174378` replaces Run Request with a dedicated 16000-character
+`QLineEdit`. It consumes Enter/Return after candidate confirmation and has no
+Return-to-start binding; a Run starts only from the Start button. The exact
+PySide6 regression committed “只读检查当前场景” character by character with
+Enter after every character and retained the full text, focus, and zero Return
+signals.
 
 ## What Task 17-B adds
 
