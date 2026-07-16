@@ -13,6 +13,7 @@ import asyncio
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -943,6 +944,56 @@ def test_runtime_service_approve_failure_notifies_nobody(
             assert received == []
             async with service._database.write_transaction() as conn:
                 await conn.execute("DROP TRIGGER fail_event_insert")
+
+    _run(scenario())
+
+
+def test_runtime_modeling_approval_runs_internal_apply(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Modeling Runtime owns Apply after the durable approval decision."""
+    monkeypatch.setenv("EEE_RUNTIME_HOME", str(db_path.parent / "home_rt_auto"))
+    clock = FakeClock(NOW)
+    binding = _binding(instance_id="hou_instance_1", scene_epoch=1)
+
+    async def scenario() -> None:
+        from eee_agent.runtime.paths import RuntimePaths
+        from eee_agent.runtime.service import RuntimeService
+
+        paths = RuntimePaths.from_environment()
+
+        async with RuntimeService.open(
+            paths,
+            runner_factory=lambda _saver: object(),
+            changeset_clock=clock,
+            changeset_binding_provider=lambda: binding,
+        ) as service:
+            await _seed_session_run(service._database)
+            cs = _changeset()
+            await service._changesets.propose(cs, _policy(cs))
+            service._modeling_catalog_provider = lambda: object()  # type: ignore[assignment]
+            monkeypatch.setattr(service, "_changesets_has_bridge", lambda: True)
+            calls: list[str] = []
+
+            async def fake_apply(change_id: str):
+                calls.append(change_id)
+                return SimpleNamespace(
+                    state=SimpleNamespace(value="Applied"),
+                    receipt=SimpleNamespace(
+                        status=SimpleNamespace(value="Applied"),
+                        scene_may_have_changed=False,
+                    ),
+                )
+
+            monkeypatch.setattr(service, "apply_changeset_trusted", fake_apply)
+            result = await service.approve_changeset(CHG, cs.digest)
+            assert calls == [CHG]
+            assert result["decision"] == "Approved"
+            assert result["apply"] == {
+                "state": "Applied",
+                "receipt_status": "Applied",
+                "scene_may_have_changed": False,
+            }
 
     _run(scenario())
 

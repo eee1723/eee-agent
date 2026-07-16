@@ -752,10 +752,39 @@ class RuntimeService:
     async def approve_changeset(
         self, change_id: str, changeset_digest: str
     ) -> dict[str, object]:
-        """Approve a pending ChangeSet; returns the bounded approval summary."""
-        return await self._decide_changeset(
+        """Approve a pending ChangeSet and run the trusted Apply boundary.
+
+        Modeling mode deliberately has no public ``changeset.apply`` command:
+        once the user approves the bounded proposal summary, Runtime owns the
+        single-flight Apply task and publishes its durable state/receipt events.
+        Legacy Runtime fixtures without both the modeling catalog and typed
+        Bridge keep the historical approval-only behavior.
+        """
+        decision = await self._decide_changeset(
             change_id, changeset_digest, approve=True
         )
+        if self._modeling_catalog_provider is None:
+            return decision
+        # A catalog without the typed Bridge is useful for offline proposal
+        # tests, but cannot safely cross the write boundary. Keep approval
+        # durable and let the normal explicit trusted seam remain unavailable.
+        if not self._changesets_has_bridge():
+            return decision
+        applied = await self.apply_changeset_trusted(change_id)
+        return {
+            **decision,
+            "apply": {
+                "state": applied.state.value,
+                "receipt_status": applied.receipt.status.value,
+                "scene_may_have_changed": applied.receipt.scene_may_have_changed,
+            },
+        }
+
+    def _changesets_has_bridge(self) -> bool:
+        """Return whether the ChangeSet service has a typed write provider."""
+        # Kept as a tiny seam instead of exposing the provider itself. This
+        # avoids handing a model or transport caller any write capability.
+        return getattr(self._changesets, "_bridge_provider", None) is not None
 
     async def list_changesets(
         self, session_id: str, *, limit: int
