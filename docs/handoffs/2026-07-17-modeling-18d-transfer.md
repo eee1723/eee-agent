@@ -26,8 +26,8 @@ interactive Houdini UI verification remains deferred by user request.
 
 ## Evidence
 
-- `uv run --frozen --extra eval pytest -q` -> `2158 passed, 1 skipped`
-- modeling focused gate -> `50` compiler/proposal/bootstrap tests plus
+- `uv run --frozen --extra eval pytest -q` -> `2161 passed, 1 skipped`
+- modeling focused gate -> `52` compiler/proposal/bootstrap/validation tests plus
   persistence/context coverage
 - `uv lock --check` -> passed
 - compileall -> passed
@@ -40,4 +40,3 @@ interactive Houdini UI verification remains deferred by user request.
 
 Task 18-E wires user approval to the existing internal Apply task while keeping
 raw Apply and write tools out of the model and public Runtime command surface.
-

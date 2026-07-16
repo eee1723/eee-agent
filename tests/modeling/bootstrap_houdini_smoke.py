@@ -35,6 +35,7 @@ def main() -> None:
         WorkspaceBootstrapContext,
         compile_bootstrap_procedural_spec,
     )
+    from eee_agent.modeling.validation import ValidationStatus, validate_compilation
     from eee_agent.modeling.contracts import (
         Axis,
         ComponentSpec,
@@ -145,6 +146,18 @@ def main() -> None:
             change_id=f"chg_{'d' * 32}",
             created_at=now,
         )
+        validation = validate_compilation(
+            brief=brief,
+            spec=spec,
+            quality_profile=houdini_21_minimal_quality_profile(),
+            catalog=houdini_21_minimal_catalog(),
+            compilation=compiled,
+        )
+        graph_result = next(
+            item for item in validation.results if item.validator.value == "Graph"
+        )
+        if graph_result.status is not ValidationStatus.PASSED:
+            _fail("deterministic graph validation did not pass")
         executor = ChangeSetExecutor(adapter)
         request = ApplyRequest.build(
             request_id="bootstrap_smoke_apply",
@@ -251,4 +264,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

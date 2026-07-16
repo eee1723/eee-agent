@@ -42,7 +42,7 @@ seam is `23379df`, with review
 Runtime graph integration is implemented locally and reviewed at
 `docs/superpowers/reviews/2026-07-16-task18-c-review-result.md`; real proposal
 testing has not started. Task 18-D empty-scene bootstrap is now accepted
-locally at `0afff36` plus its persistence/runtime completion slice; its review
+locally at `53df27c`; its review
 is `docs/superpowers/reviews/2026-07-17-task18-d-review-result.md`. Do not
 rewrite or discard the accepted Task 16-E/17-A commits, `13e0782`, or
 the Task 17-B hotfixes
