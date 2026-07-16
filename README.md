@@ -179,7 +179,7 @@ uv run --extra eval python -m eee_agent.runtime serve --help   # options
 | **Foundation milestone** | ✅ done — uv-locked deps, core contracts, provider registry (DeepSeek via official Anthropic endpoint), normalized events, explicit harness (no implicit `task`), `cli versions`. 369 tests pass. See `docs/handoffs/2026-07-13-foundation-migration.md` |
 | **Live end-to-end agent run on current machine** | ⏳ pending — bridge must be started in Houdini, then `selftest` + a `prompt` |
 | Runtime + typed Houdini ChangeSets | Complete through local Task 16-E acceptance on `feature/runtime`: trusted Workspace, ordered created references, transactional Apply, atomic receipts, and no-replay restart recovery. |
-| Docked Runtime panel | Task 17-A is accepted. Task 17-B interactive Session/Run/approval control is implemented and offline-accepted in `13e0782` (328 focused tests; 2103 full tests, 1 optional WSL skip). Real Houdini Run/reconnect/stop/empty-approval acceptance is next. See `docs/handoffs/2026-07-16-runtime-17b-transfer.md` |
+| Docked Runtime panel | Task 17-A is accepted. Task 17-B is implemented in `13e0782`; `423a0e4` fixes Qt delivery of Runtime responses/events after the first real test exposed binary WebSocket frames. Current gate: 172 focused tests and 2104 full tests pass, with 1 optional WSL skip. Real Houdini Run/reconnect/stop/empty-approval acceptance resumes at step 4. See `docs/handoffs/2026-07-16-runtime-17b-transfer.md` |
 | B2 — per-component subagents | ⏳ deferred (largest change; after model swap) |
 | Eval framework | ⏳ scaffold (`eval/`), cases minimal |
 

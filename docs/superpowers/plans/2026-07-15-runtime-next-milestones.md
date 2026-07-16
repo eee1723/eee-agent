@@ -171,11 +171,13 @@ creates/selects Sessions, starts/stops Runs, rebuilds bounded Run output and
 activity from snapshots plus ordered events, lists durable bounded ChangeSet
 summaries, and sends exact approve/reject decisions. The approval surface never
 receives raw operations or parameter values and there is no public Apply
-command. The focused panel/ChangeSet/protocol gate passes 328 tests; the full
-suite passes 2103 tests with the same single optional WSL skip. Populated Run
-and approval states were also rendered with Houdini 21.0.440's bundled PySide6
-at a narrow dock size. Real Houdini Run/reconnect/stop/empty-approval acceptance
-is the remaining Task 17-B gate.
+command. The first real test exposed binary Runtime frames being missed by
+Qt's text-only signal; `423a0e4` makes new servers send text frames and keeps
+binary compatibility in the panel. The focused hotfix gate passes 172 tests
+and the full suite passes 2104 tests with the same single optional WSL skip.
+Populated Run and approval states were also rendered with Houdini 21.0.440's
+bundled PySide6 at a narrow dock size. Real Houdini
+Run/reconnect/stop/empty-approval acceptance is the remaining Task 17-B gate.
 
 ### 17-A: Read-only selection inspector (earliest Houdini UI test)
 

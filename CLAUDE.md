@@ -12,10 +12,14 @@ The current source of truth is
 implemented and offline-accepted in `13e0782`: the docked panel now creates
 and selects Sessions, starts/stops Runs, recovers bounded Run state/output,
 lists bounded durable ChangeSet summaries, and sends exact approve/reject
-decisions without exposing Apply. Its full offline baseline is 2103 passed,
-1 skipped; the 328-test panel/ChangeSet/protocol gate also passes. Real
+decisions without exposing Apply. The first real test exposed binary Runtime
+WebSocket frames being ignored by Qt's text-only signal; `423a0e4` makes new
+servers send text frames and keeps binary compatibility in the panel. Its full
+offline baseline is 2104 passed, 1 skipped; the focused panel/server hotfix
+gate passes 172 tests. Real
 Houdini Run/reconnect/stop/empty-approval acceptance is the next gate. Do not
-rewrite or discard the accepted Task 16-E/17-A commits or `13e0782`, merge
+rewrite or discard the accepted Task 16-E/17-A commits, `13e0782`, or
+`423a0e4`, merge
 `main`, or weaken the trusted
 Workspace, typed ChangeSet, approval, preflight, transactional Apply, receipt,
 recovery, or single-FIFO boundaries while resuming work.

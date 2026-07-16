@@ -1,9 +1,10 @@
 # Task 17-B Interactive Runtime Panel Plan
 
-Status: implemented and offline-accepted in `13e0782`. The focused gate passes
-328 tests and the full suite passes 2103 tests with the single existing
-optional WSL skip. Real Houdini Run/reconnect/stop/empty-approval acceptance is
-pending.
+Status: implemented and offline-accepted in `13e0782`, with Qt WebSocket frame
+delivery corrected in `423a0e4` after the first real test. The focused hotfix
+gate passes 172 tests and the full suite passes 2104 tests with the single
+existing optional WSL skip. Real Houdini
+Run/reconnect/stop/empty-approval acceptance is pending.
 
 ## Boundary
 
