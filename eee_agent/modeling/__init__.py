@@ -62,4 +62,29 @@ __all__ = [
     "parse_quality_profile",
     "parse_repair_budget",
     "parse_repair_ticket",
+    "ModelingProposalContext",
+    "ModelingProposalCoordinator",
+    "ModelingProposalError",
+    "ModelingProposalSummary",
+    "ModelingToolContext",
+    "propose_modeling",
 ]
+
+_PROPOSAL_EXPORTS = frozenset(
+    {
+        "ModelingProposalContext",
+        "ModelingProposalCoordinator",
+        "ModelingProposalError",
+        "ModelingProposalSummary",
+        "ModelingToolContext",
+        "propose_modeling",
+    }
+)
+
+
+def __getattr__(name: str):
+    if name in _PROPOSAL_EXPORTS:
+        from eee_agent.modeling import proposal
+
+        return getattr(proposal, name)
+    raise AttributeError(name)
