@@ -25,6 +25,7 @@ from houdini_side.secure_bridge_host import (
     SecureBridgeHostError,
     SelectionQueryError,
     query_selection,
+    run_background_async,
 )
 
 
@@ -299,6 +300,58 @@ def test_secure_bridge_host_start_failure_cleans_main_thread_state(
     assert server.stops == 1
 
 
+def test_host_bypasses_process_event_loop_policy_in_worker_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden_policy_loop():
+        raise RuntimeError("Houdini haio policy must not be consulted")
+
+    monkeypatch.setattr(asyncio, "new_event_loop", forbidden_policy_loop)
+    host, _ui, _adapter, _queue, _servers, _listener = _host(tmp_path)
+    try:
+        host.start()
+        assert host.is_running is True
+    finally:
+        host.stop()
+
+
+def test_background_async_runner_bypasses_asyncio_run_and_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        asyncio,
+        "run",
+        lambda _coro: (_ for _ in ()).throw(
+            RuntimeError("asyncio.run must not be used")
+        ),
+    )
+    monkeypatch.setattr(
+        asyncio,
+        "new_event_loop",
+        lambda: (_ for _ in ()).throw(
+            RuntimeError("Houdini haio policy must not be consulted")
+        ),
+    )
+
+    async def operation() -> tuple[str, str]:
+        loop = asyncio.get_running_loop()
+        return type(loop).__module__, threading.current_thread().name
+
+    outcome: dict[str, object] = {}
+
+    def run_operation() -> None:
+        outcome["value"] = run_background_async(operation)
+
+    thread = threading.Thread(target=run_operation, name="haio-policy-probe")
+    thread.start()
+    thread.join(2)
+    assert thread.is_alive() is False
+    loop_module, thread_name = outcome["value"]
+    assert loop_module.startswith("asyncio.")
+    assert thread_name == "haio-policy-probe"
+
+
 def test_host_source_uses_one_loopback_listener_and_houdini_idle_pump() -> None:
     source = inspect.getsource(
         __import__(
@@ -307,6 +360,7 @@ def test_host_source_uses_one_loopback_listener_and_houdini_idle_pump() -> None:
         )
     )
     assert 'target=self._thread_main' in source
+    assert "SelectorEventLoop" in source
     assert "addEventLoopCallback(self._pump)" in source
     assert "MainThreadReadQueue" in source
     assert '_HOST = "127.0.0.1"' in source

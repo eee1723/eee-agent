@@ -180,10 +180,14 @@ background asyncio thread, pumps the single FIFO from Houdini's main-thread
 idle callback, performs nullable-epoch binding followed by exact bound
 `scene.query`, and renders HIP/instance/epoch/revision plus bounded selected-node
 facts. Snapshot fallback now advances the reconnect cursor from
-`snapshot_seq`. The final gate passed 29 panel tests, a 345-test focused
-panel/Bridge/server regression, and 2066 full offline tests with the same
-optional WSL skip. Slice 17-A3 is waiting for real Houdini dock/restart/
-zero-mutation acceptance.
+`snapshot_seq`. After the real Houdini test exposed its process-wide
+`haio.HoudiniEventLoopPolicy`, both Bridge transport and selection refresh now
+use isolated stdlib selector loops in their worker threads. The final gate
+passed 31 panel tests, a 347-test focused panel/Bridge/server regression, and
+2068 full offline tests with the same optional WSL skip. A real hython
+background loopback probe also passed under the installed `haio` policy. Slice
+17-A3 is waiting for the remaining real Houdini dock/restart/zero-mutation
+acceptance.
 
 ### 17-A: Read-only selection inspector (earliest Houdini UI test)
 

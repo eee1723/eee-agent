@@ -5,7 +5,7 @@
 - Branch: `feature/runtime`
 - Task 16-E: accepted in a focused local commit
 - Task 17-A1: accepted in local commit `931ac1c`
-- Task 17-A2: implemented and offline-accepted in a focused local commit
+- Task 17-A2: implemented and offline-accepted in focused local commits
 - Task 17-A3: waiting for the user's real Houdini UI/restart/zero-mutation test
 - Task 17-B interactive Run/approval UI: not started
 
@@ -66,6 +66,18 @@ advances its per-Session cursor from `payload.snapshot_seq`. This closes the
 retention-gap case where `seq=null` snapshots could otherwise be requested
 again on every reconnect.
 
+### Houdini `haio` worker-loop correction
+
+The first real Houdini launch exposed that Houdini installs
+`haio.HoudiniEventLoopPolicy` process-wide. Calling `asyncio.new_event_loop()`
+or `asyncio.run()` from a worker thread therefore returned Houdini's singleton
+UI loop and failed its main-thread check.
+
+The Bridge transport thread and panel selection worker now construct a stdlib
+`SelectorEventLoop` directly, bypassing the process policy without altering
+Houdini's main-thread loop. Regression tests forbid both policy lookup and
+`asyncio.run()` on these worker paths.
+
 ### Menu and installation
 
 The existing Houdini package now exposes:
@@ -80,11 +92,11 @@ unchanged as rollback paths.
 ## Automated Acceptance Evidence
 
 ```text
-Task 17 panel tests:                  29 passed
-17-A2 plan gate:                     121 passed
+Task 17 panel tests:                  31 passed
+17-A2 plan gate:                     123 passed
 Bridge auth/client/inspector slice:  138 passed
-Panel/Bridge/server focused gate:    345 passed
-Full offline suite:                  2066 passed, 1 skipped
+Panel/Bridge/server focused gate:    347 passed
+Full offline suite:                  2068 passed, 1 skipped
 uv lock --check:                     69 packages, exit 0
 compileall:                          exit 0
 Runtime CLI help:                    exit 0
@@ -107,6 +119,10 @@ removed on stop.
 Against the detected Houdini 21.0.440 installation:
 
 - `secure_bridge_host` imports successfully under Houdini's bundled Python;
+- the host and selection worker bypass Houdini's process-wide
+  `haio.HoudiniEventLoopPolicy` with an isolated stdlib selector loop;
+- a real background-thread loopback listener opened and closed successfully
+  under the installed `haio` policy;
 - Houdini PySide6 6.5.3 imports after loading the installation's Qt DLL paths;
 - `RuntimePanel`, `QHeaderView.ResizeMode`, and
   `QWebSocketProtocol.VersionLatest` resolve against the shipped API;

@@ -8,7 +8,6 @@ graph, start Runtime, or expose any write command.
 
 from __future__ import annotations
 
-import asyncio
 import itertools
 import sys
 import threading
@@ -33,6 +32,7 @@ from eee_agent.panel.client_state import (  # noqa: E402
 from houdini_side.secure_bridge_host import (  # noqa: E402
     SelectionQueryError,
     query_selection,
+    run_background_async,
 )
 
 GRAPHITE = "#17191D"
@@ -185,7 +185,9 @@ class SelectionQueryWorker(QtCore.QObject):
 
     def _run(self) -> None:
         try:
-            result = asyncio.run(query_selection(runtime_state_dir()))
+            result = run_background_async(
+                lambda: query_selection(runtime_state_dir())
+            )
         except SelectionQueryError as exc:
             self._emit_failure(exc.code, str(exc), exc.retryable)
         except PanelClientError as exc:

@@ -49,6 +49,7 @@ def test_runtime_panel_keeps_client_only_import_boundary() -> None:
         "run.start",
         "workspace.create",
         "hou.selectedNodes",
+        "asyncio.run",
         "eval(",
         "exec(",
     ):

@@ -17,7 +17,7 @@ import sys
 import threading
 import uuid
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable, TypeVar
 
 REPO = Path(__file__).resolve().parent.parent
 if str(REPO) not in sys.path:
@@ -53,6 +53,7 @@ _DEFAULT_DEADLINE_MS = 5000
 _START_TIMEOUT_SECONDS = 10.0
 _JOIN_TIMEOUT_SECONDS = 10.0
 _PUMP_BUDGET = 8
+_T = TypeVar("_T")
 
 
 class SecureBridgeHostError(RuntimeError):
@@ -68,6 +69,46 @@ class SelectionQueryError(RuntimeError):
         self.code = code
         self.retryable = retryable
         super().__init__(message)
+
+
+def _new_background_event_loop() -> asyncio.AbstractEventLoop:
+    """Create a real thread-local loop without Houdini's main-thread policy.
+
+    Houdini installs ``haio.HoudiniEventLoopPolicy`` process-wide. Its
+    ``new_event_loop()`` always returns the singleton Houdini UI loop, whose
+    task creation deliberately fails outside the main thread. The Secure Bridge
+    transport and panel client instead need an ordinary socket-capable loop in
+    their worker threads, so construct the stdlib selector loop directly rather
+    than consulting the active policy.
+    """
+    factory = getattr(asyncio, "SelectorEventLoop", None)
+    if factory is None:
+        raise SecureBridgeHostError(
+            "A background asyncio event loop is not available."
+        )
+    return factory()
+
+
+def run_background_async(factory: Callable[[], Awaitable[_T]]) -> _T:
+    """Run one async operation on an isolated stdlib loop.
+
+    ``asyncio.run`` cannot be used in a Houdini worker thread because it asks
+    the installed ``haio`` policy for a loop. Creating the awaitable lazily also
+    avoids leaking an un-awaited coroutine if loop construction fails.
+    """
+    loop = _new_background_event_loop()
+    try:
+        return loop.run_until_complete(factory())
+    finally:
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:
+            pass
+        try:
+            loop.run_until_complete(loop.shutdown_default_executor())
+        except Exception:
+            pass
+        loop.close()
 
 
 def _request_id(label: str) -> str:
@@ -178,6 +219,9 @@ class SecureBridgeHost:
         queue_factory: Callable[[], MainThreadReadQueue] = MainThreadReadQueue,
         server_factory: Callable[..., BridgeServer] = BridgeServer,
         start_server_factory: Callable[..., object] = asyncio.start_server,
+        loop_factory: Callable[[], asyncio.AbstractEventLoop] = (
+            _new_background_event_loop
+        ),
         start_timeout: float = _START_TIMEOUT_SECONDS,
         join_timeout: float = _JOIN_TIMEOUT_SECONDS,
     ) -> None:
@@ -192,6 +236,7 @@ class SecureBridgeHost:
         self._queue_factory = queue_factory
         self._server_factory = server_factory
         self._start_server_factory = start_server_factory
+        self._loop_factory = loop_factory
         self._start_timeout = float(start_timeout)
         self._join_timeout = float(join_timeout)
 
@@ -311,23 +356,27 @@ class SecureBridgeHost:
         self._finish_main_thread_cleanup()
 
     def _thread_main(self) -> None:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        self._loop = loop
-        self._async_stop = asyncio.Event()
+        loop: asyncio.AbstractEventLoop | None = None
         try:
-            loop.run_until_complete(self._serve())
+            loop = self._loop_factory()
+            self._loop = loop
+            loop.run_until_complete(self._run_server_loop())
         except BaseException as exc:
             self._error = exc
             self._ready.set()
         finally:
-            try:
-                loop.run_until_complete(loop.shutdown_asyncgens())
-            except Exception:
-                pass
-            loop.close()
+            if loop is not None:
+                try:
+                    loop.run_until_complete(loop.shutdown_asyncgens())
+                except Exception:
+                    pass
+                loop.close()
             self._loop = None
             self._async_stop = None
+
+    async def _run_server_loop(self) -> None:
+        self._async_stop = asyncio.Event()
+        await self._serve()
 
     async def _serve(self) -> None:
         assert self._server is not None
@@ -436,6 +485,7 @@ __all__ = [
     "SecureBridgeHostError",
     "SelectionQueryError",
     "query_selection",
+    "run_background_async",
     "start",
     "status",
     "stop",
