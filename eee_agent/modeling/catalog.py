@@ -80,6 +80,28 @@ def houdini_21_minimal_catalog() -> NodeCatalog:
                 max_output_index=0,
             ),
             NodeTypeDefinition(
+                node_type="fuse2",
+                create_type="fuse::2.0",
+                parameters=(
+                    ParmDefinition("tol3d", 0.001),
+                    ParmDefinition("consolidatesnappedpoints", 1),
+                    ParmDefinition("deldegen", 1),
+                ),
+                max_inputs=2,
+                max_output_index=0,
+            ),
+            NodeTypeDefinition(
+                node_type="polyextrude2",
+                create_type="polyextrude::2.0",
+                parameters=(
+                    ParmDefinition("dist", 0.0),
+                    ParmDefinition("inset", 0.0),
+                    ParmDefinition("divs", 1),
+                ),
+                max_inputs=2,
+                max_output_index=0,
+            ),
+            NodeTypeDefinition(
                 node_type="subdivide",
                 parameters=(
                     ParmDefinition("algorithm", 2),

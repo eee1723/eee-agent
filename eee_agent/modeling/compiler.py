@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -39,6 +40,9 @@ from eee_agent.runtime.models import canonical_json_dumps
 
 _MAX_CHANGESET_OPERATIONS = 256
 _MAX_CHANGESET_CONDITIONS = 256
+_HOUDINI_NODE_TYPE_RE = re.compile(
+    r"^[A-Za-z0-9_]+(?:::[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)?$"
+)
 
 
 class ModelingCompileError(ValueError):
@@ -79,6 +83,7 @@ class NodeTypeDefinition:
     max_inputs: int
     max_output_index: int
     can_parent_nodes: bool = False
+    create_type: str | None = None
 
     def __post_init__(self) -> None:
         # Reuse the model-facing identifier validation without accepting a
@@ -120,6 +125,14 @@ class NodeTypeDefinition:
             )
         if type(self.can_parent_nodes) is not bool:
             raise TypeError("NodeTypeDefinition.can_parent_nodes must be a bool")
+        create_type = self.node_type if self.create_type is None else self.create_type
+        if (
+            type(create_type) is not str
+            or len(create_type) > 128
+            or _HOUDINI_NODE_TYPE_RE.fullmatch(create_type) is None
+        ):
+            raise ValueError("NodeTypeDefinition.create_type is invalid")
+        object.__setattr__(self, "create_type", create_type)
         object.__setattr__(self, "parameters", items)
 
     @property
@@ -133,6 +146,7 @@ class NodeTypeDefinition:
             "max_inputs": self.max_inputs,
             "max_output_index": self.max_output_index,
             "can_parent_nodes": self.can_parent_nodes,
+            "create_type": self.create_type,
         }
 
 
@@ -449,6 +463,7 @@ def compile_procedural_spec(
     created_paths: set[str] = set()
 
     for item in ordered:
+        create_type = definitions[item.qualified_key].create_type or item.spec.node_type
         if item.spec.parent_node is None:
             parent_ref = root_ref
         else:
@@ -464,7 +479,7 @@ def compile_procedural_spec(
         ref = NodeRef(
             node_id=node_id,
             path=path,
-            expected_type=item.spec.node_type,
+            expected_type=create_type,
             expected_workspace_id=workspace.workspace_id,
         )
         node_refs[item.qualified_key] = ref
@@ -476,7 +491,7 @@ def compile_procedural_spec(
                 ),
                 parent=parent_ref,
                 node_id=node_id,
-                node_type=item.spec.node_type,
+                node_type=create_type,
                 node_name=item.spec.node_name,
                 workspace_id=workspace.workspace_id,
                 capability="modeling",
@@ -719,6 +734,7 @@ def compile_bootstrap_procedural_spec(
     created_paths: set[str] = {root_ref.path}
     roles = {component.component_id: component.role for component in spec.components}
     for item in ordered:
+        create_type = definitions[item.qualified_key].create_type or item.spec.node_type
         logical_parent = item.spec.parent_node
         node_parent = root_ref if logical_parent is None else node_refs[logical_parent]
         path = f"{node_parent.path.rstrip('/')}/{item.spec.node_name}"
@@ -732,7 +748,7 @@ def compile_bootstrap_procedural_spec(
         ref = NodeRef(
             node_id=node_id,
             path=path,
-            expected_type=item.spec.node_type,
+            expected_type=create_type,
             expected_workspace_id=bootstrap.workspace_id,
         )
         node_refs[item.qualified_key] = ref
@@ -744,7 +760,7 @@ def compile_bootstrap_procedural_spec(
                 ),
                 parent=node_parent,
                 node_id=node_id,
-                node_type=item.spec.node_type,
+                node_type=create_type,
                 node_name=item.spec.node_name,
                 workspace_id=bootstrap.workspace_id,
                 capability="modeling",

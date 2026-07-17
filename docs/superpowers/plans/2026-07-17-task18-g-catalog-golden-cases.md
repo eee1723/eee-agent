@@ -1,10 +1,10 @@
 # Task 18-G Catalog Expansion and Golden Cases Plan
 
-Status: existing core SOP batch plus verified `normal`/`subdivide` entries and
-four deterministic Golden Cases (box chain, grid chain, merged sources,
-subdivided surface) are implemented and replayed successfully in Houdini
-21.0.440 hython. Versioned polyextrude/fuse, assembly, and boolean batches
-remain.
+Status: existing core SOP batch plus verified `normal`, `subdivide`, versioned
+`polyextrude::2.0`, and `fuse::2.0` entries are implemented. Five deterministic
+Golden Cases (box chain, grid chain, merged sources, subdivided surface,
+extruded/fused grid) replay successfully in Houdini 21.0.440 hython. Assembly
+and boolean batches remain.
 
 ## Catalog batches
 

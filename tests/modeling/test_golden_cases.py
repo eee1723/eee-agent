@@ -46,6 +46,7 @@ def test_minimal_golden_cases_compile_deterministically() -> None:
         "grid_transform_output",
         "merged_sources_output",
         "subdivided_surface_output",
+        "extruded_grid_output",
     ]
     for index, case in enumerate(cases, start=1):
         first = _compile(case, index)
@@ -56,7 +57,12 @@ def test_minimal_golden_cases_compile_deterministically() -> None:
             for operation in first.changeset.operations
             if isinstance(operation, CreateNode)
         )
-        assert created_types == ("geo", *case.expected_node_types)
+        catalog = houdini_21_minimal_catalog()
+        expected_create_types = tuple(
+            catalog.by_type[node_type].create_type
+            for node_type in case.expected_node_types
+        )
+        assert created_types == ("geo", *expected_create_types)
         assert any(
             node.path.endswith(f"/{case.expected_terminal_node_name}")
             for node in first.changeset.affected_nodes

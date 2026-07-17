@@ -306,7 +306,71 @@ def houdini_21_minimal_golden_cases() -> tuple[GoldenCase, ...]:
         ),
         "OUT_MODEL",
     )
-    return box_chain, grid_chain, merged, surface
+    extruded = _case(
+        "extruded_grid_output",
+        "Extrude a grid, fuse it, compute normals, and expose a stable output.",
+        (
+            ComponentSpec(
+                component_id="source",
+                role="generator",
+                depends_on=(),
+                nodes=(
+                    NodeSpec(
+                        node_key="grid",
+                        node_type="grid",
+                        node_name="grid1",
+                        parent_node=None,
+                        parameters=(
+                            ParmAssignment("sizex", 2.0),
+                            ParmAssignment("sizey", 2.0),
+                        ),
+                        inputs=(),
+                    ),
+                ),
+            ),
+            ComponentSpec(
+                component_id="surface",
+                role="surface",
+                depends_on=("source",),
+                nodes=(
+                    NodeSpec(
+                        node_key="extrude",
+                        node_type="polyextrude2",
+                        node_name="polyextrude1",
+                        parent_node=None,
+                        parameters=(ParmAssignment("dist", 1.0),),
+                        inputs=(InputBinding(0, "source.grid", 0),),
+                    ),
+                    NodeSpec(
+                        node_key="fuse",
+                        node_type="fuse2",
+                        node_name="fuse1",
+                        parent_node=None,
+                        parameters=(),
+                        inputs=(InputBinding(0, "surface.extrude", 0),),
+                    ),
+                    NodeSpec(
+                        node_key="normal",
+                        node_type="normal",
+                        node_name="normal1",
+                        parent_node=None,
+                        parameters=(),
+                        inputs=(InputBinding(0, "surface.fuse", 0),),
+                    ),
+                    NodeSpec(
+                        node_key="out",
+                        node_type="null",
+                        node_name="OUT_MODEL",
+                        parent_node=None,
+                        parameters=(),
+                        inputs=(InputBinding(0, "surface.normal", 0),),
+                    ),
+                ),
+            ),
+        ),
+        "OUT_MODEL",
+    )
+    return box_chain, grid_chain, merged, surface, extruded
 
 
 __all__ = ["GoldenCase", "houdini_21_minimal_golden_cases"]

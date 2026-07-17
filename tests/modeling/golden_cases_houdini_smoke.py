@@ -100,8 +100,8 @@ def main() -> None:
                     f"GOLDEN FAIL {case.case_id}: manifest node count mismatch"
                 )
         print(
-            "GOLDEN CASES PASS: box, grid, merge, subdivide, normal, outputs, "
-            "Cook/Geometry, manifests"
+            "GOLDEN CASES PASS: box, grid, merge, subdivide, polyextrude2, "
+            "fuse2, normal, outputs, Cook/Geometry, manifests"
         )
     finally:
         for root_path in roots:

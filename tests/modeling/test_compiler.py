@@ -547,6 +547,26 @@ def test_compile_rejects_typed_changeset_operation_budget_overflow() -> None:
     assert caught.value.code == "modeling.operation_budget_exceeded"
 
 
+def test_catalog_alias_resolves_only_trusted_versioned_create_type() -> None:
+    definition = NodeTypeDefinition(
+        node_type="polyextrude2",
+        create_type="polyextrude::2.0",
+        parameters=(),
+        max_inputs=2,
+        max_output_index=0,
+    )
+    assert definition.node_type == "polyextrude2"
+    assert definition.create_type == "polyextrude::2.0"
+    with pytest.raises(ValueError):
+        NodeTypeDefinition(
+            node_type="bad_alias",
+            create_type="../../python",
+            parameters=(),
+            max_inputs=1,
+            max_output_index=0,
+        )
+
+
 def test_compiler_module_has_no_houdini_runtime_or_dynamic_execution_imports() -> None:
     import eee_agent.modeling.compiler as compiler
 
