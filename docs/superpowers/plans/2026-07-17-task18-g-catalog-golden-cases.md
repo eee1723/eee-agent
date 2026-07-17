@@ -2,10 +2,10 @@
 
 Status: existing core SOP batch plus verified `normal`, `subdivide`, versioned
 `polyextrude::2.0`, `fuse::2.0`, `line`, `resample`, `sweep::2.0`, and
-`copytopoints::2.0` entries are implemented. Seven deterministic
+`copytopoints::2.0`, and `boolean::2.0` entries are implemented. Eight deterministic
 Golden Cases (box chain, grid chain, merged sources, subdivided surface,
-extruded/fused grid, copied boxes, swept lines) replay successfully in Houdini
-21.0.440 hython. Boolean and richer asset-level batches remain.
+extruded/fused grid, copied boxes, swept lines, boolean union) replay
+successfully in Houdini 21.0.440 hython. Richer asset-level batches remain.
 
 ## Catalog batches
 

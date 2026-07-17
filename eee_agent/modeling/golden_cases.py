@@ -509,7 +509,72 @@ def houdini_21_minimal_golden_cases() -> tuple[GoldenCase, ...]:
         ),
         "OUT_MODEL",
     )
-    return box_chain, grid_chain, merged, surface, extruded, copied, swept
+    boolean_union = _case(
+        "boolean_union_output",
+        "Union two overlapping boxes and expose one stable output.",
+        (
+            ComponentSpec(
+                component_id="sources",
+                role="generator",
+                depends_on=(),
+                nodes=(
+                    NodeSpec(
+                        node_key="left",
+                        node_type="box",
+                        node_name="box_left",
+                        parent_node=None,
+                        parameters=(ParmAssignment("tx", -0.25),),
+                        inputs=(),
+                    ),
+                    NodeSpec(
+                        node_key="right",
+                        node_type="box",
+                        node_name="box_right",
+                        parent_node=None,
+                        parameters=(ParmAssignment("tx", 0.25),),
+                        inputs=(),
+                    ),
+                ),
+            ),
+            ComponentSpec(
+                component_id="boolean",
+                role="boolean",
+                depends_on=("sources",),
+                nodes=(
+                    NodeSpec(
+                        node_key="union",
+                        node_type="boolean2",
+                        node_name="boolean1",
+                        parent_node=None,
+                        parameters=(),
+                        inputs=(
+                            InputBinding(0, "sources.left", 0),
+                            InputBinding(1, "sources.right", 0),
+                        ),
+                    ),
+                    NodeSpec(
+                        node_key="out",
+                        node_type="null",
+                        node_name="OUT_MODEL",
+                        parent_node=None,
+                        parameters=(),
+                        inputs=(InputBinding(0, "boolean.union", 0),),
+                    ),
+                ),
+            ),
+        ),
+        "OUT_MODEL",
+    )
+    return (
+        box_chain,
+        grid_chain,
+        merged,
+        surface,
+        extruded,
+        copied,
+        swept,
+        boolean_union,
+    )
 
 
 __all__ = ["GoldenCase", "houdini_21_minimal_golden_cases"]

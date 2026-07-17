@@ -42,6 +42,16 @@ def houdini_21_minimal_catalog() -> NodeCatalog:
                 max_output_index=0,
             ),
             NodeTypeDefinition(
+                node_type="boolean2",
+                create_type="boolean::2.0",
+                parameters=(
+                    ParmDefinition("booleanop", 0),
+                    ParmDefinition("subtractchoices", 0),
+                ),
+                max_inputs=2,
+                max_output_index=0,
+            ),
+            NodeTypeDefinition(
                 node_type="grid",
                 parameters=(
                     ParmDefinition("sizex", 10.0),

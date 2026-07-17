@@ -10,7 +10,7 @@ def test_houdini_21_minimal_catalog_contains_only_verified_safe_types() -> None:
     catalog = houdini_21_minimal_catalog()
     by_type = catalog.by_type
     assert set(by_type) == {
-        "box", "copytopoints2", "fuse2", "geo", "grid", "line", "merge",
+        "boolean2", "box", "copytopoints2", "fuse2", "geo", "grid", "line", "merge",
         "normal", "null", "polyextrude2", "resample", "subdivide", "sweep2",
         "xform"
     }
@@ -27,6 +27,7 @@ def test_houdini_21_minimal_catalog_contains_only_verified_safe_types() -> None:
     assert by_type["fuse2"].create_type == "fuse::2.0"
     assert by_type["copytopoints2"].create_type == "copytopoints::2.0"
     assert by_type["sweep2"].create_type == "sweep::2.0"
+    assert by_type["boolean2"].create_type == "boolean::2.0"
 
 
 def test_houdini_21_minimal_quality_profile_is_deterministic() -> None:
