@@ -4,13 +4,15 @@
 
 - Repository: `https://github.com/eee1723/eee-agent.git`
 - Development branch: `feature/runtime`
-- Authoritative local resume point: `6163b693b787990bc38024b0ef1159309aad81d4`
+- Transferred branch tip (must contain this handoff): verify after an approved
+  push or commit transfer; do not hard-code a documentation commit SHA here.
 - Baseline freeze commit: `b1dddc5d2154b01a1bf2409c0ad54730575e06c0`
 - Upstream currently remains at `origin/feature/runtime` = `69b3fd2`; it does
   not yet contain the local baseline freeze or this handoff update.
 - Local baseline tag: `runtime-pre-mvp-2026-07-17` (annotated, points to
   `742c910192c5dee5ece628096747312e5057372b`; not pushed yet)
-- Accepted implementation tip before this documentation update: `6163b69`
+- Handoff state: baseline freeze plus subsequent documentation commits; the
+  transferred branch tip must contain this handoff.
 - Houdini baseline: `21.0.440`, Python `3.11`, bundled `rpyc 4.1.0`
 - Latest complete offline gate: `2317 passed in 137.48s` (the runtime MVP
   pre-implementation baseline; no test failures or skips)
@@ -20,15 +22,20 @@ read-only provider migration**. Do not start S2 legacy-entrypoint removal or
 the downstream Artifact/Knowledge work until S1's unit and integration gates
 are green.
 
-The authoritative resume point for this handoff is the local commit
-`6163b69`, not the current remote tip. The baseline commit, this handoff
-update, and the annotated `runtime-pre-mvp-2026-07-17` tag must first be pushed
-or otherwise transferred to a fresh machine; until that happens, a fresh clone
-at `origin/feature/runtime` (`69b3fd2`) is an older, incomplete resume point.
+The transferred branch tip is authoritative only when it contains this handoff
+and the baseline freeze. The baseline commit, this handoff update, and the
+annotated `runtime-pre-mvp-2026-07-17` tag must first be pushed or otherwise
+transferred to a fresh machine; until that happens, a fresh clone at
+`origin/feature/runtime` (`69b3fd2`) is an older, incomplete resume point.
 Do not merge `main`, rewrite the accepted branch history, or force-push as part
-of machine setup. After an approved push or commit transfer, verify the local
-checkout resolves to `6163b69` and the tag peels to `742c910` before changing
-code.
+of machine setup. After an approved push or commit transfer, verify the branch
+contains the baseline and the tag resolves to the design baseline before
+changing code:
+
+```powershell
+git merge-base --is-ancestor b1dddc5 HEAD
+git rev-parse "runtime-pre-mvp-2026-07-17^{}"
+```
 
 ## Fresh computer recovery
 
@@ -39,8 +46,9 @@ git clone https://github.com/eee1723/eee-agent.git E:\eee-agent
 Set-Location E:\eee-agent
 git switch --track origin/feature/runtime
 # The remote may still be at 69b3fd2. Continue only after the approved
-# transfer/push makes 6163b69 and runtime-pre-mvp-2026-07-17 available.
-git rev-parse HEAD
+# transfer/push makes the branch tip containing this handoff and the local
+# runtime-pre-mvp-2026-07-17 tag available.
+git merge-base --is-ancestor b1dddc5 HEAD
 git rev-parse "runtime-pre-mvp-2026-07-17^{}"
 
 $Candidates = @(
