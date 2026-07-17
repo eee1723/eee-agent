@@ -77,14 +77,36 @@ if eee_agent.workflow_middleware.is_enabled():
 
 def test_deleted_legacy_packages_are_not_discoverable() -> None:
     script = """
+import importlib
 import importlib.util
-for name in ('eee_agent.bridge', 'eee_agent.tools'):
-    spec = importlib.util.find_spec(name)
-    if spec is not None and spec.origin is not None:
-        raise SystemExit(name + ' unexpectedly has a source origin: ' + spec.origin)
+import pathlib
+import sys
+import tempfile
+
+with tempfile.TemporaryDirectory() as root:
+    package = pathlib.Path(root) / 'eee_agent'
+    package.mkdir()
+    (package / '__init__.py').write_text('')
+    for loaded in list(sys.modules):
+        if loaded == 'eee_agent' or loaded.startswith('eee_agent.'):
+            del sys.modules[loaded]
+    sys.path[:] = [root]
+    importlib.invalidate_caches()
+    import eee_agent
+    eee_agent.__path__ = [str(package)]
+    eee_agent.__spec__.submodule_search_locations = [str(package)]
+    assert importlib.util.find_spec('eee_agent.bridge') is None
+    assert importlib.util.find_spec('eee_agent.tools') is None
+    for name in ('eee_agent.bridge', 'eee_agent.tools'):
+        try:
+            importlib.import_module(name)
+        except ModuleNotFoundError:
+            pass
+        else:
+            raise SystemExit(name + ' unexpectedly importable')
 """
     result = subprocess.run(
-        [sys.executable, "-c", script], cwd=ROOT, env=os.environ.copy(),
+        [sys.executable, "-S", "-c", script], cwd=ROOT, env=os.environ.copy(),
         capture_output=True, text=True, check=False,
     )
     assert result.returncode == 0, result.stderr or result.stdout
@@ -98,3 +120,10 @@ def test_cli_parser_rejects_removed_modes(removed: str) -> None:
 
 def test_cli_parser_retains_versions_only() -> None:
     assert build_parser().parse_args(["versions"]).mode == "versions"
+
+
+def test_runtime_config_has_no_legacy_rpc_host_port_surface() -> None:
+    import eee_agent.config as config
+
+    assert not hasattr(config, "rpc_config")
+    assert not hasattr(config, "RpcConfig")

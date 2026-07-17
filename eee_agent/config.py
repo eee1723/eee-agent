@@ -12,25 +12,12 @@ load_dotenv(os.path.join(_REPO_ROOT, ".env"))
 
 
 @dataclass(frozen=True)
-class RpcConfig:
-    host: str
-    port: int
-
-
-@dataclass(frozen=True)
 class LlmConfig:
     provider: str
     model: str
     thinking_enabled: bool
     effort: str | None
     max_output_tokens: int
-
-
-def rpc_config() -> RpcConfig:
-    return RpcConfig(
-        host=os.getenv("HOUDINI_RPC_HOST", "127.0.0.1"),
-        port=int(os.getenv("HOUDINI_RPC_PORT", "18811")),
-    )
 
 
 def _env_bool(name: str, default: bool) -> bool:

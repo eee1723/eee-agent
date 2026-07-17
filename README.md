@@ -36,9 +36,9 @@ Agent process (this package, .venv, Python 3.11 — uv-managed)
 
 ```
 eee_agent/
-  config.py            env: RPC host/port, LLM provider/model, recursion limit, thinking/effort
+  config.py            env: LLM provider/model, recursion limit, thinking/effort
   model.py             provider-neutral factory -> ProviderRegistry (no concrete provider import)
-  system_prompt.py     enforces plan→build→cook→stats→validate→export; on-demand status
+  system_prompt.py     audited Runtime read-only/proposal/approval boundary
   app.py               create_deep_agent(...) + harness config + reliability middleware
   cli.py               versions (diagnostic report only; no agent execution)
   harness.py           disable Deep Agents' implicit general-purpose/task (Foundation)
@@ -161,7 +161,7 @@ uv run --extra eval python -m eee_agent.runtime serve --help   # options
 | Area | State |
 |---|---|
 | Phase 0 — typed Secure Bridge API | ✅ verified (source read + hython introspection) |
-| Phase 1 — bridge + 25 tools + CLI | ✅ done |
+| Phase 1 — legacy Foundation bridge/tools/CLI | historical (removed from production Runtime) |
 | Phase C — port-based parametric components | ✅ done (`make_component` geo/anchors ports, `wire_anchor`, `assemble_output`, ranged `p_*` parms) |
 | Reliability layers | ✅ read-back trim · loop guard · tool-error trace · compact tool; recursion 999 |
 | Runtime UI | ✅ PySide6 panel (dark, tool cards / todos / metrics / send-stop) |
