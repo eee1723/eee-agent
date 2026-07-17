@@ -5,10 +5,15 @@
 - Repository: `https://github.com/eee1723/eee-agent.git`
 - Development branch: `feature/runtime`
 - Upstream: `origin/feature/runtime`
-- Accepted implementation tip before this documentation update: `2433966`
+- Accepted implementation tip before this documentation update: `4b1f7e7`
 - Houdini baseline: `21.0.440`, Python `3.11`, bundled `rpyc 4.1.0`
-- Latest complete offline gate: `2171 passed, 1 skipped` (the skip is the
-  optional WSL probe)
+- Latest complete offline gate: `2317 passed in 137.48s` (the runtime MVP
+  pre-implementation baseline; no test failures or skips)
+
+The next implementation task is **S1: secure Runtime Agent context and
+read-only provider migration**. Do not start S2 legacy-entrypoint removal or
+the downstream Artifact/Knowledge work until S1's unit and integration gates
+are green.
 
 After cloning, the authoritative resume point is the tip of
 `origin/feature/runtime`, including this handoff. Do not merge `main`, rewrite
@@ -147,8 +152,8 @@ boxes, swept lines, and boolean union.
 The last accepted complete gate was:
 
 ```text
-uv run --frozen --extra eval pytest -q
-2171 passed, 1 skipped in 105.26s
+uv run pytest -q
+2317 passed in 137.48s (0:02:17)
 
 uv lock --check
 passed
@@ -161,7 +166,8 @@ passed
 ```
 
 Disposable Houdini tests passed on
-`C:\Program Files\Side Effects Software\Houdini 21.0.440`:
+`C:\Program Files\Side Effects Software\Houdini 21.0.440` (the existing
+pre-MVP evidence set):
 
 ```powershell
 & "$HFS\bin\hython.exe" -u tests\modeling\bootstrap_houdini_smoke.py
@@ -175,25 +181,33 @@ manifest checks. Houdini can print a harmless Qt
 `QObject::startTimer: Timers can only be used with threads started with QThread`
 warning after a successful hython run.
 
+Additional recorded Houdini wire evidence for this baseline:
+
+- capture smoke: `21 checks passed`;
+- typed changeset smoke: `SMOKE OK`;
+- bootstrap smoke: `PASS`;
+- golden-case smoke: `PASS`.
+
+These are the last known-good disposable Houdini results before S1. S3 will
+add the missing production sensitivity wire smoke, including stale-epoch,
+zero-write, restore, failure-precedence, restart, and fingerprint assertions.
+
 ## Remaining work, in order
 
-1. **Task 18-F: production transactional sensitivity Bridge.** Move parameter
-   sampling from deterministic validation/disposable smoke into a typed,
-   main-thread Bridge operation that always restores the exact value and fails
-   closed on uncertainty. Add interruption, cook-failure, restore-failure,
-   stale-scene, restart, and evidence tests.
-2. **Task 19-A: Artifact evidence.** Add content-addressed metadata, bounded
-   retention, deterministic capture/framing, byte identity between displayed
-   and vision-consumed images, and an Artifact inspector section.
-3. **Task 18-G: richer asset-level Golden Cases.** Expand only in small
-   hython-verified catalog batches; keep file/source/expression/Python/VEX
-   parameters excluded until a separate source policy is accepted.
-4. **Task 19-B/19-C: vision routing and delivery evaluation.** Vision is
-   advisory and may never override a deterministic failure. Preserve explicit
-   unavailable/waiver evidence.
-5. **Task 18-H: final GUI pass.** Finish validation/artifact result surfaces,
-   then ask the user to perform the deferred real-Houdini focus, Chinese IME,
-   button, reconnect, layout, and complete journey acceptance.
+1. **S1: secure Runtime Agent context and read-only provider migration.** Move
+   AgentRunner and Runtime service code to an explicit read-only tool context;
+   remove imports of the legacy unauthenticated bridge from the active path.
+2. **S2: remove legacy raw-write entrypoints.** Disable the old Open Agent
+   Panel, CLI, menu, and raw-write bridge entrypoints after S1 is green.
+3. **S3: production transactional sensitivity wire smoke.** Add the real
+   main-thread smoke for stale epoch, zero-write, restoration, failure
+   precedence, restart, evidence, and scene-fingerprint invariants.
+4. **S4: Artifact consistency and Knowledge Graph integration.** Implement
+   commit-safe artifact retention/reconciliation, then merge the Knowledge
+   Graph read-only provider into Runtime MVP.
+5. **S5 and later: real-provider Runtime acceptance, advisory Vision and
+   Evaluation, final GUI, CI, release tagging, and local/remote branch
+   cleanup.**
 
 The immediate autonomous slice is item 1. Interactive Houdini testing is not
 required until the implementation and hython gates above are green.
@@ -214,9 +228,10 @@ required until the implementation and hython gates above are green.
 
 ```text
 Read CLAUDE.md and docs/handoffs/2026-07-17-cross-machine-modeling-handoff.md.
-Verify feature/runtime is clean and matches origin. Continue with Task 18-F's
-production transactional parameter-sensitivity Bridge, preserving all trust,
-single-FIFO, rollback, receipt, restart-recovery, and no-public-write-tool
-boundaries. Use offline tests and disposable Houdini 21.0.440 hython; defer only
-the documented final GUI acceptance.
+Verify feature/runtime is clean and matches the baseline tag
+runtime-pre-mvp-2026-07-17. Continue with S1's secure Runtime Agent context and
+read-only provider migration, preserving all trust, single-FIFO, rollback,
+receipt, restart-recovery, and no-public-write-tool boundaries. Run the offline
+tests before moving to S2; use disposable Houdini 21.0.440 hython for the
+later S3 wire smoke.
 ```
