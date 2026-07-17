@@ -26,7 +26,7 @@ Agent process (this package, .venv, Python 3.11 — uv-managed)
         └─ optional tracing → Phoenix (http://localhost:6006)  [deps not in Foundation lock]
 ```
 
-- The agent's heavy deps (langchain/deepagents/rpyc) live in `.venv`, **never in
+- The agent's heavy deps (langchain/deepagents) live in `.venv`, **never in
   Houdini's Python**. Houdini side uses only its built-in PySide6 — zero extra
   install in Houdini.
 - The Secure Bridge returns bounded plain dicts and requires per-install
@@ -63,14 +63,14 @@ scripts/env_probe.sh   session-start environment probe (runs via .claude/setting
 ## Multi-machine development
 
 This project is developed across **two machines**; the agent `.venv` is
-**machine-specific** (it must match the local Houdini's bundled `rpyc`), so it is
+**machine-specific**, so it is
 `.gitignore`d and rebuilt per machine — see `SETUP.md`. The per-machine
 environment inventory is kept in Claude's project memory.
 
 At the **start of every session**, a `SessionStart` hook (`.claude/settings.json`)
 runs `scripts/env_probe.sh` and prints a one-shot status: which Houdini path is
-present, whether `.venv` / `.env` exist and `rpyc` matches, whether the RPC bridge
-is up, and whether `build_agent()` compiles. **Read it and resolve any `[WARN]`
+present, whether `.venv` / `.env` exist, whether the Secure Runtime is available,
+and whether the explicit read-only `build_agent()` compiles. **Read it and resolve any `[WARN]`
 before starting dev.**
 
 ## Setup (per machine)
@@ -78,21 +78,20 @@ before starting dev.**
 See `SETUP.md` for the full sequence. Short version (Foundation uses `uv`):
 
 ```powershell
-# 1. venv from Houdini's bundled Python 3.11 (guarantees version/rpyc match).
+# 1. venv from Houdini's bundled Python 3.11.
 #    Houdini path is machine-specific — adjust to your build:
 #      Machine A: C:\Program Files\Side Effects Software\Houdini 21.0.440
 #      Machine B: D:\houdini
 & "<Houdini>\python311\python.exe" -m venv .venv
-# 2. sync exact locked deps (pins rpyc==4.1.0 for Houdini 21.0.440)
+# 2. sync exact locked deps
 uv sync --extra eval --python 3.11
 uv lock --check
 # 3. configure
 copy .env.example .env   # fill DEEPSEEK_API_KEY  (or switch EEE_LLM_PROVIDER)
 ```
 
-> ⚠️ `rpyc` in the venv **must equal** Houdini's bundled rpyc or RPC fails with
-> `ValueError: invalid message type: 18`. Houdini 21.0.440 ships **rpyc 4.1.0**
-> (`uv.lock` pins it). Re-check + re-pin if Houdini is upgraded.
+> The authenticated Secure Bridge speaks the typed Runtime protocol and does
+> not depend on Houdini's Python packages in the agent venv.
 
 ## Run
 
@@ -108,7 +107,7 @@ copy .env.example .env   # fill DEEPSEEK_API_KEY  (or switch EEE_LLM_PROVIDER)
    Foundation**; `openinference` is not in `uv.lock` (later milestone). See `CLAUDE.md`
    gotcha #7.
 
-## Runtime (additive, loopback, read-only v1)
+## Runtime (production, loopback, read-only MVP)
 
 A second, **persistent and authenticated** Runtime (`eee_agent/runtime/`) runs as
 its own process. It is the only production agent entrypoint and never falls back
@@ -129,9 +128,10 @@ uv run --extra eval python -m eee_agent.runtime serve --help   # options
   `runtime.lock`, `runtime.json` (discovery: host/port/pid/nonce + a token
   **fingerprint** only), `runtime.token` (the full bearer token — its only home).
 - **Read-only Houdini boundary (v1)** — the Runtime agent uses an exact read-only
-  tool allowlist (`hou_status`, `find_nodes`, `describe_node_type`,
-  `geometry_stats`, `validate_geometry`, `work_status`, `anchor_graph`); no
-  write/save/export and no implicit general-purpose subagent. Conversation
+  tool allowlist (`scene_status`, `query_scene`, `inspect_workspace`,
+  `geometry_stats`, `work_status`); no direct write/save/export tools and no
+  implicit general-purpose subagent. Scene changes require a typed proposal,
+  explicit approval, and the authenticated ChangeSet protocol. Conversation
   continuity uses `thread_id = session_id`.
 - **Docked Runtime control** — the Houdini panel can create/select Sessions,
   start/stop Runs, recover bounded output/activity, and render bounded
@@ -160,14 +160,14 @@ uv run --extra eval python -m eee_agent.runtime serve --help   # options
 
 | Area | State |
 |---|---|
-| Phase 0 — hrpyc/hou API | ✅ verified (source read + hython introspection) |
+| Phase 0 — typed Secure Bridge API | ✅ verified (source read + hython introspection) |
 | Phase 1 — bridge + 25 tools + CLI | ✅ done |
 | Phase C — port-based parametric components | ✅ done (`make_component` geo/anchors ports, `wire_anchor`, `assemble_output`, ranged `p_*` parms) |
 | Reliability layers | ✅ read-back trim · loop guard · tool-error trace · compact tool; recursion 999 |
 | Runtime UI | ✅ PySide6 panel (dark, tool cards / todos / metrics / send-stop) |
 | Observability | ✅ Phoenix one-click launcher + tool-error spans (runtime deps return in a later milestone) |
 | **Foundation milestone** | ✅ done — uv-locked deps, core contracts, provider registry (DeepSeek via official Anthropic endpoint), normalized events, explicit harness (no implicit `task`), `cli versions`. 369 tests pass. See `docs/handoffs/2026-07-13-foundation-migration.md` |
-| **Live end-to-end agent run on current machine** | ⏳ pending — bridge must be started in Houdini, then `selftest` + a `prompt` |
+| **Live Runtime acceptance on current machine** | pending — start Runtime Control with the authenticated Secure Bridge, then run the Runtime/typed-bridge smoke and approval-gate acceptance suite |
 | Runtime + typed Houdini ChangeSets | Complete through local Task 16-E acceptance on `feature/runtime`: trusted Workspace, ordered created references, transactional Apply, atomic receipts, and no-replay restart recovery. |
 | Docked Runtime panel | Task 17-A and Task 17-B are accepted. The complete Houdini 21.0.440 gate passed Chinese IME/default Session behavior, read-only Run, high-volume reopen, Runtime restart recovery, Stop to Cancelled, empty approvals/no Apply, Scene regression, and zero mutation. See `docs/superpowers/reviews/2026-07-16-task17-b-review-result.md` and `docs/handoffs/2026-07-16-runtime-17b-transfer.md` |
 | Strict modeling foundation | Task 18-A through 18-E, Cook/Geometry and Sensitivity validation, first 18-G catalog/Golden Case batches, and the first 18-H product-mode panel slice are implemented on `feature/runtime`: strict Brief/Spec contracts, catalog-gated compilation, trusted bootstrap persistence, approval-to-single-flight Apply, durable validation evidence, bounded repair tickets, verified assembly/surface/boolean replays, Golden Case semantic checks, and a MODEL/REVIEW user flow with Details diagnostics. Full offline gate is 2171 passed with 1 optional WSL skip; dedicated Houdini 21 hython Golden Case replay passed. Transactional sensitivity Bridge, Artifact evidence, richer asset batches, and final GUI acceptance remain next. See `docs/superpowers/plans/2026-07-17-task18-h-product-ui.md` and `docs/superpowers/plans/2026-07-17-task18-g-catalog-golden-cases.md` |
@@ -180,7 +180,8 @@ uv run --extra eval python -m eee_agent.runtime serve --help   # options
   `C:\Program Files\Side Effects Software\Houdini 21.0.440`; Machine B: `D:\houdini`
   (hython `bin\hython.exe`, bundled Python `python311\` = 3.11.7, PySide6).
   `scripts/env_probe.sh` detects which is present.
-- rpyc **4.1.0** in both Houdini's bundle and the venv (must match); pinned in `uv.lock`.
+- The agent venv contains only the locked Runtime dependencies; Houdini-side
+  integration uses the authenticated typed Secure Bridge protocol.
 - Multi-output SOP subnets require internal `output` nodes with explicit
   `outputidx` (a vanilla subnet has one effective output) — see `CLAUDE.md` gotcha #5.
 - DeepSeek V4 routes through `ChatAnthropic` on `https://api.deepseek.com/anthropic`

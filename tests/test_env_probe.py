@@ -124,7 +124,7 @@ def test_probe_python_processes_are_side_effect_free() -> None:
         r'(?:(-B) )?(?:-c|--version)',
         text,
     )
-    assert len(python_flags) >= 5
+    assert len(python_flags) >= 3
     assert all(flag == "-B" for flag in python_flags)
 
     harness = text[text.index("printf 'agent harness:") :]

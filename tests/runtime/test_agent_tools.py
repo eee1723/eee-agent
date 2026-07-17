@@ -159,3 +159,11 @@ def test_finish_rejects_unbounded_item_budget() -> None:
     result = _finish({"ok": True, "items": list(range(10_000))})
     assert result["ok"] is False
     assert result["code"] == "bridge.unavailable"
+
+
+def test_finish_bounds_large_plain_payload_without_leaking_original_text() -> None:
+    secret = "payload-secret-" + ("x" * 100_000)
+    result = _finish({"ok": True, "payload": secret})
+    assert len(repr(result).encode("utf-8")) <= 16 * 1024
+    assert "payload-secret" not in repr(result)
+    assert result["payload"] == "[truncated]"

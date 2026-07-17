@@ -65,21 +65,15 @@ if (-not $HFS) {
 $HFS
 ```
 
-Verify its Python and bundled rpyc:
+Verify its Python runtime:
 
 ```powershell
-& (Join-Path $HFS 'bin\hython.exe') -c "import sys, rpyc; print(sys.version); print(rpyc.version.version)"
+& (Join-Path $HFS 'bin\hython.exe') -c "import sys; print(sys.version)"
 ```
 
-For Houdini 21.0.440, the expected major/minor Python is 3.11 and expected
-rpyc is 4.1.0. The project's `uv.lock` pins rpyc 4.1.0 because a Bridge client
-using a different rpyc wire version can fail with:
-
-```text
-ValueError: invalid message type: 18
-```
-
-If Houdini is upgraded, verify the bundled versions before changing the lock.
+For Houdini 21.0.440, the expected major/minor Python is 3.11. The agent and
+Houdini communicate through the authenticated typed Secure Bridge, so no
+Houdini-bundled Python package is installed into the agent environment.
 
 ## 3. Rebuild the Locked Python Environment
 
@@ -154,7 +148,7 @@ registration into the current Houdini user preference directory:
 Restart Houdini afterward. The **EEE Agent** menu should appear.
 
 Only the authenticated Secure Bridge and persistent Runtime are available
-through that menu. The former rpyc Bridge and chat panel entrypoints have been
+through that menu. The former unauthenticated bridge and chat panel entrypoints have been
 removed; follow the current handoff and Runtime test harness.
 
 ## 7. Verify the Runtime CLI

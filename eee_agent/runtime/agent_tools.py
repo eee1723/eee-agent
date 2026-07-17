@@ -29,7 +29,7 @@ def _bounded(value: Any, *, depth: int = 0) -> PlainData:
     if value is None or type(value) in (int, float, bool):
         return value
     if type(value) is str:
-        return value[:2048]
+        return value if len(value) <= 2048 else "[truncated]"
     if isinstance(value, Mapping):
         out: dict[str, PlainData] = {}
         try:

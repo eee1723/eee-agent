@@ -7,7 +7,7 @@ def test_runtime_version_report_contains_reproducibility_fields() -> None:
     assert report["eee_agent"] == "0.1.0"
     assert report["python"].startswith("3.11.")
     assert report["dependencies"]["deepagents"] == "0.6.12"
-    assert report["dependencies"]["rpyc"] == "4.1.0"
+    assert "rpyc" not in report["dependencies"]
     # Every tracked distribution appears as a key; runtime fields are present.
     assert set(report["dependencies"]) == set(TRACKED_DISTRIBUTIONS)
     assert report["python_executable"]
