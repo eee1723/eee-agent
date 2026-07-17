@@ -5,7 +5,7 @@ computer. For the exact current branch, accepted commits, verification
 baseline, and resume prompt, read:
 
 ```text
-docs/handoffs/2026-07-16-runtime-b2b3-transfer.md
+docs/handoffs/2026-07-17-cross-machine-modeling-handoff.md
 ```
 
 ## Prerequisites
@@ -36,7 +36,8 @@ Expected:
 - branch: `feature/runtime`
 - upstream: `origin/feature/runtime`
 - clean worktree
-- history contains accepted Workspace tip `b2a1b80`
+- history contains accepted modeling implementation tip `2433966` and the
+  newer cross-machine handoff commit
 
 Do not merge `main`, rebase accepted history, force-push, or use
 `git reset --hard` as part of setup.

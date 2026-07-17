@@ -7,57 +7,25 @@ don't re-discover them). Mirrors the auto-memory; kept in-repo so it travels wit
 ## Current development handoff
 
 The current source of truth is
-`docs/handoffs/2026-07-17-modeling-18d-transfer.md`. The active branch is
-`feature/runtime`. Task 16-E, Task 17-A, Task 17-B, Task 18-A, and the pure
-Task 18-B proposal seam are accepted. Task 17-B
-was implemented in `13e0782`: the docked panel now creates
-and selects Sessions, starts/stops Runs, recovers bounded Run state/output,
-lists bounded durable ChangeSet summaries, and sends exact approve/reject
-decisions without exposing Apply. The first real test exposed binary Runtime
-WebSocket frames being ignored by Qt's text-only signal; `423a0e4` makes new
-servers send text frames and keeps binary compatibility in the panel. Its full
-panel-reopen test then exposed a 256-item outbound queue rejecting the TEST
-Session's 315+ event replay; `15b6c00` bootstraps Qt from a snapshot boundary
-and adds server-side replay backpressure. `73c6214` replaces the static Session
-title prompt with an IME-enabled non-blocking dialog, explicitly enables IME
-for Run Request, and persists the last selected Session with highest-`last_seq`
-fallback. The real IME retest showed candidate-confirmation Enter still
-accepted the dialog; `7d8d552` removes Return acceptance, disables default
-buttons, and consumes Enter in the title editor so only an explicit OK click
-creates the Session. The next real test showed embedded `QPlainTextEdit` still
-failed Chinese input while the title `QLineEdit` worked; `5174378` replaces
-Run Request with an IME-safe 16000-character `QLineEdit` and consumes Enter so
-Runs start only by button. Its full offline baseline is 2106 passed, 1 skipped;
-the focused panel/server gate passes 174 tests. The complete real Houdini
-21.0.440 gate passed: Chinese IME/default Session behavior, read-only Run,
-high-volume panel reopen, Runtime restart recovery, cooperative Stop to
-Cancelled, empty approvals/no Apply, Scene regression, and zero mutation.
-The acceptance result is
-`docs/superpowers/reviews/2026-07-16-task17-b-review-result.md`. Task 18-A
-strict contracts and deterministic compiler are accepted at `09ea256`, with
-design/plan `d37fba1`; its result is
-`docs/superpowers/reviews/2026-07-16-task18-a-review-result.md`. The Task 18-B
-seam is `23379df`, with review
-`docs/superpowers/reviews/2026-07-16-task18-b-review-result.md`; Task 18-C
-Runtime graph integration is implemented locally and reviewed at
-`docs/superpowers/reviews/2026-07-16-task18-c-review-result.md`; real proposal
-testing has not started. Task 18-D empty-scene bootstrap is now accepted
-locally at `53df27c`; its review
-is `docs/superpowers/reviews/2026-07-17-task18-d-review-result.md`. Do not
-rewrite or discard the accepted Task 16-E/17-A commits, `13e0782`, or
-the Task 17-B hotfixes
-`423a0e4`/`15b6c00`/`73c6214`/`7d8d552`/`5174378`,
-merge
-`main`, or weaken the trusted
-Workspace, typed ChangeSet, approval, preflight, transactional Apply, receipt,
-recovery, or single-FIFO boundaries while resuming work.
+`docs/handoffs/2026-07-17-cross-machine-modeling-handoff.md`. The active branch
+is `feature/runtime`; accepted implementation tip `2433966` is followed by the
+cross-machine documentation commit. Task 18-A through 18-E are implemented,
+Task 18-F has deterministic Spec/Graph/Cook/Geometry/Sensitivity/Semantic
+foundations and bounded repair tickets, eight Task 18-G Golden Cases replay in
+Houdini 21.0.440 hython, and the first Task 18-H product-mode panel slice is in
+place. The complete offline baseline is 2171 passed, 1 optional WSL skip.
 
-The autonomous continuation roadmap is
-`docs/superpowers/plans/2026-07-17-autonomous-modeling-roadmap.md`. The user has
-deferred interactive Houdini verification and authorized independent progress
-using offline tests plus disposable Houdini 21.0.440 hython. Execute Task 18-D
-through 18-H in dependency order; defer only genuine GUI/focus/IME/visual
-acceptance. The empty-scene ownership bootstrap is the immediate active slice.
+The immediate autonomous slice is the production transactional
+parameter-sensitivity Bridge. Artifact evidence, richer asset-level cases,
+vision/evaluation delivery, and final real-Houdini GUI acceptance follow in
+that order. The user has deferred interactive Houdini verification; use
+offline tests and disposable Houdini 21.0.440 hython until the documented GUI
+gate is genuinely required.
+
+Do not merge `main`, rewrite accepted history, or weaken trusted Workspace,
+typed ChangeSet, exact approval, preflight, transactional Apply, receipt,
+rollback, restart recovery, model/public write-tool exclusion, or single-FIFO
+boundaries. Preserve the accepted Task 17 reconnect and Chinese IME fixes.
 
 ## Golden rule
 **Verify, don't guess.** The user insists: when unsure about a Houdini/hou/deepagents

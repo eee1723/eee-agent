@@ -153,15 +153,22 @@ Goal: replace the current control-plane workflow with a normal product flow.
 - Phoenix/LangSmith remain optional outer adapters; local correctness never
   depends on either service.
 
-## Overnight priority and stopping rule
+## Current continuation priority
 
-1. Commit this roadmap and executable Task 18-D/18-E plans.
-2. Implement Task 18-D pure contracts/compiler/policy tests.
-3. Implement bootstrap persistence/orchestration and fake-Bridge tests.
-4. Run disposable hython bootstrap smoke.
-5. If green, implement Task 18-E approval-to-Apply orchestration.
-6. If time remains, begin Task 18-F contracts/validator core; do not start UI
-   reshaping before bootstrap/Apply are stable.
+Tasks 18-D and 18-E are complete. Task 18-F has deterministic
+SpecContract/Graph/Cook/Geometry/Sensitivity/Semantic foundations and bounded
+repair tickets. Task 18-G has eight verified Golden Cases, and Task 18-H has
+the first product-mode panel slice. Continue in this order:
+
+1. Implement production transactional parameter-sensitivity sampling through
+   the typed main-thread Bridge, with guaranteed exact restoration and
+   fail-closed evidence.
+2. Implement Task 19-A content-addressed Artifact evidence and capture.
+3. Expand Task 18-G with richer asset-level cases in small hython-verified
+   catalog batches.
+4. Implement Task 19-B/19-C vision routing, evaluation, and delivery evidence.
+5. Finish Task 18-H and request real Houdini GUI acceptance only after the
+   offline and disposable-hython gates pass.
 
 Continue autonomously while a safe, bounded next step exists. Stop only for:
 
@@ -171,5 +178,5 @@ Continue autonomously while a safe, bounded next step exists. Stop only for:
 - a real GUI-only acceptance item after all offline/hython work is complete.
 
 Every completed slice receives its own focused commit, review result, handoff,
-and exact measured test evidence. Do not push or merge.
-
+and exact measured test evidence. Push accepted work to `feature/runtime`; do
+not merge `main` or force-push.
