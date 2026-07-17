@@ -69,10 +69,15 @@ def test_runtime_panel_keeps_client_only_import_boundary() -> None:
     assert "QtCore.Qt.Key.Key_Return" in source
     assert "Runs start only from the Start run button" in source
     assert "QSettings" in source
-    assert 'addTab(self._build_run_tab(), "RUN")' in source
-    assert 'addTab(self._build_approvals_tab(), "APPROVALS")' in source
-    assert 'addTab(self._build_scene_tab(), "SCENE")' in source
-    assert 'addTab(self._build_workspace_tab(), "WORKSPACE")' in source
+    assert 'self._build_run_tab(), "MODEL"' in source
+    assert 'self._build_approvals_tab(), "REVIEW"' in source
+    assert 'self._build_scene_tab(), "SCENE"' in source
+    assert 'self._build_workspace_tab(), "WORKSPACE"' in source
+    assert "self.tabs.setTabVisible(self.scene_tab_index, False)" in source
+    assert "self.tabs.setTabVisible(self.workspace_tab_index, False)" in source
+    assert "_toggle_developer_details" in source
+    assert 'QtWidgets.QPushButton("Approve and build")' in source
+    assert 'QtWidgets.QPushButton("Review plan")' in source
     assert '"workspace.create"' in source
     assert '"workspace.bind"' in source
     assert '"workspace.inspect"' in source

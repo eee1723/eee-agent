@@ -246,6 +246,14 @@ QPushButton {{
 }}
 QPushButton:hover {{ background: #26383C; }}
 QPushButton:disabled {{ color: {DIM}; border-color: {IRON}; }}
+QToolButton#DeveloperToggle {{
+    color: {DIM};
+    border: none;
+    padding: 3px 5px;
+    font-family: "Consolas";
+    font-size: 10px;
+}}
+QToolButton#DeveloperToggle:checked {{ color: {CYAN}; }}
 """
 
 
@@ -921,6 +929,7 @@ class RuntimePanel(QtWidgets.QWidget):
         super().__init__(parent)
         self.setObjectName("EEEAgentRuntimePanel")
         self.setMinimumWidth(340)
+        self._developer_details_visible = False
         self._build_ui()
         self.setStyleSheet(_QSS)
         self._client = RuntimeObserverClient(self)
@@ -950,12 +959,12 @@ class RuntimePanel(QtWidgets.QWidget):
         layout.setContentsMargins(14, 14, 14, 14)
         layout.setSpacing(10)
 
-        kicker = QtWidgets.QLabel("EEE / CONTROL PLANE")
+        kicker = QtWidgets.QLabel("EEE / PROCEDURAL MODELING")
         kicker.setObjectName("Kicker")
         layout.addWidget(kicker)
 
         header = QtWidgets.QHBoxLayout()
-        title = QtWidgets.QLabel("Runtime control")
+        title = QtWidgets.QLabel("Modeling assistant")
         title.setObjectName("Title")
         header.addWidget(title)
         header.addStretch(1)
@@ -966,6 +975,18 @@ class RuntimePanel(QtWidgets.QWidget):
         self.bridge_state = QtWidgets.QLabel("BRIDGE WAITING")
         self.bridge_state.setObjectName("BridgeState")
         header.addWidget(self.bridge_state)
+        header.addSpacing(8)
+        self.developer_toggle = QtWidgets.QToolButton()
+        self.developer_toggle.setObjectName("DeveloperToggle")
+        self.developer_toggle.setText("Details")
+        self.developer_toggle.setCheckable(True)
+        self.developer_toggle.setToolTip(
+            "Show Runtime, scene, and Workspace diagnostics"
+        )
+        self.developer_toggle.toggled.connect(
+            self._toggle_developer_details
+        )
+        header.addWidget(self.developer_toggle)
         layout.addLayout(header)
 
         self.status_text = QtWidgets.QLabel("Reading Runtime identity")
@@ -979,26 +1000,38 @@ class RuntimePanel(QtWidgets.QWidget):
         layout.addWidget(self.context_text)
         layout.addWidget(self._divider())
 
-        rail = QtWidgets.QFrame()
-        rail.setObjectName("Rail")
-        rail_layout = QtWidgets.QGridLayout(rail)
+        self.rail = QtWidgets.QFrame()
+        self.rail.setObjectName("Rail")
+        rail_layout = QtWidgets.QGridLayout(self.rail)
         rail_layout.setContentsMargins(10, 8, 10, 8)
         rail_layout.setHorizontalSpacing(14)
         rail_layout.setVerticalSpacing(3)
         self._rail_item(rail_layout, 0, "INSTANCE", "—", "instance_value")
         self._rail_item(rail_layout, 1, "EPOCH", "—", "epoch_value")
         self._rail_item(rail_layout, 2, "REVISION", "—", "revision_value")
-        layout.addWidget(rail)
+        self.rail.setVisible(False)
+        layout.addWidget(self.rail)
 
         self.tabs = QtWidgets.QTabWidget()
-        self.tabs.addTab(self._build_run_tab(), "RUN")
-        self.tabs.addTab(self._build_approvals_tab(), "APPROVALS")
-        self.tabs.addTab(self._build_scene_tab(), "SCENE")
-        self.tabs.addTab(self._build_workspace_tab(), "WORKSPACE")
+        self.model_tab_index = self.tabs.addTab(
+            self._build_run_tab(), "MODEL"
+        )
+        self.review_tab_index = self.tabs.addTab(
+            self._build_approvals_tab(), "REVIEW"
+        )
+        self.scene_tab_index = self.tabs.addTab(
+            self._build_scene_tab(), "SCENE"
+        )
+        self.workspace_tab_index = self.tabs.addTab(
+            self._build_workspace_tab(), "WORKSPACE"
+        )
+        self.tabs.setTabVisible(self.scene_tab_index, False)
+        self.tabs.setTabVisible(self.workspace_tab_index, False)
         layout.addWidget(self.tabs, 1)
 
         self.last_event = QtWidgets.QLabel("No Runtime events observed")
         self.last_event.setObjectName("Meta")
+        self.last_event.setVisible(False)
         layout.addWidget(self.last_event)
 
     def _build_run_tab(self) -> QtWidgets.QWidget:
@@ -1032,14 +1065,14 @@ class RuntimePanel(QtWidgets.QWidget):
         self.run_state_label.setObjectName("RunState")
         lane_layout.addWidget(self.run_state_label)
         self.run_meta_label = QtWidgets.QLabel(
-            "Create or select a Session, then start a read-only Run."
+            "Describe what you want to build. EEE will prepare a reviewable plan."
         )
         self.run_meta_label.setObjectName("Meta")
         self.run_meta_label.setWordWrap(True)
         lane_layout.addWidget(self.run_meta_label)
         layout.addWidget(lane)
 
-        prompt_label = QtWidgets.QLabel("RUN REQUEST")
+        prompt_label = QtWidgets.QLabel("DESCRIBE THE MODEL")
         prompt_label.setObjectName("Kicker")
         layout.addWidget(prompt_label)
         self.run_prompt = RunRequestEdit()
@@ -1047,7 +1080,7 @@ class RuntimePanel(QtWidgets.QWidget):
         layout.addWidget(self.run_prompt)
 
         actions = QtWidgets.QHBoxLayout()
-        self.start_run_button = QtWidgets.QPushButton("Start run")
+        self.start_run_button = QtWidgets.QPushButton("Plan model")
         self.start_run_button.clicked.connect(self._start_run)
         actions.addWidget(self.start_run_button)
         actions.addStretch(1)
@@ -1063,12 +1096,29 @@ class RuntimePanel(QtWidgets.QWidget):
         actions.addWidget(self.force_stop_button)
         layout.addLayout(actions)
 
-        output_label = QtWidgets.QLabel("RUN OUTPUT")
+        self.review_banner = QtWidgets.QFrame()
+        self.review_banner.setObjectName("ApprovalGate")
+        review_layout = QtWidgets.QHBoxLayout(self.review_banner)
+        review_layout.setContentsMargins(11, 8, 11, 8)
+        self.review_banner_text = QtWidgets.QLabel(
+            "A model plan is ready for review."
+        )
+        review_layout.addWidget(self.review_banner_text, 1)
+        self.review_banner_button = QtWidgets.QPushButton("Review plan")
+        self.review_banner_button.setObjectName("GateButton")
+        self.review_banner_button.clicked.connect(self._show_review)
+        review_layout.addWidget(self.review_banner_button)
+        self.review_banner.setVisible(False)
+        layout.addWidget(self.review_banner)
+
+        output_label = QtWidgets.QLabel("ASSISTANT")
         output_label.setObjectName("Kicker")
         layout.addWidget(output_label)
         self.run_output = QtWidgets.QPlainTextEdit()
         self.run_output.setReadOnly(True)
-        self.run_output.setPlaceholderText("Run output will stream here.")
+        self.run_output.setPlaceholderText(
+            "Planning notes and the final response will appear here."
+        )
         layout.addWidget(self.run_output, 1)
         self.run_activity = QtWidgets.QLabel("No tool activity")
         self.run_activity.setObjectName("Meta")
@@ -1083,7 +1133,7 @@ class RuntimePanel(QtWidgets.QWidget):
         layout.setSpacing(9)
 
         header = QtWidgets.QHBoxLayout()
-        label = QtWidgets.QLabel("CHANGESET GATES")
+        label = QtWidgets.QLabel("MODEL PLANS")
         label.setObjectName("Kicker")
         header.addWidget(label)
         self.approval_count = QtWidgets.QLabel("00")
@@ -1123,11 +1173,11 @@ class RuntimePanel(QtWidgets.QWidget):
         gate_layout = QtWidgets.QVBoxLayout(self.approval_gate)
         gate_layout.setContentsMargins(11, 9, 11, 9)
         gate_layout.setSpacing(5)
-        self.gate_state = QtWidgets.QLabel("NO PENDING APPROVAL")
+        self.gate_state = QtWidgets.QLabel("NO PLAN TO REVIEW")
         self.gate_state.setObjectName("GateState")
         gate_layout.addWidget(self.gate_state)
         self.gate_summary = QtWidgets.QLabel(
-            "Trusted ChangeSet proposals will appear here."
+            "New model plans will appear here before Houdini is changed."
         )
         self.gate_summary.setWordWrap(True)
         gate_layout.addWidget(self.gate_summary)
@@ -1143,7 +1193,7 @@ class RuntimePanel(QtWidgets.QWidget):
         self.reject_button.setEnabled(False)
         decision_row.addWidget(self.reject_button)
         decision_row.addStretch(1)
-        self.approve_button = QtWidgets.QPushButton("Approve bound")
+        self.approve_button = QtWidgets.QPushButton("Approve and build")
         self.approve_button.setObjectName("GateButton")
         self.approve_button.clicked.connect(self._approve_changeset)
         self.approve_button.setEnabled(False)
@@ -1231,9 +1281,9 @@ class RuntimePanel(QtWidgets.QWidget):
         layout.addWidget(self.workspace_status)
 
         note = QtWidgets.QLabel(
-            "Create reads the current Houdini selection. The selection must "
-            "already contain EEE-owned nodes; an empty scene cannot bootstrap "
-            "a Workspace yet. Bind refreshes the selected owned graph."
+            "EEE creates and binds a trusted Workspace automatically after the "
+            "first approved model. These manual controls are developer recovery "
+            "tools for inspecting or rebinding an existing owned graph."
         )
         note.setObjectName("Meta")
         note.setWordWrap(True)
@@ -1281,6 +1331,31 @@ class RuntimePanel(QtWidgets.QWidget):
         divider.setObjectName("Divider")
         divider.setFixedHeight(1)
         return divider
+
+    @QtCore.Slot(bool)
+    def _toggle_developer_details(self, visible: bool) -> None:
+        self._developer_details_visible = bool(visible)
+        self.rail.setVisible(self._developer_details_visible)
+        self.last_event.setVisible(self._developer_details_visible)
+        self.tabs.setTabVisible(
+            self.scene_tab_index, self._developer_details_visible
+        )
+        self.tabs.setTabVisible(
+            self.workspace_tab_index, self._developer_details_visible
+        )
+        if (
+            not self._developer_details_visible
+            and self.tabs.currentIndex()
+            in (self.scene_tab_index, self.workspace_tab_index)
+        ):
+            self.tabs.setCurrentIndex(self.model_tab_index)
+        current = self._current_changeset()
+        if current is not None:
+            self._render_approval(current)
+
+    @QtCore.Slot()
+    def _show_review(self) -> None:
+        self.tabs.setCurrentIndex(self.review_tab_index)
 
     @QtCore.Slot(object, str)
     def _set_sessions(self, sessions, selected_id: str) -> None:
@@ -1469,6 +1544,7 @@ class RuntimePanel(QtWidgets.QWidget):
         self.approval_count.setText(f"{len(self._changesets):02d}")
         self.approval_list.clear()
         preferred = -1
+        actionable_count = 0
         for index, summary in enumerate(self._changesets):
             risk = summary["risk"]
             item = QtWidgets.QTreeWidgetItem(
@@ -1484,6 +1560,14 @@ class RuntimePanel(QtWidgets.QWidget):
             self.approval_list.addTopLevelItem(item)
             if preferred < 0 and approval_is_actionable(summary):
                 preferred = index
+            if approval_is_actionable(summary):
+                actionable_count += 1
+        self.review_banner.setVisible(actionable_count > 0)
+        self.review_banner_text.setText(
+            "A model plan is ready for review."
+            if actionable_count == 1
+            else f"{actionable_count} model plans are ready for review."
+        )
         if self._changesets:
             self.approval_list.setCurrentItem(
                 self.approval_list.topLevelItem(
@@ -1508,10 +1592,10 @@ class RuntimePanel(QtWidgets.QWidget):
 
     def _render_approval(self, summary) -> None:
         if summary is None:
-            self.gate_state.setText("NO PENDING APPROVAL")
+            self.gate_state.setText("NO PLAN TO REVIEW")
             self.gate_state.setStyleSheet(f"color:{DIM};")
             self.gate_summary.setText(
-                "Trusted ChangeSet proposals will appear here."
+                "New model plans will appear here before Houdini is changed."
             )
             self.gate_paths.clear()
             self.gate_paths.setVisible(False)
@@ -1529,18 +1613,17 @@ class RuntimePanel(QtWidgets.QWidget):
             flags.append("external")
         if risk["requires_backup"]:
             flags.append("backup")
-        flag_text = " · ".join(flags) if flags else "bounded"
-        self.gate_state.setText(f"GATE / {self._humanize(state).upper()}")
+        flag_text = " / ".join(flags) if flags else "bounded"
+        self.gate_state.setText(f"REVIEW / {self._humanize(state).upper()}")
         gate_color = RED if state == "CriticalRecovery" else AMBER
         if state in ("Applied", "RolledBack"):
             gate_color = CYAN
         self.gate_state.setStyleSheet(f"color:{gate_color};")
         decision = approval["decision"] if approval else "No approval"
-        receipt_text = f" · receipt {receipt['status']}" if receipt else ""
+        receipt_text = f" / result {receipt['status']}" if receipt else ""
         self.gate_summary.setText(
-            f"{self._humanize(summary['required_permission'])} · "
-            f"{risk['operation_count']} "
-            f"operations · {flag_text}\n{decision}{receipt_text}"
+            f"{risk['operation_count']} planned changes / {flag_text}\n"
+            f"{decision}{receipt_text}"
         )
         paths = list(risk["affected_paths"])
         if risk["affected_paths_truncated"]:
@@ -1548,7 +1631,9 @@ class RuntimePanel(QtWidgets.QWidget):
                 f"+ {risk['affected_path_count'] - len(paths)} more paths"
             )
         self.gate_paths.setPlainText("\n".join(paths))
-        self.gate_paths.setVisible(bool(paths))
+        self.gate_paths.setVisible(
+            bool(paths) and self._developer_details_visible
+        )
         actionable = approval_is_actionable(summary) and not self._decision_busy
         self.approve_button.setEnabled(actionable)
         self.reject_button.setEnabled(actionable)
@@ -1580,7 +1665,7 @@ class RuntimePanel(QtWidgets.QWidget):
         self._decision_busy = True
         self.approve_button.setEnabled(False)
         self.reject_button.setEnabled(False)
-        self.gate_state.setText("GATE / DECIDING")
+        self.gate_state.setText("REVIEW / APPROVING")
         self._client.decide_changeset(
             summary["change_id"],
             summary["changeset_digest"],
@@ -1620,8 +1705,12 @@ class RuntimePanel(QtWidgets.QWidget):
             self.run_meta_label.setText("Run accepted by Runtime")
         elif purpose in ("run.stop", "run.force_stop"):
             self.run_meta_label.setText("Stop requested")
-        elif purpose in ("changeset.approve", "changeset.reject"):
-            self.gate_summary.setText("Decision committed; refreshing gate state.")
+        elif purpose == "changeset.approve":
+            self.gate_summary.setText(
+                "Approved. Houdini is building and validating the model."
+            )
+        elif purpose == "changeset.reject":
+            self.gate_summary.setText("Plan rejected. The scene was not changed.")
 
     @QtCore.Slot(str, str, str, bool, bool)
     def _command_failed(
@@ -1642,7 +1731,9 @@ class RuntimePanel(QtWidgets.QWidget):
             suffix = " Scene may have changed." if scene_changed else ""
             self.gate_summary.setText(message + suffix)
             self.gate_state.setText(
-                "GATE / ACTION REQUIRED" if requires_action else "GATE / BLOCKED"
+                "REVIEW / ACTION REQUIRED"
+                if requires_action
+                else "REVIEW / BLOCKED"
             )
             self.gate_state.setStyleSheet(f"color:{RED};")
         if purpose.startswith("workspace."):
