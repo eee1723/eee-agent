@@ -22,6 +22,12 @@ def test_build_agent_has_no_implicit_general_purpose_subagent(
     monkeypatch.setenv("EEE_LLM_PROVIDER", provider)
     monkeypatch.setenv(key_env, "unit-test-key")
     monkeypatch.setenv("EEE_COMPACT_TOOL", "false")
+    # Neutralize machine-local model/thinking overrides loaded from .env: the
+    # parametrized provider must resolve its own defaults (e.g. a DeepSeek
+    # thinking-enabled profile is invalid for the standard OpenAI connection).
+    monkeypatch.delenv("EEE_LLM_MODEL", raising=False)
+    monkeypatch.delenv("EEE_LLM_THINKING", raising=False)
+    monkeypatch.delenv("EEE_LLM_EFFORT", raising=False)
     # Foundation ships without optional tracing deps (openinference/Phoenix are
     # later milestones). Neutralize a machine-local EEE_TRACING=phoenix loaded by
     # load_dotenv() so build_agent() does not try to instrument Phoenix here.
