@@ -10,8 +10,9 @@ def test_houdini_21_minimal_catalog_contains_only_verified_safe_types() -> None:
     catalog = houdini_21_minimal_catalog()
     by_type = catalog.by_type
     assert set(by_type) == {
-        "box", "fuse2", "geo", "grid", "merge", "normal", "null",
-        "polyextrude2", "subdivide", "xform"
+        "box", "copytopoints2", "fuse2", "geo", "grid", "line", "merge",
+        "normal", "null", "polyextrude2", "resample", "subdivide", "sweep2",
+        "xform"
     }
     assert "transform" not in by_type
     assert by_type["geo"].can_parent_nodes is True
@@ -24,6 +25,8 @@ def test_houdini_21_minimal_catalog_contains_only_verified_safe_types() -> None:
     assert by_type["subdivide"].parameters_by_name["iterations"].default_value == 1
     assert by_type["polyextrude2"].create_type == "polyextrude::2.0"
     assert by_type["fuse2"].create_type == "fuse::2.0"
+    assert by_type["copytopoints2"].create_type == "copytopoints::2.0"
+    assert by_type["sweep2"].create_type == "sweep::2.0"
 
 
 def test_houdini_21_minimal_quality_profile_is_deterministic() -> None:

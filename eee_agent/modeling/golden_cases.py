@@ -370,7 +370,146 @@ def houdini_21_minimal_golden_cases() -> tuple[GoldenCase, ...]:
         ),
         "OUT_MODEL",
     )
-    return box_chain, grid_chain, merged, surface, extruded
+    copied = _case(
+        "copied_box_output",
+        "Copy a box onto a bounded line of points and expose one output.",
+        (
+            ComponentSpec(
+                component_id="sources",
+                role="generator",
+                depends_on=(),
+                nodes=(
+                    NodeSpec(
+                        node_key="box",
+                        node_type="box",
+                        node_name="box1",
+                        parent_node=None,
+                        parameters=(
+                            ParmAssignment("sizex", 0.5),
+                            ParmAssignment("sizey", 0.5),
+                            ParmAssignment("sizez", 0.5),
+                        ),
+                        inputs=(),
+                    ),
+                    NodeSpec(
+                        node_key="points",
+                        node_type="line",
+                        node_name="line1",
+                        parent_node=None,
+                        parameters=(
+                            ParmAssignment("dirx", 1.0),
+                            ParmAssignment("diry", 0.0),
+                            ParmAssignment("dist", 4.0),
+                            ParmAssignment("points", 5),
+                        ),
+                        inputs=(),
+                    ),
+                ),
+            ),
+            ComponentSpec(
+                component_id="assembly",
+                role="assembly",
+                depends_on=("sources",),
+                nodes=(
+                    NodeSpec(
+                        node_key="copy",
+                        node_type="copytopoints2",
+                        node_name="copytopoints1",
+                        parent_node=None,
+                        parameters=(),
+                        inputs=(
+                            InputBinding(0, "sources.box", 0),
+                            InputBinding(1, "sources.points", 0),
+                        ),
+                    ),
+                    NodeSpec(
+                        node_key="out",
+                        node_type="null",
+                        node_name="OUT_MODEL",
+                        parent_node=None,
+                        parameters=(),
+                        inputs=(InputBinding(0, "assembly.copy", 0),),
+                    ),
+                ),
+            ),
+        ),
+        "OUT_MODEL",
+    )
+    swept = _case(
+        "swept_lines_output",
+        "Sweep a line profile along a resampled path and expose one output.",
+        (
+            ComponentSpec(
+                component_id="sources",
+                role="generator",
+                depends_on=(),
+                nodes=(
+                    NodeSpec(
+                        node_key="profile",
+                        node_type="line",
+                        node_name="profile_line",
+                        parent_node=None,
+                        parameters=(
+                            ParmAssignment("dirx", 1.0),
+                            ParmAssignment("diry", 0.0),
+                            ParmAssignment("dist", 1.0),
+                        ),
+                        inputs=(),
+                    ),
+                    NodeSpec(
+                        node_key="path",
+                        node_type="line",
+                        node_name="path_line",
+                        parent_node=None,
+                        parameters=(
+                            ParmAssignment("dist", 3.0),
+                            ParmAssignment("points", 8),
+                        ),
+                        inputs=(),
+                    ),
+                ),
+            ),
+            ComponentSpec(
+                component_id="assembly",
+                role="assembly",
+                depends_on=("sources",),
+                nodes=(
+                    NodeSpec(
+                        node_key="resample",
+                        node_type="resample",
+                        node_name="resample1",
+                        parent_node=None,
+                        parameters=(
+                            ParmAssignment("dosegs", 1),
+                            ParmAssignment("segs", 8),
+                        ),
+                        inputs=(InputBinding(0, "sources.path", 0),),
+                    ),
+                    NodeSpec(
+                        node_key="sweep",
+                        node_type="sweep2",
+                        node_name="sweep1",
+                        parent_node=None,
+                        parameters=(),
+                        inputs=(
+                            InputBinding(0, "assembly.resample", 0),
+                            InputBinding(1, "sources.profile", 0),
+                        ),
+                    ),
+                    NodeSpec(
+                        node_key="out",
+                        node_type="null",
+                        node_name="OUT_MODEL",
+                        parent_node=None,
+                        parameters=(),
+                        inputs=(InputBinding(0, "assembly.sweep", 0),),
+                    ),
+                ),
+            ),
+        ),
+        "OUT_MODEL",
+    )
+    return box_chain, grid_chain, merged, surface, extruded, copied, swept
 
 
 __all__ = ["GoldenCase", "houdini_21_minimal_golden_cases"]

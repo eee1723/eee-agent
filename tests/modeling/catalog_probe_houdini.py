@@ -6,16 +6,30 @@ import json
 
 import hou
 
+_CANDIDATES = {
+    "polyextrude": ("dist", "inset", "divs"),
+    "fuse": ("tol3d", "consolidatesnappedpoints", "deldegen"),
+    "normal": ("type", "cuspangle", "method", "normalize", "reverse"),
+    "subdivide": ("algorithm", "iterations", "creaseweight", "bias"),
+    "line": ("originx", "originy", "originz", "dirx", "diry", "dirz", "dist", "points"),
+    "resample": ("length", "segs", "dosegs", "treatpolysas", "evenlastseg"),
+    "sweep": ("surfacetype", "skinend", "scale", "roll", "twist"),
+    "copytopoints": ("transform", "pack", "pivot", "targetgroup"),
+    "boolean": ("booleanop", "treatas", "subtractchoices", "seamoperation"),
+}
+
 
 def main() -> None:
     root = hou.node("/obj").createNode("geo", "eee_catalog_probe")
     try:
         result = []
-        for requested in ("polyextrude", "fuse", "normal", "subdivide"):
+        for requested, names in _CANDIDATES.items():
             node = root.createNode(requested)
             node_type = node.type()
             parms = []
             for parm in node.parms():
+                if parm.name() not in names:
+                    continue
                 template = parm.parmTemplate()
                 if not hasattr(template, "defaultValue"):
                     continue
@@ -31,6 +45,7 @@ def main() -> None:
                             "name": parm.name(),
                             "label": template.label(),
                             "default": default,
+                            "evaluated": parm.eval(),
                             "template": template.type().name(),
                         }
                     )

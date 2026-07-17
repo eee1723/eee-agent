@@ -101,7 +101,8 @@ def main() -> None:
                 )
         print(
             "GOLDEN CASES PASS: box, grid, merge, subdivide, polyextrude2, "
-            "fuse2, normal, outputs, Cook/Geometry, manifests"
+            "fuse2, normal, line, resample, sweep2, copytopoints2, outputs, "
+            "Cook/Geometry, manifests"
         )
     finally:
         for root_path in roots:
