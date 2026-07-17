@@ -30,6 +30,12 @@ from eee_agent.houdini_bridge.auth import (
     load_bridge_identity,
     read_bridge_discovery,
 )
+from eee_agent.houdini_bridge.capture import (
+    CAPTURE_V1,
+    CaptureRequest,
+    CaptureResult,
+    parse_capture_response,
+)
 from eee_agent.houdini_bridge.changesets import (
     CHANGESET_V1,
     ApplyRequest,
@@ -595,6 +601,66 @@ class BridgeClient:
                 "bridge.invalid_request",
                 "protocol",
                 "The bridge sample response is not valid evidence.",
+            )
+        return result
+
+    async def capture(self, request: CaptureRequest) -> CaptureResult:
+        """Send a ``capture.capture`` request and return the typed reference.
+
+        Requires the advertised ``capture.v1`` capability; if it is absent the
+        client fails closed with ``bridge.capability_unavailable`` and sends no
+        frame. The Houdini side writes the PNG inside the Runtime-owned
+        artifacts target directory and returns only content-addressed
+        reference fields — image bytes never cross the wire. On a server
+        bridge error the structured fields are re-raised as
+        :class:`BridgeClientError`; the connection is left open for that case.
+        """
+        if type(request) is not CaptureRequest:
+            raise TypeError("request must be a CaptureRequest")
+        if CAPTURE_V1 not in self._capabilities:
+            raise _client_error(
+                "bridge.capability_unavailable",
+                "capability",
+                "The bridge does not support artifact capture.",
+                retryable=False,
+            )
+        if not self._helloed or self._transport is None:
+            raise RuntimeError(
+                "BridgeClient.capture() requires a successful open()/hello"
+            )
+        response_bytes = await self._exchange(request.to_json(), request.deadline_ms)
+        try:
+            response = parse_capture_response(response_bytes)
+        except (TypeError, ValueError) as exc:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response is not a valid capture envelope.",
+            ) from exc
+        if response.request_id != request.request_id:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response does not match the request id.",
+            )
+        if response.error is not None:
+            err = response.error
+            raise BridgeClientError(
+                code=err.code,
+                category=err.category,
+                message_for_user=err.message_for_user,
+                retryable=err.retryable,
+                technical_detail_ref=err.technical_detail_ref,
+            )
+        result = response.result
+        if type(result) is not CaptureResult:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge capture response is not a valid reference.",
             )
         return result
 

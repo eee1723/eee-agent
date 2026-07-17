@@ -55,6 +55,8 @@ from eee_agent.core import (
     ErrorCategory,
     runtime_version_report,
 )
+from eee_agent.core.artifacts import ArtifactRef
+from eee_agent.houdini_bridge.capture import CaptureFramingReport
 from eee_agent.houdini_bridge.sensitivity import SensitivitySampleTarget
 from eee_agent.houdini_bridge.workspaces import (
     WorkspaceInspectResult,
@@ -64,14 +66,18 @@ from eee_agent.core.ids import IdKind, new_id
 from eee_agent.modeling.catalog import houdini_21_minimal_quality_profile
 from eee_agent.modeling.bootstrap import derive_bootstrap_manifest
 from eee_agent.modeling.compiler import NodeCatalog, WorkspaceBootstrapContext
+from eee_agent.modeling.contracts import ValidatorKind
 from eee_agent.modeling.proposal import (
     ModelingProposalContext,
     ModelingProposalCoordinator,
     ModelingToolContext,
 )
 from eee_agent.modeling.validation import (
+    ValidationStatus,
+    ValidatorResult,
     derive_sensitivity_sample_plan,
     validate_applied_scene,
+    validate_artifact_capture,
     validate_parameter_sensitivity,
 )
 from eee_agent.runtime.agent_runner import (
@@ -80,6 +86,7 @@ from eee_agent.runtime.agent_runner import (
     RunnerEvent,
     RunnerFactory,
 )
+from eee_agent.runtime.artifacts import ArtifactStore
 from eee_agent.runtime.checkpoints import CheckpointManager
 from eee_agent.runtime.database import RuntimeDatabase
 from eee_agent.runtime.events import EventStore, ReplayResult
@@ -149,6 +156,20 @@ def _checkpoint_cleanup_failed() -> AgentException:
             category=ErrorCategory.INTERNAL_INVARIANT,
             message_for_user=(
                 "The session was deleted but its checkpoint history could "
+                "not be removed."
+            ),
+            scene_may_have_changed=False,
+        )
+    )
+
+
+def _artifact_cleanup_failed() -> AgentException:
+    return AgentException(
+        AgentError(
+            code="runtime.artifact_cleanup_failed",
+            category=ErrorCategory.INTERNAL_INVARIANT,
+            message_for_user=(
+                "The session was deleted but its artifact files could "
                 "not be removed."
             ),
             scene_may_have_changed=False,
@@ -236,6 +257,7 @@ class RuntimeService:
         self._sessions = SessionRepository(database)
         self._runs = RunRepository(database)
         self._events = EventStore(database)
+        self._artifacts = ArtifactStore(database, paths.artifacts_dir)
         self._callbacks: set[EventCallback] = set()
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._apply_tasks: dict[str, asyncio.Task[ApplyCompletionResult]] = {}
@@ -505,10 +527,15 @@ class RuntimeService:
         return await self._sessions.get(session_id)
 
     async def delete_session(self, session_id: str) -> None:
-        # The application delete commits first. Only then is the checkpoint
-        # thread removed; a checkpoint cleanup failure is reported as a
-        # structured error and never recreates the already-deleted session.
+        # The application delete commits first (artifact metadata rows cascade
+        # with it). Only then are the artifact files removed; finally the
+        # checkpoint thread. Each cleanup failure is reported as a structured
+        # error and never recreates the already-deleted session.
         await self._sessions.delete_application_records(session_id)
+        try:
+            await self._artifacts.delete_session_artifacts(session_id)
+        except Exception:
+            raise _artifact_cleanup_failed() from None
         checkpoints = self._checkpoints
         if checkpoints is None:
             return
@@ -714,6 +741,59 @@ class RuntimeService:
                         restored=evidence.restored,
                     )
                 )
+            # The typed Bridge capture resolves the Artifact stage only when
+            # the quality profile enables it. A capture failure is durable and
+            # explicit (modeling.capture_failed plus a Failed Artifact result)
+            # and never masquerades as visual success.
+            try:
+                capture = await self._capture_applied_changeset(result.changeset)
+            except Exception as exc:  # noqa: BLE001 - Apply is already durable
+                capture = None
+                code = (
+                    exc.error.code
+                    if isinstance(exc, AgentException)
+                    else "modeling.capture.invalid_evidence"
+                )
+                validator_results.append(
+                    ValidatorResult(
+                        ValidatorKind.ARTIFACT,
+                        ValidationStatus.FAILED,
+                        "modeling.artifact.capture_failed",
+                        "The post-Apply capture did not produce verifiable artifact evidence.",
+                    )
+                )
+                await self._emit(
+                    result.changeset.session_id,
+                    result.changeset.run_id,
+                    "modeling.capture_failed",
+                    {
+                        "change_id": result.changeset.change_id,
+                        "changeset_digest": result.changeset.digest,
+                        "code": code,
+                    },
+                    RetentionClass.DURABLE,
+                )
+            if capture is not None:
+                artifact, framing = capture
+                validator_results.append(
+                    validate_artifact_capture(
+                        changeset=result.changeset,
+                        artifact=artifact,
+                        framing=framing,
+                    )
+                )
+                await self._emit(
+                    result.changeset.session_id,
+                    result.changeset.run_id,
+                    "modeling.artifact_captured",
+                    {
+                        "change_id": result.changeset.change_id,
+                        "changeset_digest": result.changeset.digest,
+                        "artifact": artifact.to_dict(),
+                        "framing": framing.to_dict(),
+                    },
+                    RetentionClass.DURABLE,
+                )
             payload: dict[str, object] = {
                 "change_id": result.changeset.change_id,
                 "changeset_digest": result.changeset.digest,
@@ -760,6 +840,62 @@ class RuntimeService:
             catalog=catalog,
             quality_profile=houdini_21_minimal_quality_profile(),
         )
+
+    async def _capture_applied_changeset(
+        self, changeset: ChangeSet
+    ) -> tuple[ArtifactRef, CaptureFramingReport] | None:
+        """Capture + register the post-Apply screenshot; None when not applicable.
+
+        Runs only when the quality profile enables the Artifact validator and
+        the bridge provider exposes the typed capture op. The bridge writes
+        the PNG inside the Runtime-owned artifacts directory; the returned
+        ArtifactRef is the registered canonical record, re-hash-verified
+        against the bridge reference before registration (a mismatch fails
+        closed and deletes the file). Never a replay of the durable Apply.
+        """
+        provider = self._modeling_validation_provider
+        if provider is None or not hasattr(provider, "capture"):
+            return None
+        if ValidatorKind.ARTIFACT not in (
+            houdini_21_minimal_quality_profile().validators
+        ):
+            return None
+        if not changeset.affected_nodes:
+            return None
+        artifact_id = new_id(IdKind.ARTIFACT)
+        target_dir = (
+            self._paths.artifacts_dir / changeset.session_id / changeset.run_id
+        )
+        target_dir.mkdir(parents=True, exist_ok=True)
+        result = await provider.capture(
+            changeset,
+            target_dir=target_dir,
+            artifact_id=artifact_id,
+        )
+        if (
+            result.artifact_id != artifact_id
+            or result.relative_path != f"{artifact_id}.png"
+        ):
+            raise AgentException(
+                AgentError(
+                    code="modeling.capture.invalid_evidence",
+                    category=ErrorCategory.HOUDINI_BRIDGE,
+                    message_for_user=(
+                        "The bridge capture reference does not match the request."
+                    ),
+                    retryable=False,
+                )
+            )
+        ref = await self._artifacts.register(
+            session_id=changeset.session_id,
+            run_id=changeset.run_id,
+            artifact_id=artifact_id,
+            source=target_dir / result.relative_path,
+            media_type=result.media_type,
+            expected_sha256=result.sha256,
+            expected_size_bytes=result.size_bytes,
+        )
+        return ref, result.framing
 
     async def apply_changeset_trusted(
         self, change_id: str

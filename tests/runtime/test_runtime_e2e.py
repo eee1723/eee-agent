@@ -365,6 +365,7 @@ def test_houdini_smoke_force_stops_runtime_launcher_and_worker(
             lock_file=runtime_home / "state" / "runtime.lock",
             discovery_file=runtime_home / "state" / "runtime.json",
             token_file=runtime_home / "state" / "runtime.token",
+            artifacts_dir=runtime_home / "state" / "artifacts",
         )
         paths.create_used_directories()
         process = _RuntimeFixtureProcess(

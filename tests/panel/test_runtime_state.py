@@ -7,8 +7,11 @@ import pytest
 from eee_agent.panel.client_state import PanelClientError
 from eee_agent.panel.runtime_state import (
     RuntimePanelState,
+    append_artifact_summary,
     approval_is_actionable,
+    artifact_refresh_required,
     changeset_refresh_required,
+    parse_artifact_event,
     parse_changeset_list,
     parse_session_snapshot,
 )
@@ -248,3 +251,141 @@ def test_changeset_events_require_authoritative_refresh(event_type: str) -> None
     assert not changeset_refresh_required(
         {"kind": "event", "type": "model.text_delta"}
     )
+
+
+ART = "art_" + "e" * 32
+
+
+def _artifact_message(**overrides: object) -> dict[str, object]:
+    message: dict[str, object] = {
+        "kind": "event",
+        "type": "modeling.artifact_captured",
+        "seq": 7,
+        "payload": {
+            "change_id": CHG,
+            "changeset_digest": "a" * 64,
+            "artifact": {
+                "artifact_id": ART,
+                "relative_path": f"{SID}/{RID}/{ART}.png",
+                "sha256": "b" * 64,
+                "media_type": "image/png",
+                "size_bytes": 4096,
+                "schema_version": 1,
+            },
+            "framing": {
+                "adjustments_used": 1,
+                "margin_left": 0.16,
+                "margin_right": 0.17,
+                "margin_bottom": 0.12,
+                "margin_top": 0.12,
+                "longest_axis_ratio": 0.78,
+                "center_offset": 0.002,
+            },
+        },
+    }
+    message.update(overrides)
+    return message
+
+
+def _failed_message(**overrides: object) -> dict[str, object]:
+    message: dict[str, object] = {
+        "kind": "event",
+        "type": "modeling.capture_failed",
+        "seq": 9,
+        "payload": {
+            "change_id": CHG,
+            "changeset_digest": "a" * 64,
+            "code": "capture.framing_failed",
+        },
+    }
+    message.update(overrides)
+    return message
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    ["modeling.artifact_captured", "modeling.capture_failed"],
+)
+def test_artifact_events_require_authoritative_refresh(event_type: str) -> None:
+    assert artifact_refresh_required({"kind": "event", "type": event_type})
+    assert not artifact_refresh_required({"kind": "event", "type": "model.text_delta"})
+    assert not artifact_refresh_required({"kind": "command", "type": event_type})
+
+
+def test_parse_artifact_captured_event_returns_bounded_summary() -> None:
+    summary = parse_artifact_event(_artifact_message())
+    assert summary["kind"] == "captured"
+    assert summary["artifact_id"] == ART
+    assert summary["relative_path"] == f"{SID}/{RID}/{ART}.png"
+    assert summary["sha256"] == "b" * 64
+    assert summary["media_type"] == "image/png"
+    assert summary["size_bytes"] == 4096
+    assert summary["seq"] == 7
+
+
+def test_parse_capture_failed_event_returns_bounded_summary() -> None:
+    summary = parse_artifact_event(_failed_message())
+    assert summary == {
+        "kind": "failed",
+        "code": "capture.framing_failed",
+        "change_id": CHG,
+        "seq": 9,
+    }
+
+
+def test_parse_artifact_event_rejects_non_artifact_types() -> None:
+    with pytest.raises(PanelClientError):
+        parse_artifact_event({"kind": "event", "type": "model.text_delta", "seq": 1, "payload": {}})
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda m: m["payload"].pop("framing"),
+        lambda m: m["payload"].__setitem__("extra", True),
+        lambda m: m["payload"]["artifact"].__setitem__("artifact_id", RID),
+        lambda m: m["payload"]["artifact"].__setitem__("sha256", "B" * 64),
+        lambda m: m["payload"]["artifact"].__setitem__("size_bytes", -1),
+        lambda m: m["payload"]["artifact"].__setitem__("schema_version", 2),
+        lambda m: m["payload"]["artifact"].__setitem__("relative_path", "../escape.png"),
+        lambda m: m["payload"]["artifact"].__setitem__("relative_path", "a\\b.png"),
+        lambda m: m["payload"]["artifact"].__setitem__("media_type", ""),
+        lambda m: m["payload"]["framing"].__setitem__("adjustments_used", 3),
+        lambda m: m["payload"]["framing"].__setitem__("margin_left", float("nan")),
+        lambda m: m["payload"].__setitem__("changeset_digest", "not-a-digest"),
+        lambda m: m.__setitem__("seq", 0),
+    ],
+)
+def test_parse_artifact_captured_event_is_strict(mutation) -> None:
+    message = _artifact_message()
+    mutation(message)
+    with pytest.raises(PanelClientError):
+        parse_artifact_event(message)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda m: m["payload"].pop("code"),
+        lambda m: m["payload"].__setitem__("framing", {}),
+        lambda m: m["payload"].__setitem__("code", ""),
+        lambda m: m["payload"].__setitem__("change_id", "bad id"),
+    ],
+)
+def test_parse_capture_failed_event_is_strict(mutation) -> None:
+    message = _failed_message()
+    mutation(message)
+    with pytest.raises(PanelClientError):
+        parse_artifact_event(message)
+
+
+def test_append_artifact_summary_bounds_to_newest_fifty() -> None:
+    items: tuple = ()
+    for index in range(55):
+        items = append_artifact_summary(
+            items, {"kind": "failed", "code": f"c{index}", "change_id": CHG, "seq": index}
+        )
+    assert len(items) == 50
+    # Newest first; the five oldest were dropped.
+    assert items[0]["code"] == "c54"
+    assert items[-1]["code"] == "c5"

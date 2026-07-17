@@ -91,14 +91,14 @@ async def add_event(
 
 
 # --------------------------------------------------------------------------
-# 1. empty database -> schema v3 (v1/v2 tables preserved, workspace state added)
+# 1. empty database -> schema v4 (v1-v3 tables preserved, artifact metadata added)
 # --------------------------------------------------------------------------
 
-def test_empty_database_reaches_schema_v3(db_path: Path) -> None:
+def test_empty_database_reaches_schema_v4(db_path: Path) -> None:
     async def scenario() -> None:
         db = await RuntimeDatabase.open(db_path)
         try:
-            assert await db.schema_version() == 3
+            assert await db.schema_version() == 4
             names = await db.table_names()
             assert {
                 "schema_migrations",
@@ -111,6 +111,7 @@ def test_empty_database_reaches_schema_v3(db_path: Path) -> None:
                 "approvals",
                 "change_receipts",
                 "session_workspace_state",
+                "artifacts",
             } <= names
             row = await db.fetchone(
                 "SELECT singleton_id, active_run_id, updated_at FROM runtime_state"
@@ -137,11 +138,11 @@ def test_reopen_does_not_rerun_migration(db_path: Path) -> None:
         await db.close()
         db2 = await RuntimeDatabase.open(db_path)
         try:
-            assert await db2.schema_version() == 3
+            assert await db2.schema_version() == 4
             rows = await db2.fetchall(
                 "SELECT version FROM schema_migrations ORDER BY version"
             )
-            assert [r["version"] for r in rows] == [1, 2, 3]
+            assert [r["version"] for r in rows] == [1, 2, 3, 4]
         finally:
             await db2.close()
 
@@ -186,7 +187,7 @@ def test_newer_schema_is_rejected_and_connection_closed(db_path: Path) -> None:
         db_path,
         "CREATE TABLE schema_migrations "
         "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
-        [4],
+        [5],
     )
     with pytest.raises(RuntimeError, match="newer than this Runtime"):
         _run(RuntimeDatabase.open(db_path))
@@ -194,7 +195,7 @@ def test_newer_schema_is_rejected_and_connection_closed(db_path: Path) -> None:
     # The failed open() must have released the file handle (Windows-safe).
     raw = sqlite3.connect(db_path)
     try:
-        assert raw.execute("SELECT version FROM schema_migrations").fetchone()[0] == 4
+        assert raw.execute("SELECT version FROM schema_migrations").fetchone()[0] == 5
     finally:
         raw.close()
 
@@ -245,7 +246,7 @@ def test_history_version_above_schema_version_is_rejected(
         db_path,
         "CREATE TABLE schema_migrations "
         "(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
-        [4],
+        [5],
     )
     with pytest.raises(RuntimeError, match="newer than this Runtime"):
         _run(RuntimeDatabase.open(db_path))
@@ -866,7 +867,7 @@ def test_migration_rows_carry_sha256_checksum_of_script(db_path: Path) -> None:
             rows = await db.fetchall(
                 "SELECT version, checksum FROM schema_migrations ORDER BY version"
             )
-            assert [r["version"] for r in rows] == [1, 2, 3]
+            assert [r["version"] for r in rows] == [1, 2, 3, 4]
             expected = {
                 v: _expected_checksum(script) for v, script in migrations_mod.MIGRATIONS
             }
@@ -884,7 +885,7 @@ def test_legacy_v1_database_without_checksum_is_upgraded(db_path: Path) -> None:
     async def scenario() -> None:
         db = await RuntimeDatabase.open(db_path)
         try:
-            assert await db.schema_version() == 3
+            assert await db.schema_version() == 4
             # checksum column added and v1 backfilled with the known checksum.
             row = await db.fetchone(
                 "SELECT checksum FROM schema_migrations WHERE version = 1"
@@ -895,7 +896,7 @@ def test_legacy_v1_database_without_checksum_is_upgraded(db_path: Path) -> None:
                 "SELECT checksum FROM schema_migrations WHERE version = 2"
             )
             assert row2["checksum"] == _expected_checksum(migrations_mod.MIGRATION_V2_SQL)
-            # v1 data preserved; v2/v3 tables now available.
+            # v1 data preserved; v2/v3/v4 tables now available.
             assert (await db.fetchone("SELECT COUNT(*) AS c FROM sessions"))["c"] == 1
             names = await db.table_names()
             assert {
@@ -904,6 +905,7 @@ def test_legacy_v1_database_without_checksum_is_upgraded(db_path: Path) -> None:
                 "approvals",
                 "change_receipts",
                 "session_workspace_state",
+                "artifacts",
             } <= names
         finally:
             await db.close()
@@ -953,7 +955,7 @@ def test_reopened_database_revalidates_checksums(db_path: Path) -> None:
         # A normal reopen must re-read and re-validate every checksum.
         db2 = await RuntimeDatabase.open(db_path)
         try:
-            assert await db2.schema_version() == 3
+            assert await db2.schema_version() == 4
             assert (await db2.fetchone("SELECT COUNT(*) AS c FROM sessions"))["c"] == 1
         finally:
             await db2.close()
@@ -1097,7 +1099,7 @@ def test_existing_schema_v2_database_upgrades_to_v3_once(db_path: Path) -> None:
     async def scenario() -> None:
         db = await RuntimeDatabase.open(db_path)
         try:
-            assert await db.schema_version() == 3
+            assert await db.schema_version() == 4
             assert (
                 await db.fetchone(
                     "SELECT title FROM sessions WHERE session_id = ?", (SESSION_ID,)
@@ -1106,7 +1108,7 @@ def test_existing_schema_v2_database_upgrades_to_v3_once(db_path: Path) -> None:
             rows = await db.fetchall(
                 "SELECT version FROM schema_migrations ORDER BY version"
             )
-            assert [row["version"] for row in rows] == [1, 2, 3]
+            assert [row["version"] for row in rows] == [1, 2, 3, 4]
             assert (
                 await db.fetchone(
                     "SELECT COUNT(*) AS c FROM session_workspace_state"

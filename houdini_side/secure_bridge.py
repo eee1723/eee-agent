@@ -60,6 +60,12 @@ from eee_agent.houdini_bridge.contracts import (
     SelectedNode,
     parse_request,
 )
+from eee_agent.houdini_bridge.capture import (
+    CAPTURE_OPERATION,
+    CAPTURE_V1,
+    CaptureResponse,
+    parse_capture_request,
+)
 from eee_agent.houdini_bridge.sensitivity import (
     SAMPLE_OPERATION,
     SENSITIVITY_V1,
@@ -510,7 +516,7 @@ class BridgeServer:
         identity: BridgeIdentity,
         state_dir: Path | str,
         queue: MainThreadReadQueue | None = None,
-        capabilities: tuple[str, ...] = (CHANGESET_V1, SENSITIVITY_V1, WORKSPACE_V1),
+        capabilities: tuple[str, ...] = (CAPTURE_V1, CHANGESET_V1, SENSITIVITY_V1, WORKSPACE_V1),
     ) -> None:
         if not isinstance(adapter, HoudiniSceneAdapter):
             raise TypeError("adapter must be a HoudiniSceneAdapter")
@@ -717,8 +723,9 @@ class BridgeServer:
     async def _serve(self, frame_bytes: bytes) -> bytes:
         """Strict typed dispatch: route one request frame to its typed handler.
 
-        Accepted operations are ``scene.query``, ``workspace.inspect``, and the
-        typed ChangeSet preflight/apply/receipt handlers.
+        Accepted operations are ``scene.query``, ``workspace.inspect``, the
+        typed ChangeSet preflight/apply/receipt handlers, ``sensitivity.sample``,
+        and ``capture.capture``.
         The operation name is read through strict JSON (rejecting malformed,
         non-UTF-8, and duplicate-key frames) and dispatched explicitly — there is
         no arbitrary name dispatch surface. All operations share the single
@@ -799,6 +806,21 @@ class BridgeServer:
                     message_for_user="The bridge does not support sensitivity sampling.",
                 )
             return await self._serve_sample_sensitivity(frame_bytes)
+        if operation == CAPTURE_OPERATION:
+            # Admission: a server that does not advertise capture.v1 must
+            # fail closed BEFORE any HOM access or payload parsing.
+            if CAPTURE_V1 not in self._capabilities:
+                request_id = obj.get("request_id")
+                if type(request_id) is not str:
+                    request_id = _MALFORMED_REQUEST_ID
+                return self._error_envelope(
+                    request_id,
+                    code="bridge.capability_unavailable",
+                    category="capability",
+                    message_for_user="The bridge does not support artifact capture.",
+                )
+            return await self._serve_capture(frame_bytes)
+        request_id = obj.get("request_id")
         request_id = obj.get("request_id")
         if type(request_id) is not str:
             request_id = _MALFORMED_REQUEST_ID
@@ -1057,6 +1079,47 @@ class BridgeServer:
                 retryable=result.retryable,
             )
         response = SensitivitySampleResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
+        return response.to_json().encode("utf-8")
+
+    async def _serve_capture(self, frame_bytes: bytes) -> bytes:
+        """Parse + queue a ``capture.capture`` request; return reference bytes.
+
+        Admission checks the advertised capability BEFORE the main-thread
+        operation runs. The op is a read+capture that creates only an owned
+        temp camera/ROP scope (cleaned up in all cases, including on render
+        failure), so the write-freeze gate does not apply — but the executor's
+        stale-epoch precheck and never-guess discipline do. Pre-scope failures
+        (stale scene, unavailable target directory, unresolvable node, cook or
+        framing failure) surface as a structured bridge error with zero scene
+        changes; a render or cleanup failure is classified and never produces
+        a guessed reference. Only content-addressed reference fields are
+        returned — image bytes never cross the wire.
+        """
+        try:
+            request = parse_capture_request(frame_bytes)
+        except (TypeError, ValueError):
+            return self._error_envelope(
+                _MALFORMED_REQUEST_ID,
+                code="bridge.invalid_request",
+                category="protocol",
+                message_for_user="The capture request is not valid.",
+            )
+        request_id = request.request_id
+        capture_request = request
+
+        def operation() -> object:
+            return self._executor.capture(capture_request)  # type: ignore[union-attr]
+
+        result = await self._run_on_queue(request_id, request.deadline_ms, operation)
+        if isinstance(result, _QueuedError):
+            return self._error_envelope(
+                request_id,
+                code=result.code,
+                category=result.category,
+                message_for_user=result.message_for_user,
+                retryable=result.retryable,
+            )
+        response = CaptureResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
         return response.to_json().encode("utf-8")
 
     async def _run_on_queue(

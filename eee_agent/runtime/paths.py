@@ -14,6 +14,7 @@ class RuntimePaths:
     lock_file: Path
     discovery_file: Path
     token_file: Path
+    artifacts_dir: Path
 
     @classmethod
     def from_environment(cls) -> "RuntimePaths":
@@ -45,7 +46,9 @@ class RuntimePaths:
             lock_file=state / "runtime.lock",
             discovery_file=state / "runtime.json",
             token_file=state / "runtime.token",
+            artifacts_dir=state / "artifacts",
         )
 
     def create_used_directories(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.artifacts_dir.mkdir(parents=True, exist_ok=True)

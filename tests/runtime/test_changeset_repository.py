@@ -316,7 +316,7 @@ def test_schema_v3_preserves_changeset_tables_and_adds_workspace_state(
                 "session_workspace_state",
             ):
                 assert table in names
-            assert await db.schema_version() == 3
+            assert await db.schema_version() == 4
         finally:
             await db.close()
 

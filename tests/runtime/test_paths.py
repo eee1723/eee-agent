@@ -15,7 +15,19 @@ def test_override_builds_expected_paths_without_creating_files(
     assert paths.app_db == home.resolve() / "state" / "app.sqlite"
     assert paths.checkpoints_db == home.resolve() / "state" / "checkpoints.sqlite"
     assert paths.discovery_file == home.resolve() / "state" / "runtime.json"
+    assert paths.artifacts_dir == home.resolve() / "state" / "artifacts"
     assert not home.exists()
+
+
+def test_create_used_directories_creates_state_and_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "runtime-home"
+    monkeypatch.setenv("EEE_RUNTIME_HOME", str(home))
+    paths = RuntimePaths.from_environment()
+    paths.create_used_directories()
+    assert paths.state_dir.is_dir()
+    assert paths.artifacts_dir.is_dir()
 
 
 def test_relative_override_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:

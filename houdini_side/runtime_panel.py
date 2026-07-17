@@ -32,8 +32,11 @@ from eee_agent.panel.client_state import (  # noqa: E402
 )
 from eee_agent.panel.runtime_state import (  # noqa: E402
     RuntimePanelState,
+    append_artifact_summary,
     approval_is_actionable,
+    artifact_refresh_required,
     changeset_refresh_required,
+    parse_artifact_event,
     parse_changeset_list,
 )
 from houdini_side.secure_bridge_host import (  # noqa: E402
@@ -456,6 +459,7 @@ class RuntimeObserverClient(QtCore.QObject):
     commandSucceeded = QtCore.Signal(str, object)
     commandFailed = QtCore.Signal(str, str, str, bool, bool)
     eventObserved = QtCore.Signal(str, int)
+    artifactObserved = QtCore.Signal(object)
 
     _DELAYS_MS = (250, 500, 1000, 2000, 5000)
 
@@ -915,6 +919,13 @@ class RuntimeObserverClient(QtCore.QObject):
                 )
             if changeset_refresh_required(message):
                 self._schedule_changeset_refresh()
+            if artifact_refresh_required(message):
+                try:
+                    summary = parse_artifact_event(message)
+                except PanelClientError as exc:
+                    self.connectionChanged.emit("error", str(exc))
+                    return
+                self.artifactObserved.emit(summary)
             self.eventObserved.emit(message["type"], seq)
             if session_id == self._current_session_id:
                 self.sessionChanged.emit(
@@ -938,6 +949,7 @@ class RuntimePanel(QtWidgets.QWidget):
         self._client.sessionsChanged.connect(self._set_sessions)
         self._client.runtimeSnapshotChanged.connect(self._set_runtime_snapshot)
         self._client.changesetsChanged.connect(self._set_changesets)
+        self._client.artifactObserved.connect(self._artifact_observed)
         self._client.commandSucceeded.connect(self._command_succeeded)
         self._client.commandFailed.connect(self._command_failed)
         self._client.eventObserved.connect(self._set_event)
@@ -945,6 +957,7 @@ class RuntimePanel(QtWidgets.QWidget):
         self._active_run_id: str | None = None
         self._active_run_status = ""
         self._changesets = ()
+        self._artifacts = ()
         self._decision_busy = False
         self._session_title_dialog: SessionTitleDialog | None = None
         self._selection_worker = SelectionQueryWorker(self)
@@ -1025,8 +1038,12 @@ class RuntimePanel(QtWidgets.QWidget):
         self.workspace_tab_index = self.tabs.addTab(
             self._build_workspace_tab(), "WORKSPACE"
         )
+        self.artifacts_tab_index = self.tabs.addTab(
+            self._build_artifacts_tab(), "ARTIFACTS"
+        )
         self.tabs.setTabVisible(self.scene_tab_index, False)
         self.tabs.setTabVisible(self.workspace_tab_index, False)
+        self.tabs.setTabVisible(self.artifacts_tab_index, False)
         layout.addWidget(self.tabs, 1)
 
         self.last_event = QtWidgets.QLabel("No Runtime events observed")
@@ -1316,6 +1333,55 @@ class RuntimePanel(QtWidgets.QWidget):
         layout.addWidget(self.workspace_summary, 1)
         return tab
 
+    def _build_artifacts_tab(self) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(9)
+
+        title = QtWidgets.QLabel("CAPTURED ARTIFACTS")
+        title.setObjectName("Kicker")
+        layout.addWidget(title)
+        self.artifacts_status = QtWidgets.QLabel("NO ARTIFACTS OBSERVED")
+        self.artifacts_status.setObjectName("RunState")
+        layout.addWidget(self.artifacts_status)
+
+        note = QtWidgets.QLabel(
+            "Read-only capture metadata from durable Runtime events. The "
+            "listed SHA-256 is the registered content digest: the bytes shown "
+            "to you and any later vision input hash-identically match it."
+        )
+        note.setObjectName("Meta")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        self.artifact_list = QtWidgets.QTreeWidget()
+        self.artifact_list.setObjectName("SelectionTable")
+        self.artifact_list.setColumnCount(4)
+        self.artifact_list.setHeaderLabels(
+            ["ARTIFACT", "MEDIA", "BYTES", "SHA-256"]
+        )
+        self.artifact_list.setRootIsDecorated(False)
+        self.artifact_list.setAlternatingRowColors(True)
+        self.artifact_list.setSelectionMode(
+            QtWidgets.QAbstractItemView.SingleSelection
+        )
+        self.artifact_list.header().setStretchLastSection(False)
+        self.artifact_list.header().setSectionResizeMode(
+            0, QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
+        self.artifact_list.header().setSectionResizeMode(
+            1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.artifact_list.header().setSectionResizeMode(
+            2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.artifact_list.header().setSectionResizeMode(
+            3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        layout.addWidget(self.artifact_list, 1)
+        return tab
+
     def _rail_item(self, layout, column, key, value, attr) -> None:
         key_label = QtWidgets.QLabel(key)
         key_label.setObjectName("RailKey")
@@ -1343,10 +1409,13 @@ class RuntimePanel(QtWidgets.QWidget):
         self.tabs.setTabVisible(
             self.workspace_tab_index, self._developer_details_visible
         )
+        self.tabs.setTabVisible(
+            self.artifacts_tab_index, self._developer_details_visible
+        )
         if (
             not self._developer_details_visible
             and self.tabs.currentIndex()
-            in (self.scene_tab_index, self.workspace_tab_index)
+            in (self.scene_tab_index, self.workspace_tab_index, self.artifacts_tab_index)
         ):
             self.tabs.setCurrentIndex(self.model_tab_index)
         current = self._current_changeset()
@@ -1782,11 +1851,48 @@ class RuntimePanel(QtWidgets.QWidget):
 
     @QtCore.Slot(str, str, int)
     def _set_session(self, session_id: str, title: str, cursor: int) -> None:
+        if session_id != getattr(self, "_session_id", ""):
+            self._artifacts = ()
+            self._render_artifacts()
         self._session_id = session_id
         self._session_title = title if session_id else "—"
         self._cursor = cursor
         self._refresh_context()
         self._update_run_controls()
+
+    @QtCore.Slot(object)
+    def _artifact_observed(self, summary) -> None:
+        self._artifacts = append_artifact_summary(self._artifacts, summary)
+        self._render_artifacts()
+
+    def _render_artifacts(self) -> None:
+        self.artifact_list.clear()
+        count = len(self._artifacts)
+        self.artifacts_status.setText(
+            "NO ARTIFACTS OBSERVED" if count == 0 else f"{count:02d} ARTIFACTS"
+        )
+        for summary in self._artifacts:
+            if summary["kind"] == "captured":
+                item = QtWidgets.QTreeWidgetItem(
+                    [
+                        summary["artifact_id"],
+                        summary["media_type"],
+                        str(summary["size_bytes"]),
+                        summary["sha256"][:12],
+                    ]
+                )
+                item.setToolTip(
+                    0,
+                    f"{summary['relative_path']}\nsha256: {summary['sha256']}",
+                )
+                item.setToolTip(3, summary["sha256"])
+            else:
+                item = QtWidgets.QTreeWidgetItem(
+                    ["CAPTURE FAILED", "—", "—", summary["code"]]
+                )
+                item.setToolTip(0, summary["change_id"])
+                item.setToolTip(3, summary["code"])
+            self.artifact_list.addTopLevelItem(item)
 
     @QtCore.Slot(str, int)
     def _set_event(self, event_type: str, seq: int) -> None:

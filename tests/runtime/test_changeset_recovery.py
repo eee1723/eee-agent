@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,6 +40,10 @@ from eee_agent.houdini_bridge.changesets import (
 from eee_agent.houdini_bridge.auth import (
     BRIDGE_DISCOVERY_FILENAME,
     BRIDGE_TOKEN_FILENAME,
+)
+from eee_agent.houdini_bridge.capture import (
+    CaptureFramingReport,
+    CaptureResult,
 )
 from eee_agent.houdini_bridge.changeset_provider import BridgeChangeSetProvider
 from eee_agent.houdini_bridge.client import BridgeClient
@@ -634,6 +639,7 @@ def test_runtime_waiter_cancellation_does_not_cancel_apply_or_notifications(
             lock_file=tmp_path / "runtime.lock",
             discovery_file=tmp_path / "runtime.json",
             token_file=tmp_path / "runtime.token",
+            artifacts_dir=tmp_path / "artifacts",
         )
         runtime = RuntimeService(
             db,
@@ -801,6 +807,7 @@ def test_runtime_open_recovers_applying_from_bridge_receipt(
             lock_file=tmp_path / "runtime.lock",
             discovery_file=tmp_path / "runtime.json",
             token_file=tmp_path / "runtime.token",
+            artifacts_dir=tmp_path / "artifacts",
         )
         async with RuntimeService.open(
             paths,
@@ -837,6 +844,7 @@ def test_runtime_shutdown_timeout_leaves_applying_for_restart(
             lock_file=tmp_path / "runtime.lock",
             discovery_file=tmp_path / "runtime.json",
             token_file=tmp_path / "runtime.token",
+            artifacts_dir=tmp_path / "artifacts",
         )
         runtime = RuntimeService(
             db,
@@ -870,6 +878,7 @@ def test_runtime_persists_post_apply_geometry_validation(
             lock_file=tmp_path / "runtime.lock",
             discovery_file=tmp_path / "runtime.json",
             token_file=tmp_path / "runtime.token",
+            artifacts_dir=tmp_path / "artifacts",
         )
         runtime = RuntimeService(
             db,
@@ -922,6 +931,7 @@ def test_runtime_persists_post_apply_sensitivity_validation(
             lock_file=tmp_path / "runtime.lock",
             discovery_file=tmp_path / "runtime.json",
             token_file=tmp_path / "runtime.token",
+            artifacts_dir=tmp_path / "artifacts",
         )
         runtime = RuntimeService(
             db,
@@ -974,6 +984,7 @@ def test_runtime_records_sensitivity_unavailable_without_replaying_apply(
             lock_file=tmp_path / "runtime.lock",
             discovery_file=tmp_path / "runtime.json",
             token_file=tmp_path / "runtime.token",
+            artifacts_dir=tmp_path / "artifacts",
         )
         runtime = RuntimeService(
             db,
@@ -1015,6 +1026,7 @@ def test_runtime_records_validation_unavailable_without_replaying_apply(
             lock_file=tmp_path / "runtime.lock",
             discovery_file=tmp_path / "runtime.json",
             token_file=tmp_path / "runtime.token",
+            artifacts_dir=tmp_path / "artifacts",
         )
         runtime = RuntimeService(
             db,
@@ -1035,6 +1047,202 @@ def test_runtime_records_validation_unavailable_without_replaying_apply(
             assert unavailable.payload["code"] == "bridge.not_available"
             assert bridge.calls.count("apply") == 1
             assert bridge.calls.count("inspect_geometry") == 1
+        finally:
+            await runtime._shutdown()
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------
+# Task 19-A: post-Apply artifact capture integration
+# --------------------------------------------------------------------------
+
+_CAPTURE_PNG = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + bytes(range(40))
+
+
+class FakeBridgeWithCapture(FakeBridge):
+    """FakeBridge plus the typed ``capture.capture`` seam (Task 19-A)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.capture_error: BaseException | None = None
+
+    async def capture(self, changeset, *, target_dir, artifact_id):
+        self.calls.append("capture")
+        if self.capture_error is not None:
+            raise self.capture_error
+        (target_dir / f"{artifact_id}.png").write_bytes(_CAPTURE_PNG)
+        return CaptureResult(
+            artifact_id=artifact_id,
+            relative_path=f"{artifact_id}.png",
+            sha256=hashlib.sha256(_CAPTURE_PNG).hexdigest(),
+            media_type="image/png",
+            size_bytes=len(_CAPTURE_PNG),
+            framing=CaptureFramingReport(
+                adjustments_used=1,
+                margin_left=0.16,
+                margin_right=0.17,
+                margin_bottom=0.12,
+                margin_top=0.12,
+                longest_axis_ratio=0.78,
+                center_offset=0.002,
+            ),
+        )
+
+
+def test_runtime_persists_post_apply_artifact_capture(
+    db_path: Path, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        db, events, _repo, _service, _bridge = await _seed(
+            db_path, changeset=_box_changeset()
+        )
+        bridge = FakeBridgeWithCapture()
+        paths = RuntimePaths(
+            home=tmp_path,
+            state_dir=tmp_path,
+            app_db=db_path,
+            checkpoints_db=tmp_path / "checkpoints.sqlite",
+            lock_file=tmp_path / "runtime.lock",
+            discovery_file=tmp_path / "runtime.json",
+            token_file=tmp_path / "runtime.token",
+            artifacts_dir=tmp_path / "artifacts",
+        )
+        runtime = RuntimeService(
+            db,
+            paths,
+            changeset_clock=lambda: NOW,
+            changeset_bridge_provider=bridge,
+            modeling_catalog_provider=houdini_21_minimal_catalog,
+        )
+        try:
+            result = await runtime.apply_changeset_trusted(CHG)
+            assert result.state is ChangeSetState.APPLIED
+            replay = await events.replay(SES, after_seq=0, limit=100)
+            captured = next(
+                event
+                for event in replay.events
+                if event.event_type == "modeling.artifact_captured"
+            )
+            assert captured.payload["change_id"] == CHG
+            assert captured.payload["changeset_digest"] == result.changeset.digest
+            artifact = captured.payload["artifact"]
+            artifact_id = artifact["artifact_id"]
+            assert artifact_id.startswith("art_")
+            assert artifact["sha256"] == hashlib.sha256(_CAPTURE_PNG).hexdigest()
+            assert artifact["media_type"] == "image/png"
+            assert artifact["size_bytes"] == len(_CAPTURE_PNG)
+            assert artifact["relative_path"] == f"{SES}/{RUN}/{artifact_id}.png"
+            framing = captured.payload["framing"]
+            assert framing["adjustments_used"] == 1
+            assert framing["longest_axis_ratio"] == 0.78
+            # The registered store record resolves the exact same bytes.
+            ref = await runtime._artifacts.get(artifact_id)
+            assert ref is not None
+            assert runtime._artifacts.path_for(ref).read_bytes() == _CAPTURE_PNG
+            validation = next(
+                event
+                for event in replay.events
+                if event.event_type == "modeling.validation_completed"
+            )
+            assert validation.payload["complete"] is True
+            assert [item["validator"] for item in validation.payload["results"]] == [
+                "Cook",
+                "Geometry",
+                "ParameterSensitivity",
+                "Artifact",
+            ]
+            assert [item["status"] for item in validation.payload["results"]] == [
+                "Passed",
+                "Passed",
+                "Passed",
+                "Passed",
+            ]
+            assert bridge.calls == [
+                "apply",
+                "inspect_geometry",
+                "sample_sensitivity",
+                "capture",
+            ]
+            # A trusted join with no new events never re-captures.
+            await runtime.apply_changeset_trusted(CHG)
+            replay = await events.replay(SES, after_seq=0, limit=100)
+            assert sum(
+                event.event_type == "modeling.artifact_captured"
+                for event in replay.events
+            ) == 1
+            assert bridge.calls.count("capture") == 1
+        finally:
+            await runtime._shutdown()
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_runtime_records_capture_failed_without_replaying_apply(
+    db_path: Path, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        db, events, _repo, _service, _bridge = await _seed(
+            db_path, changeset=_box_changeset()
+        )
+        bridge = FakeBridgeWithCapture()
+        bridge.capture_error = _agent_error("capture.framing_failed")
+        paths = RuntimePaths(
+            home=tmp_path,
+            state_dir=tmp_path,
+            app_db=db_path,
+            checkpoints_db=tmp_path / "checkpoints.sqlite",
+            lock_file=tmp_path / "runtime.lock",
+            discovery_file=tmp_path / "runtime.json",
+            token_file=tmp_path / "runtime.token",
+            artifacts_dir=tmp_path / "artifacts",
+        )
+        runtime = RuntimeService(
+            db,
+            paths,
+            changeset_clock=lambda: NOW,
+            changeset_bridge_provider=bridge,
+            modeling_catalog_provider=houdini_21_minimal_catalog,
+        )
+        try:
+            result = await runtime.apply_changeset_trusted(CHG)
+            assert result.state is ChangeSetState.APPLIED
+            replay = await events.replay(SES, after_seq=0, limit=100)
+            failed = next(
+                event
+                for event in replay.events
+                if event.event_type == "modeling.capture_failed"
+            )
+            assert failed.payload["code"] == "capture.framing_failed"
+            assert failed.payload["change_id"] == CHG
+            # The failure is explicit in the validation event: an Artifact
+            # Failed result, never a guessed pass.
+            validation = next(
+                event
+                for event in replay.events
+                if event.event_type == "modeling.validation_completed"
+            )
+            assert validation.payload["complete"] is False
+            artifact_result = next(
+                item
+                for item in validation.payload["results"]
+                if item["validator"] == "Artifact"
+            )
+            assert artifact_result["status"] == "Failed"
+            assert artifact_result["code"] == "modeling.artifact.capture_failed"
+            assert sum(
+                event.event_type == "modeling.artifact_captured"
+                for event in replay.events
+            ) == 0
+            assert bridge.calls.count("apply") == 1
+            assert bridge.calls.count("capture") == 1
+            # No artifact rows or files were registered.
+            assert await runtime._artifacts.list_for_session(SES) == ()
+            # A later trusted join replays nothing.
+            await runtime.apply_changeset_trusted(CHG)
+            assert bridge.calls.count("capture") == 1
         finally:
             await runtime._shutdown()
             await db.close()

@@ -14,6 +14,11 @@ from eee_agent.houdini_bridge.auth import (
     BridgeIdentityError,
     BridgeTokenError,
 )
+from eee_agent.houdini_bridge.capture import (
+    CaptureRequest,
+    CaptureResult,
+    CaptureSettings,
+)
 from eee_agent.houdini_bridge.changesets import (
     ApplyRequest,
     PreflightRequest,
@@ -164,6 +169,35 @@ class BridgeChangeSetProvider:
             samples=samples,
         )
         return await self._call("sample_sensitivity", request, may_have_changed=True)
+
+    async def capture(
+        self,
+        changeset: ChangeSet,
+        *,
+        target_dir: Path,
+        artifact_id: str,
+    ) -> CaptureResult:
+        """Run the typed deterministic screenshot capture for exact paths.
+
+        The Houdini side writes ``<artifact_id>.png`` inside the Runtime-owned
+        ``target_dir`` and returns only content-addressed reference fields;
+        image bytes never cross the bridge wire. Any uncertainty raises with
+        ``scene_may_have_changed=True`` (the op creates an owned temp scope).
+        """
+        if type(changeset) is not ChangeSet:
+            raise TypeError("changeset must be an exact ChangeSet")
+        if not isinstance(target_dir, Path):
+            raise TypeError("target_dir must be a Path")
+        request = CaptureRequest.build(
+            request_id=self._request_id("capture"),
+            deadline_ms=self._deadline_ms,
+            scene_epoch=changeset.scene_binding.scene_epoch,
+            node_paths=[node.path for node in changeset.affected_nodes],
+            target_dir=str(target_dir),
+            artifact_id=artifact_id,
+            settings=CaptureSettings(),
+        )
+        return await self._call("capture", request, may_have_changed=True)
 
     async def receipt(self, changeset: ChangeSet) -> ChangeReceipt:
         if type(changeset) is not ChangeSet:

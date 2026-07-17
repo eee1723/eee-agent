@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Exact schema v1 DDL from the approved design spec section 7.3. No IF NOT
 # EXISTS: a partially-wrong schema must surface, not be silently masked.
@@ -156,12 +156,35 @@ CREATE TABLE session_workspace_state (
 );
 """
 
+# Exact schema v4 DDL (Task 19-A). Additive only: it creates the typed
+# content-addressed artifact metadata table and leaves every v1-v3 table
+# untouched. Accepted v1-v3 script text remains byte-for-byte unchanged.
+MIGRATION_V4_SQL = """
+CREATE TABLE artifacts (
+    artifact_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    relative_path TEXT NOT NULL,
+    sha256 TEXT NOT NULL CHECK (length(sha256) = 64),
+    media_type TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+    redacted INTEGER NOT NULL DEFAULT 0 CHECK (redacted IN (0, 1)),
+    created_at TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    UNIQUE(session_id, relative_path)
+);
+
+CREATE INDEX artifacts_by_session ON artifacts(session_id, created_at, artifact_id);
+CREATE INDEX artifacts_by_sha256 ON artifacts(sha256, artifact_id);
+"""
+
 # Ordered migrations. Each entry is (version, SQL script). The orchestrator
 # splits the script into statements and runs them in one atomic transaction.
 MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, MIGRATION_V1_SQL),
     (2, MIGRATION_V2_SQL),
     (3, MIGRATION_V3_SQL),
+    (4, MIGRATION_V4_SQL),
 )
 
 

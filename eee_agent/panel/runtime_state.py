@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime, timezone
 from types import MappingProxyType
@@ -66,6 +67,39 @@ _CHANGESET_REFRESH_EVENTS = frozenset(
         "recovery.critical",
     }
 )
+_ARTIFACT_REFRESH_EVENTS = frozenset(
+    {
+        "modeling.artifact_captured",
+        "modeling.capture_failed",
+    }
+)
+_ARTIFACT_ID_RE = re.compile(r"^art_[0-9a-f]{32}$")
+_ARTIFACT_CAPTURED_FIELDS = frozenset(
+    {"change_id", "changeset_digest", "artifact", "framing"}
+)
+_CAPTURE_FAILED_FIELDS = frozenset({"change_id", "changeset_digest", "code"})
+_ARTIFACT_FIELDS = frozenset(
+    {
+        "artifact_id",
+        "relative_path",
+        "sha256",
+        "media_type",
+        "size_bytes",
+        "schema_version",
+    }
+)
+_FRAMING_FIELDS = frozenset(
+    {
+        "adjustments_used",
+        "margin_left",
+        "margin_right",
+        "margin_bottom",
+        "margin_top",
+        "longest_axis_ratio",
+        "center_offset",
+    }
+)
+_MAX_ARTIFACTS = 50
 _RUN_FIELDS = frozenset(
     {
         "run_id",
@@ -500,6 +534,114 @@ def changeset_refresh_required(message: Mapping[str, object]) -> bool:
     )
 
 
+def artifact_refresh_required(message: Mapping[str, object]) -> bool:
+    return (
+        message.get("kind") == "event"
+        and message.get("type") in _ARTIFACT_REFRESH_EVENTS
+    )
+
+
+def _finite_number(value: object) -> float:
+    if type(value) is bool or type(value) not in (int, float):
+        raise PanelClientError("Runtime artifact event is invalid.")
+    if not math.isfinite(value):
+        raise PanelClientError("Runtime artifact event is invalid.")
+    return float(value)
+
+
+def parse_artifact_event(message: Mapping[str, object]) -> Mapping[str, object]:
+    """Validate one durable artifact event into a bounded panel summary.
+
+    The summary carries metadata only (never image bytes): the artifact id,
+    media type, size, sha256, relative path, and framing report of a capture,
+    or the structured code of a capture failure. Byte identity stays
+    inspectable because the listed sha256 is the registered content digest.
+    """
+    if not artifact_refresh_required(message):
+        raise PanelClientError("Runtime artifact event is invalid.")
+    seq = message.get("seq")
+    if type(seq) is not int or seq <= 0:
+        raise PanelClientError("Runtime artifact event is invalid.")
+    payload = message.get("payload")
+    if type(payload) is not dict:
+        raise PanelClientError("Runtime artifact event is invalid.")
+    if message["type"] == "modeling.capture_failed":
+        if set(payload) != _CAPTURE_FAILED_FIELDS:
+            raise PanelClientError("Runtime capture failure event is invalid.")
+        _matching(payload["change_id"], _CHANGE_ID_RE)
+        _matching(payload["changeset_digest"], _DIGEST_RE)
+        code = _exact_str(payload["code"])
+        return MappingProxyType(
+            {
+                "kind": "failed",
+                "code": code,
+                "change_id": payload["change_id"],
+                "seq": seq,
+            }
+        )
+    if set(payload) != _ARTIFACT_CAPTURED_FIELDS:
+        raise PanelClientError("Runtime artifact event is invalid.")
+    _matching(payload["change_id"], _CHANGE_ID_RE)
+    _matching(payload["changeset_digest"], _DIGEST_RE)
+    artifact = payload["artifact"]
+    if type(artifact) is not dict or set(artifact) != _ARTIFACT_FIELDS:
+        raise PanelClientError("Runtime artifact event is invalid.")
+    _matching(artifact["artifact_id"], _ARTIFACT_ID_RE)
+    relative_path = artifact["relative_path"]
+    if (
+        type(relative_path) is not str
+        or not relative_path
+        or len(relative_path) > 1024
+        or relative_path.startswith("/")
+        or "\\" in relative_path
+        or ".." in relative_path.split("/")
+    ):
+        raise PanelClientError("Runtime artifact event is invalid.")
+    _matching(artifact["sha256"], _DIGEST_RE)
+    media_type = artifact["media_type"]
+    if type(media_type) is not str or not media_type or len(media_type) > 255:
+        raise PanelClientError("Runtime artifact event is invalid.")
+    size_bytes = artifact["size_bytes"]
+    if type(size_bytes) is not int or size_bytes < 0:
+        raise PanelClientError("Runtime artifact event is invalid.")
+    if artifact["schema_version"] != 1:
+        raise PanelClientError("Runtime artifact event is invalid.")
+    framing = payload["framing"]
+    if type(framing) is not dict or set(framing) != _FRAMING_FIELDS:
+        raise PanelClientError("Runtime artifact event is invalid.")
+    adjustments = framing["adjustments_used"]
+    if type(adjustments) is not int or not 0 <= adjustments <= 2:
+        raise PanelClientError("Runtime artifact event is invalid.")
+    for field in (
+        "margin_left",
+        "margin_right",
+        "margin_bottom",
+        "margin_top",
+        "longest_axis_ratio",
+        "center_offset",
+    ):
+        _finite_number(framing[field])
+    return MappingProxyType(
+        {
+            "kind": "captured",
+            "artifact_id": artifact["artifact_id"],
+            "relative_path": relative_path,
+            "sha256": artifact["sha256"],
+            "media_type": media_type,
+            "size_bytes": size_bytes,
+            "seq": seq,
+        }
+    )
+
+
+def append_artifact_summary(
+    items: tuple[Mapping[str, object], ...],
+    summary: Mapping[str, object],
+) -> tuple[Mapping[str, object], ...]:
+    """Prepend one parsed artifact summary, bounded to the newest 50."""
+    return (summary, *items)[:_MAX_ARTIFACTS]
+
+
 def approval_is_actionable(
     summary: Mapping[str, object],
     *,
@@ -522,8 +664,11 @@ def approval_is_actionable(
 
 __all__ = [
     "RuntimePanelState",
+    "append_artifact_summary",
     "approval_is_actionable",
+    "artifact_refresh_required",
     "changeset_refresh_required",
+    "parse_artifact_event",
     "parse_changeset_list",
     "parse_session_snapshot",
 ]

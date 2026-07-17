@@ -13,6 +13,8 @@ from enum import StrEnum
 from typing import Mapping
 
 from eee_agent.changesets.contracts import ChangeSet, ConnectInput, CreateNode, SetParm
+from eee_agent.core.artifacts import ArtifactRef
+from eee_agent.houdini_bridge.capture import CaptureFramingReport
 from eee_agent.houdini_bridge.contracts import SceneQueryResult
 from eee_agent.houdini_bridge.sensitivity import (
     SensitivitySampleResult,
@@ -20,6 +22,7 @@ from eee_agent.houdini_bridge.sensitivity import (
 )
 from eee_agent.modeling.catalog import NodeCatalog
 from eee_agent.modeling.compiler import CompilationResult
+from eee_agent.modeling.framing import FramingTolerance
 from eee_agent.modeling.golden_cases import GoldenCase
 from eee_agent.modeling.contracts import (
     ModelingBrief,
@@ -543,18 +546,81 @@ def validate_golden_case_semantics(
     )
 
 
+def validate_artifact_capture(
+    *,
+    changeset: ChangeSet,
+    artifact: ArtifactRef,
+    framing: CaptureFramingReport,
+) -> ValidatorResult:
+    """Verify the registered post-Apply capture reference and framing evidence.
+
+    The Runtime already re-hashed the delivered bytes against the bridge
+    reference before registration; this validator independently re-checks the
+    deterministic framing acceptance band and the capture media type so an
+    out-of-band report can never be recorded as a passing Artifact stage.
+    """
+    if type(changeset) is not ChangeSet:
+        raise TypeError("changeset must be an exact ChangeSet")
+    if type(artifact) is not ArtifactRef:
+        raise TypeError("artifact must be an exact ArtifactRef")
+    if type(framing) is not CaptureFramingReport:
+        raise TypeError("framing must be an exact CaptureFramingReport")
+    evidence = _evidence(
+        "artifact.capture",
+        {"artifact": artifact.to_dict(), "framing": framing.to_dict()},
+        "Content-addressed capture and deterministic framing evidence",
+    )
+    if artifact.media_type != "image/png":
+        return ValidatorResult(
+            ValidatorKind.ARTIFACT,
+            ValidationStatus.FAILED,
+            "modeling.artifact.invalid",
+            "The captured artifact is not the deterministic PNG capture.",
+            (evidence,),
+        )
+    tolerance = FramingTolerance()
+    framing_ok = (
+        framing.margin_left >= tolerance.margin_min
+        and framing.margin_right >= tolerance.margin_min
+        and framing.margin_bottom >= tolerance.margin_min
+        and framing.margin_top >= tolerance.margin_min
+        and tolerance.longest_axis_min
+        <= framing.longest_axis_ratio
+        <= tolerance.longest_axis_max
+        and framing.center_offset <= tolerance.center_offset_max
+    )
+    if not framing_ok:
+        return ValidatorResult(
+            ValidatorKind.ARTIFACT,
+            ValidationStatus.FAILED,
+            "modeling.artifact.framing_invalid",
+            "The capture framing report is outside the deterministic acceptance band.",
+            (evidence,),
+        )
+    return ValidatorResult(
+        ValidatorKind.ARTIFACT,
+        ValidationStatus.PASSED,
+        "modeling.artifact.valid",
+        "A hash-verified capture with accepted deterministic framing is registered.",
+        (evidence,),
+    )
+
+
 def validate_scene_query(
     *,
     report: ValidationReport,
     changeset: ChangeSet,
     query: SceneQueryResult,
     sensitivity: SensitivitySampleResult | None = None,
+    capture: tuple[ArtifactRef, CaptureFramingReport] | None = None,
 ) -> ValidationReport:
     """Resolve Cook and Geometry stages from one exact read-only scene query.
 
     When typed Bridge sample-and-restore evidence is supplied, the
-    ParameterSensitivity stage is resolved from it in the same step; without
-    evidence the stage keeps its prior (Unavailable) result.
+    ParameterSensitivity stage is resolved from it in the same step; when the
+    registered content-addressed capture evidence is supplied, the Artifact
+    stage is resolved from it in the same step. Without evidence a stage keeps
+    its prior (Unavailable) result.
     """
     if type(report) is not ValidationReport:
         raise TypeError("report must be an exact ValidationReport")
@@ -564,6 +630,16 @@ def validate_scene_query(
         raise TypeError("query must be an exact SceneQueryResult")
     if sensitivity is not None and type(sensitivity) is not SensitivitySampleResult:
         raise TypeError("sensitivity must be an exact SensitivitySampleResult or None")
+    if capture is not None:
+        if (
+            type(capture) is not tuple
+            or len(capture) != 2
+            or type(capture[0]) is not ArtifactRef
+            or type(capture[1]) is not CaptureFramingReport
+        ):
+            raise TypeError(
+                "capture must be an exact (ArtifactRef, CaptureFramingReport) tuple or None"
+            )
     if report.changeset_digest != changeset.digest:
         raise ValueError("report does not bind the supplied ChangeSet")
     cook, geometry = validate_applied_scene(changeset=changeset, query=query)
@@ -580,6 +656,12 @@ def validate_scene_query(
                 samples=sensitivity.samples,
                 restored=sensitivity.restored,
             )
+        )
+    if capture is not None:
+        replacements[ValidatorKind.ARTIFACT] = validate_artifact_capture(
+            changeset=changeset,
+            artifact=capture[0],
+            framing=capture[1],
         )
     results = tuple(
         sorted(
@@ -646,6 +728,7 @@ __all__ = [
     "derive_sensitivity_sample_plan",
     "issue_repair_ticket",
     "validate_applied_scene",
+    "validate_artifact_capture",
     "validate_compilation",
     "validate_parameter_sensitivity",
     "validate_golden_case_semantics",
