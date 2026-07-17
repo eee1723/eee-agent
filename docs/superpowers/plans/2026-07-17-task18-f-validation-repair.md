@@ -3,8 +3,8 @@
 Status: deterministic pre-Apply report, repair-budget foundation, and typed
 Bridge Cook/Geometry post-Apply validators are implemented locally. Parameter
 Sensitivity判定（baseline/sample/restored） and a disposable hython restore
-smoke are implemented; transactional Bridge sampling, Semantic, and Artifact
-stages remain.
+smoke are implemented. Golden Case semantic name/type validation is also
+implemented; transactional Bridge sampling and Artifact evidence remain.
 
 ## Goal
 

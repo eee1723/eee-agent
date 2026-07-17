@@ -30,6 +30,7 @@ def main() -> None:
     from eee_agent.modeling.validation import (
         ValidationStatus,
         validate_applied_scene,
+        validate_golden_case_semantics,
     )
     from houdini_side.changeset_executor import ChangeSetExecutor
     from houdini_side.secure_bridge import create_houdini_scene_adapter
@@ -88,6 +89,15 @@ def main() -> None:
                 raise RuntimeError(
                     f"GOLDEN FAIL {case.case_id}: "
                     f"{[item.to_dict() for item in results]}"
+                )
+            semantic = validate_golden_case_semantics(
+                case=case,
+                changeset=compiled.changeset,
+                query=query,
+            )
+            if semantic.status is not ValidationStatus.PASSED:
+                raise RuntimeError(
+                    f"GOLDEN FAIL {case.case_id}: semantic {semantic.to_dict()}"
                 )
             terminal = hou.node(f"{root_path}/{case.expected_terminal_node_name}")
             if terminal is None or terminal.geometry().primCount() <= 0:

@@ -54,6 +54,7 @@ from eee_agent.modeling.validation import (
     issue_repair_ticket,
     validate_applied_scene,
     validate_compilation,
+    validate_golden_case_semantics,
     validate_parameter_sensitivity,
     validate_scene_query,
 )
@@ -102,6 +103,7 @@ __all__ = [
     "parse_repair_budget",
     "parse_repair_ticket",
     "validate_compilation",
+    "validate_golden_case_semantics",
     "validate_parameter_sensitivity",
     "validate_scene_query",
     "ModelingProposalContext",

@@ -16,6 +16,7 @@ from eee_agent.changesets.contracts import ChangeSet, ConnectInput, CreateNode
 from eee_agent.houdini_bridge.contracts import SceneQueryResult
 from eee_agent.modeling.catalog import NodeCatalog
 from eee_agent.modeling.compiler import CompilationResult
+from eee_agent.modeling.golden_cases import GoldenCase
 from eee_agent.modeling.contracts import (
     ModelingBrief,
     ProceduralSpec,
@@ -415,6 +416,66 @@ def validate_parameter_sensitivity(
     )
 
 
+def validate_golden_case_semantics(
+    *, case: GoldenCase, changeset: ChangeSet, query: SceneQueryResult
+) -> ValidatorResult:
+    """Check deterministic node names/types for one trusted Golden Case."""
+    if type(case) is not GoldenCase:
+        raise TypeError("case must be an exact GoldenCase")
+    if type(changeset) is not ChangeSet or type(query) is not SceneQueryResult:
+        raise TypeError("changeset and query must be exact typed values")
+    evidence = _evidence(
+        "scene.semantic",
+        {"case_id": case.case_id, "query": query.to_dict()},
+        "Golden Case semantic evidence",
+    )
+    if (
+        query.binding.instance_id != changeset.scene_binding.instance_id
+        or query.binding.scene_epoch != changeset.scene_binding.scene_epoch
+    ):
+        return ValidatorResult(
+            ValidatorKind.SEMANTIC,
+            ValidationStatus.STALE,
+            "modeling.semantic.stale",
+            "Golden Case evidence no longer matches the approved scene binding.",
+            (evidence,),
+        )
+    expected_names = {
+        node.node_name
+        for component in case.spec.components
+        for node in component.nodes
+    }
+    expected_types = {
+        node.path.rsplit("/", 1)[-1]: node.expected_type
+        for node in changeset.affected_nodes
+    }
+    actual = {node.display_name: node for node in query.nodes}
+    missing = sorted(name for name in expected_names if name not in actual)
+    wrong_type = sorted(
+        name
+        for name, expected_type in expected_types.items()
+        if name in actual and actual[name].node_type != expected_type
+    )
+    terminal = actual.get(case.expected_terminal_node_name)
+    if terminal is None or terminal.node_type != "null":
+        wrong_type.append(case.expected_terminal_node_name)
+    if missing or wrong_type:
+        return ValidatorResult(
+            ValidatorKind.SEMANTIC,
+            ValidationStatus.FAILED,
+            "modeling.semantic.invalid",
+            "Golden Case node names or types do not match the trusted specification.",
+            (evidence,),
+        )
+    return ValidatorResult(
+        ValidatorKind.SEMANTIC,
+        ValidationStatus.PASSED,
+        "modeling.semantic.valid",
+        "Golden Case node names, types, and terminal output match.",
+        (evidence,),
+    )
+
+
 def validate_scene_query(
     *,
     report: ValidationReport,
@@ -502,5 +563,6 @@ __all__ = [
     "validate_applied_scene",
     "validate_compilation",
     "validate_parameter_sensitivity",
+    "validate_golden_case_semantics",
     "validate_scene_query",
 ]

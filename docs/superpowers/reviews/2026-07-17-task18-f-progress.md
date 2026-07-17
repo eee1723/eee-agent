@@ -13,6 +13,7 @@
 - per-stage maximum-two RepairBudget and explicit exhausted RepairTicket;
 - deterministic Parameter Sensitivity判定 requiring changed sample geometry and
   exact baseline restoration;
+- Golden Case semantic node-name/type validation in the hython replay loop;
 - duplicate trusted Apply reads do not append duplicate validation events.
 
 Validation never receives write authority. An unavailable validation read does
@@ -29,6 +30,5 @@ not replay or invalidate an already durable Apply receipt.
 ## Remaining
 
 Parameter Sensitivity still needs a production transactional sample-and-restore
-Bridge operation. Semantic and Artifact validators need Golden Case/output
-contracts. Those stages remain explicitly Unavailable until their typed evidence
-exists.
+Bridge operation. Artifact evidence and user-facing artifact inspection remain
+explicitly Unavailable until their typed evidence exists.
