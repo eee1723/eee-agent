@@ -11,7 +11,6 @@ EXPECTED_DIRECT_VERSIONS = {
     "langchain-openai": "1.3.5",
     "langchain-anthropic": "1.4.8",
     "langgraph": "1.2.9",
-    "rpyc": "4.1.0",
     "pyyaml": "6.0.3",
     "python-dotenv": "1.2.2",
     "aiosqlite": "0.22.1",
@@ -22,6 +21,10 @@ EXPECTED_DIRECT_VERSIONS = {
 
 def test_uv_lock_is_committed() -> None:
     assert Path("uv.lock").is_file()
+
+
+def test_legacy_rpyc_is_not_a_direct_dependency() -> None:
+    assert "rpyc" not in EXPECTED_DIRECT_VERSIONS
 
 
 @pytest.mark.parametrize(("distribution", "expected"), EXPECTED_DIRECT_VERSIONS.items())
