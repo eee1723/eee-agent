@@ -17,7 +17,6 @@ from langgraph.graph.state import CompiledStateGraph
 from eee_agent.harness import configure_deepagents_harness
 from eee_agent.model import build_model
 from eee_agent.system_prompt import build_system_prompt
-from eee_agent.tools.registry import all_tools
 
 
 def build_agent(
@@ -86,7 +85,15 @@ def build_agent(
     # tools=None preserves the full Foundation tool surface (all_tools()); an
     # explicit empty list is respected (no falsy fallback). Copy any caller
     # sequence so later mutation of their container cannot affect this graph.
-    selected_tools = all_tools() if tools is None else list(tools)
+    if tools is None:
+        # Keep the historical Foundation surface available only to explicit
+        # legacy callers.  Runtime callers always pass a secure tool list, so
+        # importing the Runtime graph never loads the old bridge/tool modules.
+        from eee_agent.tools.registry import all_tools
+
+        selected_tools = all_tools()
+    else:
+        selected_tools = list(tools)
     kwargs = dict(model=model, tools=selected_tools,
                   system_prompt=build_system_prompt(), middleware=middleware)
     if backend is not None:

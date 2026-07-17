@@ -44,17 +44,48 @@ def _bounded(value: Any, *, depth: int = 0) -> PlainData:
     return "[unsupported]"
 
 
+def _plain_value(value: Any, *, depth: int = 0) -> bool:
+    """Return whether provider output consists only of safe plain values."""
+    if depth > _MAX_DEPTH:
+        return True
+    if value is None or type(value) in (str, int, float, bool):
+        return True
+    if isinstance(value, Mapping):
+        return all(
+            isinstance(key, str) and _plain_value(item, depth=depth + 1)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return all(_plain_value(item, depth=depth + 1) for item in value)
+    return False
+
+
 def _finish(value: Any) -> dict[str, object]:
     if not isinstance(value, Mapping):
         return _error(
             "bridge.unavailable",
             "The read-only provider returned no bounded result.",
         )
+    if type(value.get("ok")) is not bool:
+        return _error(
+            "bridge.unavailable",
+            "The read-only provider returned a malformed status.",
+        )
+    if not _plain_value(value):
+        return _error(
+            "bridge.unavailable",
+            "The read-only provider returned unsupported data.",
+        )
     result = _bounded(value)
     if not isinstance(result, dict):
         return _error(
             "bridge.unavailable",
             "The read-only provider returned no bounded result.",
+        )
+    if type(result.get("ok")) is not bool:
+        return _error(
+            "bridge.unavailable",
+            "The read-only provider returned a malformed status.",
         )
     # Avoid carrying opaque objects and cap serialized-size by progressively
     # replacing large values with a deterministic marker.
