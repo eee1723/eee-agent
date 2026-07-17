@@ -153,20 +153,17 @@ registration into the current Houdini user preference directory:
 
 Restart Houdini afterward. The **EEE Agent** menu should appear.
 
-The old rpyc Bridge and chat panel remain available through that menu. The
-authenticated Secure Bridge and persistent Runtime are separate components;
-follow the current handoff and relevant test harness when working on Runtime.
+Only the authenticated Secure Bridge and persistent Runtime are available
+through that menu. The former rpyc Bridge and chat panel entrypoints have been
+removed; follow the current handoff and Runtime test harness.
 
-## 7. Run the Legacy Bridge Self-Test
+## 7. Verify the Runtime CLI
 
-Start the legacy RPC Bridge from the **EEE Agent** menu, then:
+The compatibility CLI intentionally exposes only the dependency report:
 
 ```powershell
-uv run --extra eval python -m eee_agent.cli selftest
+uv run --extra eval python -m eee_agent.cli versions
 ```
-
-This is a quick compatibility check and does not replace the Runtime/B2b test
-gates.
 
 ## 8. Start the Persistent Runtime
 

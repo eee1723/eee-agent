@@ -1,8 +1,9 @@
-"""Assemble the Deep Agents Houdini agent.
+"""Assemble the Deep Agents Runtime agent.
 
-Foundation keeps the existing tool surface for compatibility but explicitly
-disables Deep Agents' auto-added general-purpose subagent. Capability-specific
-subagents will be registered later with bounded tools and structured outputs.
+Every caller must provide an explicit, capability-scoped tool allowlist.  The
+old Foundation registry is intentionally not a compatibility fallback: it
+contains raw scene-write tools and must never be reachable from production
+Runtime code.
 """
 from __future__ import annotations
 
@@ -25,6 +26,8 @@ def build_agent(
     checkpointer: BaseCheckpointSaver | None = None,
     context_schema: type | None = None,
 ) -> CompiledStateGraph:
+    if tools is None:
+        raise TypeError("build_agent requires an explicit secure tools allowlist")
     # Instrument LangChain/LangGraph for Phoenix tracing if EEE_TRACING=phoenix.
     from eee_agent.tracing import setup_tracing
     setup_tracing()
@@ -82,18 +85,8 @@ def build_agent(
         except Exception as e:  # noqa: BLE001
             print(f"[eee] compact_conversation tool disabled: {e}", flush=True)
             backend = None
-    # tools=None preserves the full Foundation tool surface (all_tools()); an
-    # explicit empty list is respected (no falsy fallback). Copy any caller
-    # sequence so later mutation of their container cannot affect this graph.
-    if tools is None:
-        # Keep the historical Foundation surface available only to explicit
-        # legacy callers.  Runtime callers always pass a secure tool list, so
-        # importing the Runtime graph never loads the old bridge/tool modules.
-        from eee_agent.tools.registry import all_tools
-
-        selected_tools = all_tools()
-    else:
-        selected_tools = list(tools)
+    # Copy the caller sequence so later mutation cannot affect this graph.
+    selected_tools = list(tools)
     kwargs = dict(model=model, tools=selected_tools,
                   system_prompt=build_system_prompt(), middleware=middleware)
     if backend is not None:

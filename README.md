@@ -14,23 +14,23 @@ parms so a model can be reshaped without rebuilding.
 
 ```
 Houdini 21 process
- ├─ rpyc RPC server  (127.0.0.1:18811, houdini_side/start_rpc.py)
- └─ PySide6 chat panel (dark, tool cards + todos + metrics + send/stop)
-        ▲ stdio JSON-lines
+ ├─ authenticated Secure Bridge (typed requests on the Houdini main thread)
+ └─ PySide6 Runtime Control panel
+        ▲ authenticated WebSocket
         │
 Agent process (this package, .venv, Python 3.11 — uv-managed)
- └─ deepagents + 25 Houdini tools ─ rpyc ─▶ Houdini
+ └─ deepagents + explicit Runtime tools ─ authenticated Secure Bridge ─▶ Houdini
         └─ provider registry (DeepSeek V4 via official Anthropic endpoint)
         └─ reliability middleware: read-back trim · loop guard · tool-error trace · compact tool
-        └─ normalized provider events → legacy stdio JSON-lines
+        └─ normalized provider events → Runtime event stream
         └─ optional tracing → Phoenix (http://localhost:6006)  [deps not in Foundation lock]
 ```
 
 - The agent's heavy deps (langchain/deepagents/rpyc) live in `.venv`, **never in
   Houdini's Python**. Houdini side uses only its built-in PySide6 — zero extra
   install in Houdini.
-- The bridge returns plain dicts (never rpyc proxies) and binds localhost with no
-  auth — see `CLAUDE.md` gotcha #1/#2.
+- The Secure Bridge returns bounded plain dicts and requires per-install
+  authentication. Legacy raw-write entrypoints are removed.
 
 ## Layout
 
@@ -40,11 +40,9 @@ eee_agent/
   model.py             provider-neutral factory -> ProviderRegistry (no concrete provider import)
   system_prompt.py     enforces plan→build→cook→stats→validate→export; on-demand status
   app.py               create_deep_agent(...) + harness config + reliability middleware
-  cli.py               selftest | prompt | stdio | versions   (stdio = multi-mode JSON-lines)
+  cli.py               versions (diagnostic report only; no agent execution)
   harness.py           disable Deep Agents' implicit general-purpose/task (Foundation)
-  bridge/              rpyc client + plain-Python serialization (no proxies leak)
-  tools/               25 @tool functions
-    scene.py  nodes.py  vex.py  compose.py  inspect.py  procedural.py (Phase C)
+  runtime/             persistent authenticated Runtime and read-only tools
   core/                Foundation contracts: ids · errors · artifacts · events · versioning
   providers/           Foundation: contracts · registry · secrets · deepseek_v4 · anthropic
                        · openai · factory · events · normalize
@@ -56,7 +54,7 @@ eee_agent/
   tracing.py           Phoenix / OpenInference OTel wiring  [dep not in Foundation lock]
 skills/                parametric-building · procedural-components · sop-cookbook · vex-patterns
 memory/AGENTS.md       project conventions (loaded into the agent)
-houdini_side/          start_rpc · chat_panel · launch · install_menu · start_phoenix · README_INSTALL
+houdini_side/          secure_bridge_host · runtime_panel · install_menu · start_phoenix · README_INSTALL
 eval/                  geometry_assertions.py + run_eval.py + cases/
 docs/                  handoffs/ · superpowers/{specs,plans}/ · AGENT_FIX_PLAN.md (legacy)
 scripts/env_probe.sh   session-start environment probe (runs via .claude/settings.json hook)
@@ -98,18 +96,11 @@ copy .env.example .env   # fill DEEPSEEK_API_KEY  (or switch EEE_LLM_PROVIDER)
 
 ## Run
 
-1. **Start the bridge in Houdini** — EEE Agent menu → Start RPC (install the menu
-   via `houdini_side/install_menu.py`; see `houdini_side/README_INSTALL.md`), or
-   in Houdini's Python Source Editor: `import start_rpc; start_rpc.start()`.
-2. **Verify the bridge** (no LLM needed):
+1. **Start the authenticated Runtime** from a repository terminal:
    ```powershell
-   uv run --extra eval python -m eee_agent.cli selftest
+   uv run --extra eval python -m eee_agent.runtime serve
    ```
-3. **Run the agent** (needs `DEEPSEEK_API_KEY` + bridge running):
-   ```powershell
-   uv run --extra eval python -m eee_agent.cli prompt "Build a parametric table: top + 4 legs, expose width/length/height as p_ parms, then export to output/table.obj"
-   ```
-4. **Versions** (locked runtime + dependency report):
+2. **Versions** (locked runtime + dependency report):
    ```powershell
    uv run --extra eval python -m eee_agent.cli versions
    ```
@@ -120,9 +111,8 @@ copy .env.example .env   # fill DEEPSEEK_API_KEY  (or switch EEE_LLM_PROVIDER)
 ## Runtime (additive, loopback, read-only v1)
 
 A second, **persistent and authenticated** Runtime (`eee_agent/runtime/`) runs as
-its own process. It is **additive** — the existing `python -m eee_agent.cli …`
-commands above remain available as the rollback path. It does **not** replace the
-Secure HoudiniBridge (deferred).
+its own process. It is the only production agent entrypoint and never falls back
+to an unauthenticated or raw-write tool path.
 
 ```powershell
 # Start the Runtime (binds 127.0.0.1 exclusively; ephemeral port by default).

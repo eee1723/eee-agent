@@ -1,7 +1,7 @@
 """Register the EEE Agent Houdini package and docked Python Panel.
 
-The package makes the Secure Bridge host, Runtime observer, and legacy
-``start_rpc`` / ``chat_panel`` rollback modules importable.
+The package makes only the authenticated Secure Bridge host and Runtime
+observer importable. Legacy raw-write modules are intentionally absent.
 
 Run once (from a shell or Houdini):
     hython Z:\\EEE_Project\\EEEProceduralModeling\\houdini_side\\install_menu.py

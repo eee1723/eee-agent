@@ -32,60 +32,103 @@ def _bounded(value: Any, *, depth: int = 0) -> PlainData:
         return value[:2048]
     if isinstance(value, Mapping):
         out: dict[str, PlainData] = {}
-        for index, (key, item) in enumerate(value.items()):
-            if index >= _MAX_ITEMS:
-                break
-            if not isinstance(key, str):
-                continue
-            out[key[:128]] = _bounded(item, depth=depth + 1)
+        try:
+            items = value.items()
+            for index, (key, item) in enumerate(items):
+                if index >= _MAX_ITEMS:
+                    break
+                if not isinstance(key, str):
+                    continue
+                out[key[:128]] = _bounded(item, depth=depth + 1)
+        except Exception:
+            return "[truncated]"
         return out
     if isinstance(value, (list, tuple)):
         return [_bounded(item, depth=depth + 1) for item in value[:_MAX_ITEMS]]
     return "[unsupported]"
 
 
-def _plain_value(value: Any, *, depth: int = 0) -> bool:
-    """Return whether provider output consists only of safe plain values."""
+def _plain_value(
+    value: Any,
+    *,
+    depth: int = 0,
+    budget: dict[str, int] | None = None,
+) -> bool:
+    """Return whether provider output is plain, bounded, and finite.
+
+    Validation itself must not recursively walk an attacker-controlled Mapping
+    forever.  Keep independent item/byte budgets and fail closed on every
+    custom iterator/accessor exception.
+    """
+    if budget is None:
+        budget = {"items": _MAX_ITEMS, "bytes": _MAX_RESULT_BYTES}
     if depth > _MAX_DEPTH:
         return True
-    if value is None or type(value) in (str, int, float, bool):
+    if budget["items"] <= 0:
+        return False
+    budget["items"] -= 1
+    if value is None or type(value) in (int, float, bool):
         return True
+    if type(value) is str:
+        budget["bytes"] -= min(len(value), 2048)
+        return budget["bytes"] >= 0
     if isinstance(value, Mapping):
-        return all(
-            isinstance(key, str) and _plain_value(item, depth=depth + 1)
-            for key, item in value.items()
-        )
+        try:
+            for index, (key, item) in enumerate(value.items()):
+                if index >= _MAX_ITEMS:
+                    return False
+                if not isinstance(key, str):
+                    return False
+                if not _plain_value(item, depth=depth + 1, budget=budget):
+                    return False
+            return True
+        except Exception:
+            return False
     if isinstance(value, (list, tuple)):
-        return all(_plain_value(item, depth=depth + 1) for item in value)
+        try:
+            if len(value) > _MAX_ITEMS:
+                return False
+            return all(
+                _plain_value(item, depth=depth + 1, budget=budget)
+                for item in value
+            )
+        except Exception:
+            return False
     return False
 
 
 def _finish(value: Any) -> dict[str, object]:
-    if not isinstance(value, Mapping):
+    try:
+        if not isinstance(value, Mapping):
+            return _error(
+                "bridge.unavailable",
+                "The read-only provider returned no bounded result.",
+            )
+        if type(value.get("ok")) is not bool:
+            return _error(
+                "bridge.unavailable",
+                "The read-only provider returned a malformed status.",
+            )
+        if not _plain_value(value):
+            return _error(
+                "bridge.unavailable",
+                "The read-only provider returned unsupported data.",
+            )
+        result = _bounded(value)
+        if not isinstance(result, dict):
+            return _error(
+                "bridge.unavailable",
+                "The read-only provider returned no bounded result.",
+            )
+        if type(result.get("ok")) is not bool:
+            return _error(
+                "bridge.unavailable",
+                "The read-only provider returned a malformed status.",
+            )
+    except Exception:
         return _error(
             "bridge.unavailable",
             "The read-only provider returned no bounded result.",
-        )
-    if type(value.get("ok")) is not bool:
-        return _error(
-            "bridge.unavailable",
-            "The read-only provider returned a malformed status.",
-        )
-    if not _plain_value(value):
-        return _error(
-            "bridge.unavailable",
-            "The read-only provider returned unsupported data.",
-        )
-    result = _bounded(value)
-    if not isinstance(result, dict):
-        return _error(
-            "bridge.unavailable",
-            "The read-only provider returned no bounded result.",
-        )
-    if type(result.get("ok")) is not bool:
-        return _error(
-            "bridge.unavailable",
-            "The read-only provider returned a malformed status.",
         )
     # Avoid carrying opaque objects and cap serialized-size by progressively
     # replacing large values with a deterministic marker.

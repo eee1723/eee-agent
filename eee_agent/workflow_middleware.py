@@ -11,8 +11,6 @@ container exists yet (e.g. before ensure_work_container) or the bridge is down.
 """
 from __future__ import annotations
 
-import asyncio
-import os
 from typing import Any, Callable
 
 from typing_extensions import override
@@ -29,8 +27,8 @@ from langchain_core.messages import SystemMessage
 
 
 def is_enabled() -> bool:
-    """Default OFF; opt in with EEE_WORKFLOW_STATUS=true. See module docstring."""
-    return os.getenv("EEE_WORKFLOW_STATUS", "false").strip().lower() == "true"
+    """Always disabled; Runtime events replace the legacy prompt injection."""
+    return False
 
 
 def _format_status(status: dict) -> str:
@@ -76,9 +74,7 @@ class WorkflowStatusMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, 
         request: ModelRequest[ContextT],
         handler: Callable[[ModelRequest[ContextT]], Any],
     ) -> ModelResponse[ResponseT]:
-        # stdio/astream path invokes the async hook; work_status() is a sync rpyc
-        # call, so offload it to a thread to avoid blocking the event loop.
-        block = await asyncio.to_thread(self._status_block)
+        block = self._status_block()
         if not block:
             return await handler(request)
         new_sys = self._append(request.system_message, block)
@@ -86,11 +82,9 @@ class WorkflowStatusMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, 
 
     @staticmethod
     def _status_block() -> str:
-        try:
-            from eee_agent.tools.procedural import work_status
-            return _format_status(work_status.invoke({}))
-        except Exception:
-            return ""  # no work container / bridge down -> skip silently
+        # The old implementation imported eee_agent.tools.procedural here.
+        # Runtime status is delivered by authenticated events instead.
+        return ""
 
     @staticmethod
     def _append(system_message, block: str) -> SystemMessage:

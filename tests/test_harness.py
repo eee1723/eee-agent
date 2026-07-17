@@ -1,6 +1,7 @@
 import pytest
 
 from eee_agent.app import build_agent
+from eee_agent.runtime.agent_tools import build_read_only_tools
 
 
 @pytest.mark.parametrize(
@@ -33,10 +34,10 @@ def test_build_agent_has_no_implicit_general_purpose_subagent(
     # load_dotenv() so build_agent() does not try to instrument Phoenix here.
     monkeypatch.delenv("EEE_TRACING", raising=False)
 
-    graph = build_agent()
+    graph = build_agent(tools=build_read_only_tools())
     # Deep Agents has no public tool-introspection API. This deliberately checks
     # the compiled ToolNode so a dependency upgrade fails loudly if the task tool
     # or its inherited Houdini tools return.
     tool_names = set(graph.nodes["tools"].bound._tools_by_name)  # noqa: SLF001
     assert "task" not in tool_names
-    assert "create_node" in tool_names
+    assert "scene_status" in tool_names

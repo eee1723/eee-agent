@@ -4,11 +4,12 @@ import asyncio
 import ast
 import inspect
 from types import SimpleNamespace
+from collections.abc import Mapping
 
 import pytest
 
 from eee_agent.runtime.agent_context import RuntimeToolContext
-from eee_agent.runtime.agent_tools import build_read_only_tools
+from eee_agent.runtime.agent_tools import _finish, build_read_only_tools
 
 
 def _run(coro):
@@ -134,3 +135,27 @@ def test_provider_exception_is_bounded() -> None:
     result = _run(tool.coroutine(runtime=_runtime(FailedProvider())))
     assert result["code"] == "bridge.unavailable"
     assert "secret" not in str(result)
+
+
+def test_finish_fails_closed_when_custom_mapping_iteration_raises() -> None:
+    class ExplodingMapping(Mapping):
+        def __getitem__(self, key):
+            if key == "ok":
+                return True
+            raise KeyError(key)
+
+        def __iter__(self):
+            raise RuntimeError("iterator exploded")
+
+        def __len__(self):
+            return 1
+
+    result = _finish(ExplodingMapping())
+    assert result["ok"] is False
+    assert result["code"] == "bridge.unavailable"
+
+
+def test_finish_rejects_unbounded_item_budget() -> None:
+    result = _finish({"ok": True, "items": list(range(10_000))})
+    assert result["ok"] is False
+    assert result["code"] == "bridge.unavailable"

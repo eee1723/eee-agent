@@ -89,7 +89,7 @@ COMMON GOTCHAS
 - A wrangle's run_over must match what you iterate: points/prim/detail/vertex.
 - Parm changes do not auto-show until you cook; always cook before reading stats.
 - If a tool returns an rpyc/connection error, the Houdini RPC server may have
-  stopped — tell the user to re-run houdini_side/start_rpc.py and retry.
+  stopped — tell the user to restart the authenticated Runtime Control bridge and retry.
 
 Keep your reasoning tight. After each tool result, state in one line what you
 observed and what you'll do next. Finish by summarizing what was built and where

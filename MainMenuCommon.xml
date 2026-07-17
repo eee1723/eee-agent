@@ -55,36 +55,6 @@ import secure_bridge_host
 secure_bridge_host.stop()
         ]]></scriptCode>
       </scriptItem>
-      <separatorItem/>
-      <scriptItem id="eee_open_panel">
-        <label>Open Agent Panel</label>
-        <scriptCode><![CDATA[
-import sys, hou
-_root = hou.getenv("EEE_PATH")
-if not _root:
-    raise RuntimeError("EEE_PATH not set. Run houdini_side/install_menu.py, then restart Houdini.")
-_l = _root + "/houdini_side"
-if _l not in sys.path:
-    sys.path.insert(0, _l)
-import start_rpc, chat_panel
-start_rpc.start()        # idempotent: starts the localhost RPC bridge if not up
-chat_panel.open_panel()  # opens (or raises) the chat panel
-        ]]></scriptCode>
-      </scriptItem>
-      <scriptItem id="eee_start_rpc">
-        <label>Start RPC Bridge Only</label>
-        <scriptCode><![CDATA[
-import sys, hou
-_root = hou.getenv("EEE_PATH")
-if not _root:
-    raise RuntimeError("EEE_PATH not set. Run houdini_side/install_menu.py, then restart Houdini.")
-_l = _root + "/houdini_side"
-if _l not in sys.path:
-    sys.path.insert(0, _l)
-import start_rpc
-start_rpc.start()
-        ]]></scriptCode>
-      </scriptItem>
       <scriptItem id="eee_start_phoenix">
         <label>Start Phoenix Tracing Server</label>
         <scriptCode><![CDATA[
@@ -109,8 +79,8 @@ hou.ui.displayMessage(
     "EEE Agent menu\n\n"
     "Open Runtime Control = start the authenticated Secure Bridge + open "
     "the dockable Session/Run/approval/scene panel.\n\n"
-    "Open Agent Panel = legacy path: start RPC bridge + open the chat panel.\n"
-    "Needs: agent venv at <root>/.venv + DEEPSEEK_API_KEY in <root>/.env\n"
+    "Runtime Control uses the authenticated Secure Bridge and explicit approval flow.\n"
+    "Needs: agent venv at <root>/.venv + provider credentials in <root>/.env\n"
     "(or EEE_LLM_PROVIDER=anthropic + ANTHROPIC_API_KEY).\n\n"
     "If EEE_PATH is not set, run once:\n"
     "  hython " + root + "/houdini_side/install_menu.py\n"

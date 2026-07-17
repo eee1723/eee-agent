@@ -116,26 +116,24 @@ def test_runtime_panel_bootstraps_snapshot_before_live_subscription() -> None:
     assert subscribe_index > bootstrap_index
 
 
-def test_legacy_chat_panel_remains_present_as_rollback() -> None:
-    assert (ROOT / "houdini_side" / "chat_panel.py").is_file()
+def test_legacy_chat_panel_is_not_a_formal_runtime_entrypoint() -> None:
+    text = (ROOT / "houdini_side" / "README_INSTALL.md").read_text(encoding="utf-8")
+    assert "Open Agent Panel" not in text
+    assert "start_rpc.start()" not in text
 
 
-def test_main_menu_adds_runtime_observer_without_removing_legacy_actions() -> None:
+def test_main_menu_adds_runtime_observer_without_legacy_actions() -> None:
     root = ElementTree.parse(ROOT / "MainMenuCommon.xml").getroot()
     ids = {
         item.attrib["id"]
         for item in root.findall(".//scriptItem")
     }
-    assert {
-        "eee_open_runtime_panel",
-        "eee_start_secure_bridge",
-        "eee_stop_secure_bridge",
-        "eee_open_panel",
-        "eee_start_rpc",
-    }.issubset(ids)
+    assert {"eee_open_runtime_panel", "eee_start_secure_bridge", "eee_stop_secure_bridge"}.issubset(ids)
+    assert "eee_open_panel" not in ids
+    assert "eee_start_rpc" not in ids
     text = (ROOT / "MainMenuCommon.xml").read_text(encoding="utf-8")
     assert "Open Runtime Control" in text
     assert "secure_bridge_host.start()" in text
     assert "runtime_panel.open_panel()" in text
-    assert "start_rpc.start()" in text
-    assert "chat_panel.open_panel()" in text
+    assert "start_rpc.start()" not in text
+    assert "chat_panel.open_panel()" not in text

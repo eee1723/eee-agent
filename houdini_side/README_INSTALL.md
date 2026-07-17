@@ -1,140 +1,38 @@
-# Houdini side: Runtime control and bridges
+# Houdini side: Runtime control and authenticated bridge
 
-> Fresh machine? See [`../SETUP.md`](../SETUP.md) for the full clone-to-run
-> sequence. This document covers the in-Houdini integration.
-
-The docked Runtime panel and its typed scene inspector use an authenticated
-Secure Bridge. The current Runtime agent's exact read-only Houdini tool
-allowlist still uses the old localhost rpyc bridge; that dependency is separate
-from the panel and does not add write tools to the Runtime agent. The legacy
-chat panel remains available as a rollback path.
-
-## 0. Install the Houdini package
-
-Run once:
+Install the package once from the repository root:
 
 ```powershell
 & "<houdini>\bin\hython.exe" "<repo>\houdini_side\install_menu.py"
 ```
 
-Examples:
-
-```text
-<houdini> = C:\Program Files\Side Effects Software\Houdini 21.0.440
-<repo>    = Z:\EEE_Project\EEEProceduralModeling
-```
-
-Restart Houdini. The **EEE Agent** menu contains:
+Restart Houdini. The **EEE Agent** menu contains only:
 
 - **Open Runtime Control** — starts the authenticated Secure Bridge and opens
-  the dockable Session/Run/approval/scene panel
+  the Session/Run/approval/scene panel.
 - **Start Secure Bridge Only**
 - **Stop Secure Bridge**
-- **Open Agent Panel** — legacy path: starts rpyc and opens the old chat panel
-- **Start RPC Bridge Only**
 - **Start Phoenix Tracing Server**
 - **Install / Help**
 
-The installer writes `eee_agent.json` into
-`$HOUDINI_USER_PREF_DIR/packages/`. The package adds the repository to
-`HOUDINI_PATH`, so `python_panels/EEEAgentRuntime.pypanel` appears in Houdini's
-Python Panel interface menu. Houdini-side modules are also added through
-`houdini.python3.11libs`.
-
-## 1. Start the Runtime observer
-
-Start Runtime in a terminal at the repository root:
+Start the production Runtime from a repository terminal:
 
 ```powershell
 uv run --frozen --extra eval python -m eee_agent.runtime serve
 ```
 
-Then choose **EEE Agent → Open Runtime Control** in Houdini.
+The Runtime panel authenticates through discovery/token files, sends bounded
+commands, and exposes no direct HOM, SQLite, raw operation JSON, or write
+route. Scene changes use the typed proposal → approval → changeset flow.
 
-The Runtime control panel:
+The former unauthenticated rpyc server, chat panel, and interactive CLI are
+removed. They must not be started manually or used as a rollback path.
 
-- authenticates to Runtime through `runtime.json` and `runtime.token`;
-- reconnects with the remembered per-Session `last_seq`;
-- creates/selects Sessions and starts/stops bounded Runtime Runs;
-- restores Run status and output from snapshots plus live events;
-- displays bounded ChangeSet risk, approval, receipt, and recovery evidence;
-- sends only exact `changeset.approve` or `changeset.reject` decisions for
-  trusted proposals;
-- reads selection through typed `workspace.inspect`, then a bound
-  `scene.query`;
-- displays HIP, Houdini instance, scene epoch, revision, node path/type, lock
-  state, and bounded geometry statistics;
-- does not expose `changeset.apply`, operation JSON, parameter values, direct
-  HOM, SQLite, or an unrestricted Houdini write route.
-
-The Secure Bridge:
-
-- binds an ephemeral `127.0.0.1` port;
-- uses its own independent `bridge.token`;
-- runs transport I/O on one background asyncio thread;
-- pumps every typed Houdini operation through the accepted single main-thread
-  FIFO;
-- remains running when the panel closes.
-
-You can also create a Python Panel pane and select **EEE Runtime**. If the
-Secure Bridge is not running, Runtime status remains available and the
-selection area reports that inspection is unavailable.
-
-For a Runtime Run that calls `hou_status`, `find_nodes`, geometry inspection,
-or another current read-only agent tool, also choose **EEE Agent → Start RPC
-Bridge Only**. A text-only Run does not require it. This is a temporary
-agent-tool transport dependency; the Runtime panel itself never falls back to
-rpyc.
-
-## 2. Manual Secure Bridge controls
-
-From Houdini's Python Source Editor:
+For manual bridge lifecycle checks in Houdini's Python Source Editor:
 
 ```python
 import secure_bridge_host
-
 secure_bridge_host.start()
 print(secure_bridge_host.status())
 secure_bridge_host.stop()
 ```
-
-`start()` and `stop()` are idempotent. The full token is never printed by
-`status()`.
-
-## 3. Legacy RPC/chat path
-
-The legacy path is preserved for rollback and existing CLI workflows.
-
-### Start RPC and open the legacy chat panel
-
-In Houdini's Python Source Editor:
-
-```python
-exec(open(r"<repo>\houdini_side\launch.py").read())
-```
-
-This starts the localhost rpyc bridge and opens the old chat panel.
-
-Manual equivalent:
-
-```python
-import sys
-sys.path.insert(0, r"<repo>\houdini_side")
-import start_rpc, chat_panel
-
-start_rpc.start()
-chat_panel.open_panel()
-```
-
-The rpyc bridge binds `127.0.0.1:18811`. Do not replace it with
-`hrpyc.start_server()`: Houdini 21.0.440's helper binds `0.0.0.0` without
-authentication.
-
-### Verify the legacy bridge
-
-```powershell
-uv run --frozen --extra eval python -m eee_agent.cli selftest
-```
-
-The self-test creates and exports a disposable box, so it is not part of the
-read-only Runtime observer acceptance.
