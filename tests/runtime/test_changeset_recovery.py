@@ -48,6 +48,7 @@ from eee_agent.houdini_bridge.contracts import (
     SceneQueryResult,
     SelectedNode,
 )
+from eee_agent.houdini_bridge.sensitivity import SensitivitySampleResult
 from eee_agent.houdini_bridge.workspaces import (
     WorkspaceInspectRequest,
     WorkspaceInspectResult,
@@ -147,6 +148,76 @@ def _changeset(change_id: str = CHG) -> ChangeSet:
         ),
         checkpoint_plan=CheckpointPlan(nodes=(), parameters=(), wires=()),
         created_at=NOW,
+    )
+
+
+def _box_changeset(change_id: str = CHG) -> ChangeSet:
+    # A ChangeSet whose SetParm targets a catalog numeric parameter (box.sizex)
+    # so the derived sensitivity sample plan is non-empty.
+    target = NodeRef(
+        node_id="n_box",
+        path="/obj/ws/box1",
+        expected_type="box",
+        expected_workspace_id=WS,
+    )
+    return ChangeSet(
+        change_id=change_id,
+        session_id=SES,
+        run_id=RUN,
+        scene_binding=_binding(),
+        workspace_id=WS,
+        base_revision=BASE,
+        required_permission=PermissionMode.OWNED_WORKSPACE,
+        scoped_node_ids=(),
+        operations=(
+            SetParm(
+                op_id="op_set_sizex",
+                target=target,
+                parm_name="sizex",
+                value=2.0,
+                expected_old_value=1.0,
+            ),
+        ),
+        affected_nodes=(target,),
+        read_dependencies=(),
+        preconditions=(ParmValueEquals(target=target, parm_name="sizex", value=1.0),),
+        expected_postconditions=(
+            ParmValueEquals(target=target, parm_name="sizex", value=2.0),
+        ),
+        risk_summary=RiskSummary(
+            touches_external_nodes=False,
+            changes_wiring=False,
+            requires_backup=False,
+            operation_count=1,
+            effect_names=("parm.set",),
+            affected_paths=(target.path,),
+        ),
+        checkpoint_plan=CheckpointPlan(nodes=(), parameters=(), wires=()),
+        created_at=NOW,
+    )
+
+
+def _sample_query(target: NodeRef, *, bbox_max: list[float]) -> SceneQueryResult:
+    return SceneQueryResult(
+        binding=_binding(),
+        selected_nodes=(),
+        nodes=(
+            SelectedNode(
+                path=target.path,
+                node_type=target.expected_type,
+                parent_path=target.path.rsplit("/", 1)[0],
+                display_name=target.path.rsplit("/", 1)[1],
+                is_locked=False,
+                geometry_stats={
+                    "points": 8,
+                    "primitives": 6,
+                    "bbox": {
+                        "min": [0.0, 0.0, 0.0],
+                        "max": bbox_max,
+                    },
+                },
+            ),
+        ),
     )
 
 
@@ -250,9 +321,23 @@ class FakeBridge:
         self.calls: list[str] = []
         self.on_apply = None
         self.geometry_error: BaseException | None = None
+        self.sample_error: BaseException | None = None
 
     async def current_binding(self) -> SceneBinding:
         return _binding()
+
+    async def sample_sensitivity(self, changeset, samples):
+        self.calls.append("sample_sensitivity")
+        if self.sample_error is not None:
+            raise self.sample_error
+        target = changeset.affected_nodes[0]
+        baseline = _sample_query(target, bbox_max=[1.0, 1.0, 1.0])
+        perturbed = _sample_query(target, bbox_max=[2.0, 1.0, 1.0])
+        return SensitivitySampleResult(
+            baseline=baseline,
+            samples=tuple(perturbed for _ in samples),
+            restored=baseline,
+        )
 
     async def inspect_geometry(self, changeset):
         self.calls.append("inspect_geometry")
@@ -304,6 +389,7 @@ class FakeBridge:
 
 async def _seed(
     path: Path,
+    changeset: ChangeSet | None = None,
 ) -> tuple[RuntimeDatabase, EventStore, ChangeSetRepository, ChangeSetService, FakeBridge]:
     db = await RuntimeDatabase.open(path)
     async with db.write_transaction() as conn:
@@ -322,7 +408,7 @@ async def _seed(
     await repo.insert_workspace(_manifest())
     bridge = FakeBridge()
     service = ChangeSetService(repo, clock=lambda: NOW, bridge_provider=bridge)
-    changeset = _changeset()
+    changeset = changeset if changeset is not None else _changeset()
     await service.propose(changeset, _policy(changeset))
     await service.approve(CHG, changeset.digest)
     return db, events, repo, service, bridge
@@ -814,6 +900,100 @@ def test_runtime_persists_post_apply_geometry_validation(
                 for event in replay.events
             ) == 1
             assert bridge.calls.count("inspect_geometry") == 1
+        finally:
+            await runtime._shutdown()
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_runtime_persists_post_apply_sensitivity_validation(
+    db_path: Path, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        db, events, _repo, _service, bridge = await _seed(
+            db_path, changeset=_box_changeset()
+        )
+        paths = RuntimePaths(
+            home=tmp_path,
+            state_dir=tmp_path,
+            app_db=db_path,
+            checkpoints_db=tmp_path / "checkpoints.sqlite",
+            lock_file=tmp_path / "runtime.lock",
+            discovery_file=tmp_path / "runtime.json",
+            token_file=tmp_path / "runtime.token",
+        )
+        runtime = RuntimeService(
+            db,
+            paths,
+            changeset_clock=lambda: NOW,
+            changeset_bridge_provider=bridge,
+            modeling_catalog_provider=houdini_21_minimal_catalog,
+        )
+        try:
+            result = await runtime.apply_changeset_trusted(CHG)
+            assert result.state is ChangeSetState.APPLIED
+            replay = await events.replay(SES, after_seq=0, limit=100)
+            validation = next(
+                event
+                for event in replay.events
+                if event.event_type == "modeling.validation_completed"
+            )
+            assert validation.payload["complete"] is True
+            assert [item["status"] for item in validation.payload["results"]] == [
+                "Passed",
+                "Passed",
+                "Passed",
+            ]
+            assert [item["validator"] for item in validation.payload["results"]] == [
+                "Cook",
+                "Geometry",
+                "ParameterSensitivity",
+            ]
+            assert bridge.calls[-1] == "sample_sensitivity"
+        finally:
+            await runtime._shutdown()
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_runtime_records_sensitivity_unavailable_without_replaying_apply(
+    db_path: Path, tmp_path: Path
+) -> None:
+    async def scenario() -> None:
+        db, events, _repo, _service, bridge = await _seed(
+            db_path, changeset=_box_changeset()
+        )
+        bridge.sample_error = _agent_error("sensitivity.restore_failed")
+        paths = RuntimePaths(
+            home=tmp_path,
+            state_dir=tmp_path,
+            app_db=db_path,
+            checkpoints_db=tmp_path / "checkpoints.sqlite",
+            lock_file=tmp_path / "runtime.lock",
+            discovery_file=tmp_path / "runtime.json",
+            token_file=tmp_path / "runtime.token",
+        )
+        runtime = RuntimeService(
+            db,
+            paths,
+            changeset_clock=lambda: NOW,
+            changeset_bridge_provider=bridge,
+            modeling_catalog_provider=houdini_21_minimal_catalog,
+        )
+        try:
+            result = await runtime.apply_changeset_trusted(CHG)
+            assert result.state is ChangeSetState.APPLIED
+            replay = await events.replay(SES, after_seq=0, limit=100)
+            unavailable = next(
+                event
+                for event in replay.events
+                if event.event_type == "modeling.validation_unavailable"
+            )
+            assert unavailable.payload["code"] == "sensitivity.restore_failed"
+            assert bridge.calls.count("apply") == 1
+            assert bridge.calls.count("sample_sensitivity") == 1
         finally:
             await runtime._shutdown()
             await db.close()

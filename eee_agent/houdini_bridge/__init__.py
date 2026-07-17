@@ -70,6 +70,17 @@ _LAZY_WORKSPACES = {
     "parse_workspace_inspect_response",
 }
 
+_LAZY_SENSITIVITY = {
+    "SAMPLE_OPERATION",
+    "SENSITIVITY_V1",
+    "SensitivitySampleRequest",
+    "SensitivitySampleResponse",
+    "SensitivitySampleResult",
+    "SensitivitySampleTarget",
+    "parse_sample_request",
+    "parse_sample_response",
+}
+
 __all__ = [
     "BridgeChangeSetProvider",
     "APPLY_OPERATION",
@@ -92,9 +103,15 @@ __all__ = [
     "RECEIPT_OPERATION",
     "ReceiptRequest",
     "ReceiptResponse",
+    "SAMPLE_OPERATION",
+    "SENSITIVITY_V1",
     "SceneBinding",
     "SceneQueryResult",
     "SelectedNode",
+    "SensitivitySampleRequest",
+    "SensitivitySampleResponse",
+    "SensitivitySampleResult",
+    "SensitivitySampleTarget",
     "decode_change_receipt",
     "parse_apply_request",
     "parse_apply_response",
@@ -104,6 +121,8 @@ __all__ = [
     "parse_receipt_response",
     "parse_request",
     "parse_response",
+    "parse_sample_request",
+    "parse_sample_response",
     "validate_capabilities",
     "WORKSPACE_INSPECT_OPERATION",
     "WORKSPACE_V1",
@@ -136,6 +155,12 @@ def __getattr__(name: str) -> object:
         return value
     if name in _LAZY_WORKSPACES:
         from eee_agent.houdini_bridge import workspaces as _mod
+
+        value = getattr(_mod, name)
+        globals()[name] = value
+        return value
+    if name in _LAZY_SENSITIVITY:
+        from eee_agent.houdini_bridge import sensitivity as _mod
 
         value = getattr(_mod, name)
         globals()[name] = value

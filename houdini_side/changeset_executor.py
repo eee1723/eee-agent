@@ -68,6 +68,10 @@ from eee_agent.houdini_bridge.changesets import (
     PreflightResult,
     PreflightWireFact,
 )
+from eee_agent.houdini_bridge.sensitivity import (
+    SensitivitySampleRequest,
+    SensitivitySampleResult,
+)
 from eee_agent.runtime.models import canonical_json_dumps
 from houdini_side.secure_bridge import HoudiniAdapterError, HoudiniSceneAdapter
 
@@ -816,6 +820,49 @@ def _stale_scene() -> HoudiniAdapterError:
     )
 
 
+def _sample_invalid(message: str) -> HoudiniAdapterError:
+    # Raised only before the first sample write: an unresolvable target or a
+    # missing parameter means the request does not match the current scene.
+    return HoudiniAdapterError(
+        code="sensitivity.invalid",
+        category="invalid",
+        message_for_user=message,
+        retryable=False,
+    )
+
+
+def _cook_failed() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="sensitivity.cook_failed",
+        category="cook",
+        message_for_user="A sampled parameter did not cook cleanly.",
+        retryable=True,
+    )
+
+
+def _sample_restore_failed() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="sensitivity.restore_failed",
+        category="restore",
+        message_for_user=(
+            "A sampled parameter could not be restored exactly; the bridge is "
+            "frozen for writes until restart."
+        ),
+        retryable=False,
+    )
+
+
+def _sample_aborted() -> HoudiniAdapterError:
+    # Any non-structured failure during the write/capture phase, raised only
+    # after the scene was verifiably restored: classified, never guessed.
+    return HoudiniAdapterError(
+        code="sensitivity.sample_failed",
+        category="sample",
+        message_for_user="The sensitivity sample could not be completed.",
+        retryable=True,
+    )
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -1287,6 +1334,135 @@ class ChangeSetExecutor:
         self._receipts[key] = receipt
         while len(self._receipts) > self._receipt_cache_max:
             self._receipts.popitem(last=False)
+
+    # --------------------------------------------------------------- sensitivity sampling
+
+    def sample_sensitivity(
+        self, request: SensitivitySampleRequest
+    ) -> SensitivitySampleResult:
+        """Run one bounded sample-and-restore cycle; return typed evidence.
+
+        Pre-write failures (write freeze, stale scene epoch, an unresolvable
+        sample target, or a missing parameter) raise
+        :class:`HoudiniAdapterError` and perform zero writes. From the first
+        write on, this method never raises out of the write phase: every
+        written parameter is restored to its exact original value with
+        read-back verification (mirroring the apply rollback discipline), a
+        cook failure or aborted capture is classified into a structured error,
+        and an unverifiable restore freezes writes and fails closed. A result
+        is returned only after restoration is proven; it is never a guessed
+        success. All HOM access happens inside the single synchronous callable
+        the shared main-thread FIFO pumps, exactly like :meth:`apply`.
+        """
+        if self._write_frozen:
+            raise _frozen()
+
+        hou = self._hou
+        binding = self.binding()
+        # Scene-epoch drift is checked first (consistent with scene.query/apply).
+        if binding.scene_epoch != request.scene_epoch:
+            raise _stale_scene()
+
+        # ---- Zero-write resolution -----------------------------------------
+        # Every target must resolve (stable id first, then path) and expose the
+        # exact parameter BEFORE the first write.
+        index = self._index_scene_by_node_id(hou)
+        resolved: list[tuple[object, str, object, object]] = []
+        for target in request.samples:
+            node = self._resolve_sample_node(hou, target, index)
+            if node is None:
+                raise _sample_invalid(
+                    "A sensitivity sample target was not found in the scene."
+                )
+            original, existed = self._read_parm_value(node, target.parm_name)
+            if not existed:
+                raise _sample_invalid(
+                    "A sensitivity sample parameter was not found on its node."
+                )
+            resolved.append((node, target.parm_name, target.value, original))
+
+        # Bounded read-only baseline (may raise a structured stale/read error).
+        baseline = self._capture_sample_scene(request)
+
+        # ---- WRITE PHASE: from the first write on, never raise; restore and
+        # classify (mirrors the apply transaction discipline).
+        samples: list = []
+        written: list[tuple[object, str, object]] = []
+        failure: BaseException | None = None
+        try:
+            with hou.undos.group(_UNDO_LABEL_PREFIX + "sensitivity.sample"):  # type: ignore[union-attr]
+                for node, parm_name, sample_value, original in resolved:
+                    self._write_parm_value(node, parm_name, sample_value)
+                    written.append((node, parm_name, original))
+                    self._cook_sample_node(node)
+                    samples.append(self._capture_sample_scene(request))
+        except Exception as exc:  # noqa: BLE001 — any write/capture failure -> restore
+            failure = exc
+
+        # Exact restore in reverse write order, each write-back verified by a
+        # read-back comparison (the _rollback_parm primitive, inlined so one
+        # bad restore marks the whole cycle unrestored).
+        restore_ok = True
+        for node, parm_name, original in reversed(written):
+            try:
+                self._write_parm_value(node, parm_name, original)
+                current, existed = self._read_parm_value(node, parm_name)
+            except Exception:  # noqa: BLE001 — restore failure => not restored
+                restore_ok = False
+                break
+            if not existed or not _parm_equal(current, original):
+                restore_ok = False
+                break
+        if not restore_ok:
+            # The scene may be left mutated: freeze writes until process restart
+            # (same uncertainty rule as a Partial/CriticalRecovery receipt).
+            self._write_frozen = True
+            raise _sample_restore_failed()
+        if failure is not None:
+            if isinstance(failure, HoudiniAdapterError):
+                raise failure
+            raise _sample_aborted() from failure
+
+        restored = self._capture_sample_scene(request)
+        return SensitivitySampleResult(
+            baseline=baseline,
+            samples=tuple(samples),
+            restored=restored,
+        )
+
+    def _resolve_sample_node(
+        self, hou: object, target: object, index: dict[str, list[object]]
+    ) -> object | None:
+        """Resolve a sample target stable-id-first (mirrors _resolve_existing)."""
+        node_id = target.node_id  # type: ignore[attr-defined]
+        if node_id is None:
+            return hou.node(target.path)  # type: ignore[union-attr,attr-defined]
+        mirrors = index.get(node_id, ())
+        if len(mirrors) > 1:
+            raise _ambiguous()
+        if mirrors:
+            return mirrors[-1]
+        return hou.node(target.path)  # type: ignore[union-attr,attr-defined]
+
+    def _capture_sample_scene(self, request: SensitivitySampleRequest):  # type: ignore[no-untyped-def]
+        """Bounded read-only evidence capture over the exact requested paths."""
+        return self._scene.scene_query(
+            include_selection=False,
+            node_paths=request.node_paths,
+            include_geometry_stats=True,
+            expected_scene_epoch=request.scene_epoch,
+        )
+
+    @staticmethod
+    def _cook_sample_node(node: object) -> None:
+        """Force-cook one sampled node and fail closed on any cook error."""
+        try:
+            node.cook(force=True)  # type: ignore[attr-defined]
+            errors = node.errors()  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 — a failed cook is not a sample
+            raise _cook_failed() from exc
+        if errors:
+            raise _cook_failed()
 
     # --------------------------------------------------------------- writes
 

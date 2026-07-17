@@ -1157,6 +1157,7 @@ async def test_success_ack_advertises_sorted_bridge_capabilities(tmp_path: Path)
         assert ack["ok"] is True
         assert ack["capabilities"] == [
             "changeset.v1",
+            "sensitivity.v1",
             "workspace.v1",
         ]  # sorted + unique
         writer.close()

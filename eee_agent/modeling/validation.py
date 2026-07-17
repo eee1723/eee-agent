@@ -12,8 +12,12 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Mapping
 
-from eee_agent.changesets.contracts import ChangeSet, ConnectInput, CreateNode
+from eee_agent.changesets.contracts import ChangeSet, ConnectInput, CreateNode, SetParm
 from eee_agent.houdini_bridge.contracts import SceneQueryResult
+from eee_agent.houdini_bridge.sensitivity import (
+    SensitivitySampleResult,
+    SensitivitySampleTarget,
+)
 from eee_agent.modeling.catalog import NodeCatalog
 from eee_agent.modeling.compiler import CompilationResult
 from eee_agent.modeling.golden_cases import GoldenCase
@@ -350,6 +354,69 @@ def _geometry_evidence_digest(query: SceneQueryResult) -> str:
     return _evidence("scene.sensitivity", payload, "Geometry sensitivity snapshot").digest
 
 
+def derive_sensitivity_sample_plan(
+    *,
+    changeset: ChangeSet,
+    catalog: NodeCatalog,
+    quality_profile: QualityProfile,
+) -> tuple[SensitivitySampleTarget, ...]:
+    """Derive the bounded deterministic sample targets for one applied ChangeSet.
+
+    Only parameters the compiled ChangeSet itself sets (``SetParm``) and that
+    the trusted catalog defines as safe literal numeric parameters of the
+    target node type are sampled — the spec/catalog boundary is the only
+    source of sample authority, so sampling runs only when the changeset/spec
+    defines sensitivity sample parameters. Each sample value is a
+    deterministic +1 perturbation of the compiled value. The plan is empty
+    when the profile does not enable ``ParameterSensitivity`` or no eligible
+    parameter exists, and is capped by ``QualityProfile.max_parameter_samples``
+    and the validator's 16-sample bound.
+    """
+    if type(changeset) is not ChangeSet:
+        raise TypeError("changeset must be an exact ChangeSet")
+    if type(catalog) is not NodeCatalog:
+        raise TypeError("catalog must be an exact NodeCatalog")
+    if type(quality_profile) is not QualityProfile:
+        raise TypeError("quality_profile must be an exact QualityProfile")
+    if ValidatorKind.PARAMETER_SENSITIVITY not in quality_profile.validators:
+        return ()
+    limit = min(quality_profile.max_parameter_samples, 16)
+    definitions = catalog.by_type
+    targets: list[SensitivitySampleTarget] = []
+    seen: set[tuple[str, str]] = set()
+    for operation in changeset.operations:
+        if not isinstance(operation, SetParm):
+            continue
+        key = (operation.target.path, operation.parm_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        value = operation.value
+        if type(value) is bool or type(value) not in (int, float):
+            continue
+        definition = definitions.get(operation.target.expected_type)
+        if definition is None:
+            continue
+        parm = definition.parameters_by_name.get(operation.parm_name)
+        if (
+            parm is None
+            or type(parm.default_value) is bool
+            or type(parm.default_value) not in (int, float)
+        ):
+            continue
+        targets.append(
+            SensitivitySampleTarget(
+                node_id=operation.target.node_id,
+                path=operation.target.path,
+                parm_name=operation.parm_name,
+                value=value + 1 if type(value) is int else value + 1.0,
+            )
+        )
+        if len(targets) >= limit:
+            break
+    return tuple(targets)
+
+
 def validate_parameter_sensitivity(
     *,
     changeset: ChangeSet,
@@ -481,14 +548,22 @@ def validate_scene_query(
     report: ValidationReport,
     changeset: ChangeSet,
     query: SceneQueryResult,
+    sensitivity: SensitivitySampleResult | None = None,
 ) -> ValidationReport:
-    """Resolve Cook and Geometry stages from one exact read-only scene query."""
+    """Resolve Cook and Geometry stages from one exact read-only scene query.
+
+    When typed Bridge sample-and-restore evidence is supplied, the
+    ParameterSensitivity stage is resolved from it in the same step; without
+    evidence the stage keeps its prior (Unavailable) result.
+    """
     if type(report) is not ValidationReport:
         raise TypeError("report must be an exact ValidationReport")
     if type(changeset) is not ChangeSet:
         raise TypeError("changeset must be an exact ChangeSet")
     if type(query) is not SceneQueryResult:
         raise TypeError("query must be an exact SceneQueryResult")
+    if sensitivity is not None and type(sensitivity) is not SensitivitySampleResult:
+        raise TypeError("sensitivity must be an exact SensitivitySampleResult or None")
     if report.changeset_digest != changeset.digest:
         raise ValueError("report does not bind the supplied ChangeSet")
     cook, geometry = validate_applied_scene(changeset=changeset, query=query)
@@ -497,6 +572,15 @@ def validate_scene_query(
         ValidatorKind.COOK: cook,
         ValidatorKind.GEOMETRY: geometry,
     }
+    if sensitivity is not None:
+        replacements[ValidatorKind.PARAMETER_SENSITIVITY] = (
+            validate_parameter_sensitivity(
+                changeset=changeset,
+                baseline=sensitivity.baseline,
+                samples=sensitivity.samples,
+                restored=sensitivity.restored,
+            )
+        )
     results = tuple(
         sorted(
             (replacements.get(item.validator, item) for item in report.results),
@@ -559,6 +643,7 @@ __all__ = [
     "ValidationReport",
     "ValidationStatus",
     "ValidatorResult",
+    "derive_sensitivity_sample_plan",
     "issue_repair_ticket",
     "validate_applied_scene",
     "validate_compilation",

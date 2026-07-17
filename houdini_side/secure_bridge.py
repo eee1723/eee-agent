@@ -60,6 +60,12 @@ from eee_agent.houdini_bridge.contracts import (
     SelectedNode,
     parse_request,
 )
+from eee_agent.houdini_bridge.sensitivity import (
+    SAMPLE_OPERATION,
+    SENSITIVITY_V1,
+    SensitivitySampleResponse,
+    parse_sample_request,
+)
 from eee_agent.houdini_bridge.workspaces import (
     WORKSPACE_INSPECT_OPERATION,
     WORKSPACE_V1,
@@ -504,7 +510,7 @@ class BridgeServer:
         identity: BridgeIdentity,
         state_dir: Path | str,
         queue: MainThreadReadQueue | None = None,
-        capabilities: tuple[str, ...] = (CHANGESET_V1, WORKSPACE_V1),
+        capabilities: tuple[str, ...] = (CHANGESET_V1, SENSITIVITY_V1, WORKSPACE_V1),
     ) -> None:
         if not isinstance(adapter, HoudiniSceneAdapter):
             raise TypeError("adapter must be a HoudiniSceneAdapter")
@@ -779,6 +785,20 @@ class BridgeServer:
                     message_for_user="The bridge does not support changeset receipt queries.",
                 )
             return await self._serve_receipt(frame_bytes)
+        if operation == SAMPLE_OPERATION:
+            # Admission: a server that does not advertise sensitivity.v1 must
+            # fail closed BEFORE any HOM access or payload parsing.
+            if SENSITIVITY_V1 not in self._capabilities:
+                request_id = obj.get("request_id")
+                if type(request_id) is not str:
+                    request_id = _MALFORMED_REQUEST_ID
+                return self._error_envelope(
+                    request_id,
+                    code="bridge.capability_unavailable",
+                    category="capability",
+                    message_for_user="The bridge does not support sensitivity sampling.",
+                )
+            return await self._serve_sample_sensitivity(frame_bytes)
         request_id = obj.get("request_id")
         if type(request_id) is not str:
             request_id = _MALFORMED_REQUEST_ID
@@ -988,6 +1008,55 @@ class BridgeServer:
                 retryable=True,
             )
         response = ReceiptResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
+        return response.to_json().encode("utf-8")
+
+    async def _serve_sample_sensitivity(self, frame_bytes: bytes) -> bytes:
+        """Parse + queue a ``sensitivity.sample`` request; return evidence bytes.
+
+        Admission checks the advertised capability and the write-freeze state
+        BEFORE the main-thread cycle runs, exactly like ``changeset.apply`` —
+        the sample-and-restore cycle writes parameter values, so an uncertain
+        earlier recovery must gate it. Pre-write failures (stale scene, an
+        unresolvable target, a missing parameter) surface as a structured
+        bridge error with zero writes. Cook failures, aborted captures, and
+        restore failures are classified by the executor; an unverifiable
+        restore freezes writes and never produces a result envelope.
+        """
+        try:
+            request = parse_sample_request(frame_bytes)
+        except (TypeError, ValueError):
+            return self._error_envelope(
+                _MALFORMED_REQUEST_ID,
+                code="bridge.invalid_request",
+                category="protocol",
+                message_for_user="The sample request is not valid.",
+            )
+        request_id = request.request_id
+        if self._executor.write_frozen:  # type: ignore[attr-defined]
+            return self._error_envelope(
+                request_id,
+                code="bridge.write_frozen",
+                category="write_frozen",
+                message_for_user=(
+                    "The bridge is frozen for writes after an uncertain recovery."
+                ),
+                retryable=False,
+            )
+        sample_request = request
+
+        def operation() -> object:
+            return self._executor.sample_sensitivity(sample_request)  # type: ignore[union-attr]
+
+        result = await self._run_on_queue(request_id, request.deadline_ms, operation)
+        if isinstance(result, _QueuedError):
+            return self._error_envelope(
+                request_id,
+                code=result.code,
+                category=result.category,
+                message_for_user=result.message_for_user,
+                retryable=result.retryable,
+            )
+        response = SensitivitySampleResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
         return response.to_json().encode("utf-8")
 
     async def _run_on_queue(

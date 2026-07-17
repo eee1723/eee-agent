@@ -55,6 +55,7 @@ from eee_agent.core import (
     ErrorCategory,
     runtime_version_report,
 )
+from eee_agent.houdini_bridge.sensitivity import SensitivitySampleTarget
 from eee_agent.houdini_bridge.workspaces import (
     WorkspaceInspectResult,
     WorkspaceInspectionUnavailable,
@@ -68,7 +69,11 @@ from eee_agent.modeling.proposal import (
     ModelingProposalCoordinator,
     ModelingToolContext,
 )
-from eee_agent.modeling.validation import validate_applied_scene
+from eee_agent.modeling.validation import (
+    derive_sensitivity_sample_plan,
+    validate_applied_scene,
+    validate_parameter_sensitivity,
+)
 from eee_agent.runtime.agent_runner import (
     AgentRunner,
     RunnerCompleted,
@@ -687,10 +692,28 @@ class RuntimeService:
         event_type = "modeling.validation_completed"
         try:
             query = await provider.inspect_geometry(result.changeset)
-            validator_results = validate_applied_scene(
-                changeset=result.changeset,
-                query=query,
+            validator_results = list(
+                validate_applied_scene(
+                    changeset=result.changeset,
+                    query=query,
+                )
             )
+            # The typed Bridge sample-and-restore cycle resolves
+            # ParameterSensitivity only when the changeset/catalog define
+            # bounded sample targets and the quality profile enables it.
+            sample_plan = await self._sensitivity_sample_plan(result.changeset)
+            if sample_plan:
+                evidence = await provider.sample_sensitivity(
+                    result.changeset, sample_plan
+                )
+                validator_results.append(
+                    validate_parameter_sensitivity(
+                        changeset=result.changeset,
+                        baseline=evidence.baseline,
+                        samples=evidence.samples,
+                        restored=evidence.restored,
+                    )
+                )
             payload: dict[str, object] = {
                 "change_id": result.changeset.change_id,
                 "changeset_digest": result.changeset.digest,
@@ -718,6 +741,24 @@ class RuntimeService:
             event_type,
             payload,
             RetentionClass.DURABLE,
+        )
+
+    async def _sensitivity_sample_plan(
+        self, changeset: ChangeSet
+    ) -> tuple[SensitivitySampleTarget, ...]:
+        """Derive the catalog-bounded sample plan; empty when not applicable."""
+        catalog_provider = self._modeling_catalog_provider
+        if catalog_provider is None:
+            return ()
+        catalog = catalog_provider()
+        if inspect.isawaitable(catalog):
+            catalog = await catalog
+        if type(catalog) is not NodeCatalog:
+            return ()
+        return derive_sensitivity_sample_plan(
+            changeset=changeset,
+            catalog=catalog,
+            quality_profile=houdini_21_minimal_quality_profile(),
         )
 
     async def apply_changeset_trusted(

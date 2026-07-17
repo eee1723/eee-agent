@@ -50,6 +50,12 @@ from eee_agent.houdini_bridge.contracts import (
     SceneQueryResult,
     parse_response,
 )
+from eee_agent.houdini_bridge.sensitivity import (
+    SENSITIVITY_V1,
+    SensitivitySampleRequest,
+    SensitivitySampleResult,
+    parse_sample_response,
+)
 from eee_agent.houdini_bridge.workspaces import (
     WORKSPACE_V1,
     WorkspaceInspectRequest,
@@ -526,6 +532,69 @@ class BridgeClient:
                 "bridge.invalid_request",
                 "protocol",
                 "The bridge apply response is not a valid receipt.",
+            )
+        return result
+
+    async def sample_sensitivity(
+        self, request: SensitivitySampleRequest
+    ) -> SensitivitySampleResult:
+        """Send a ``sensitivity.sample`` request and return the typed evidence.
+
+        Requires the advertised ``sensitivity.v1`` capability; if it is absent
+        the client fails closed with ``bridge.capability_unavailable`` and
+        sends no frame. The sample-and-restore cycle runs to completion on the
+        server once it starts: a client cancellation/deadline that lands
+        mid-cycle does not interrupt the writes, but the evidence is not
+        delivered here. On a server bridge error the structured fields are
+        re-raised as :class:`BridgeClientError`; the connection is left open
+        for that case.
+        """
+        if type(request) is not SensitivitySampleRequest:
+            raise TypeError("request must be a SensitivitySampleRequest")
+        if SENSITIVITY_V1 not in self._capabilities:
+            raise _client_error(
+                "bridge.capability_unavailable",
+                "capability",
+                "The bridge does not support sensitivity sampling.",
+                retryable=False,
+            )
+        if not self._helloed or self._transport is None:
+            raise RuntimeError(
+                "BridgeClient.sample_sensitivity() requires a successful open()/hello"
+            )
+        response_bytes = await self._exchange(request.to_json(), request.deadline_ms)
+        try:
+            response = parse_sample_response(response_bytes)
+        except (TypeError, ValueError) as exc:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response is not a valid sample envelope.",
+            ) from exc
+        if response.request_id != request.request_id:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response does not match the request id.",
+            )
+        if response.error is not None:
+            err = response.error
+            raise BridgeClientError(
+                code=err.code,
+                category=err.category,
+                message_for_user=err.message_for_user,
+                retryable=err.retryable,
+                technical_detail_ref=err.technical_detail_ref,
+            )
+        result = response.result
+        if type(result) is not SensitivitySampleResult:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge sample response is not valid evidence.",
             )
         return result
 

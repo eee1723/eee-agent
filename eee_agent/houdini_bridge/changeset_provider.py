@@ -27,6 +27,11 @@ from eee_agent.houdini_bridge.contracts import (
     SceneBinding,
     SceneQueryResult,
 )
+from eee_agent.houdini_bridge.sensitivity import (
+    SensitivitySampleRequest,
+    SensitivitySampleResult,
+    SensitivitySampleTarget,
+)
 from eee_agent.houdini_bridge.workspaces import WorkspaceInspectRequest
 
 
@@ -139,6 +144,26 @@ class BridgeChangeSetProvider:
             workspace=workspace,
         )
         return await self._call("apply", request, may_have_changed=True)
+
+    async def sample_sensitivity(
+        self, changeset: ChangeSet, samples: tuple[SensitivitySampleTarget, ...]
+    ) -> SensitivitySampleResult:
+        """Run the typed sample-and-restore cycle for exact compiled paths.
+
+        The write phase is bounded to the catalog-derived sample targets; the
+        bridge restores every written parameter exactly before returning. Any
+        uncertainty raises with ``scene_may_have_changed=True``.
+        """
+        if type(changeset) is not ChangeSet:
+            raise TypeError("changeset must be an exact ChangeSet")
+        request = SensitivitySampleRequest.build(
+            request_id=self._request_id("sample"),
+            deadline_ms=self._deadline_ms,
+            scene_epoch=changeset.scene_binding.scene_epoch,
+            node_paths=[node.path for node in changeset.affected_nodes],
+            samples=samples,
+        )
+        return await self._call("sample_sensitivity", request, may_have_changed=True)
 
     async def receipt(self, changeset: ChangeSet) -> ChangeReceipt:
         if type(changeset) is not ChangeSet:
