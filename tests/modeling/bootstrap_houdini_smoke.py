@@ -39,6 +39,7 @@ def main() -> None:
         ValidationStatus,
         validate_applied_scene,
         validate_compilation,
+        validate_parameter_sensitivity,
     )
     from eee_agent.modeling.contracts import (
         Axis,
@@ -202,6 +203,29 @@ def main() -> None:
                 "typed post-Apply Cook/Geometry validation did not pass: "
                 f"{[item.to_dict() for item in post_apply]}"
             )
+        baseline_query = scene_query
+        box.parm("sizex").set(3.0)
+        sample_query = adapter.scene_query(
+            include_selection=False,
+            node_paths=[node.path for node in compiled.changeset.affected_nodes],
+            include_geometry_stats=True,
+            expected_scene_epoch=binding.scene_epoch,
+        )
+        box.parm("sizex").set(2.0)
+        restored_query = adapter.scene_query(
+            include_selection=False,
+            node_paths=[node.path for node in compiled.changeset.affected_nodes],
+            include_geometry_stats=True,
+            expected_scene_epoch=binding.scene_epoch,
+        )
+        sensitivity = validate_parameter_sensitivity(
+            changeset=compiled.changeset,
+            baseline=baseline_query,
+            samples=(sample_query,),
+            restored=restored_query,
+        )
+        if sensitivity.status is not ValidationStatus.PASSED:
+            _fail(f"parameter sensitivity did not restore: {sensitivity.to_dict()}")
 
         for node in (root, box, xform, output):
             expected = {
@@ -267,8 +291,8 @@ def main() -> None:
             _fail("forced rollback left a bootstrap root behind")
 
         print(
-            "BOOTSTRAP SMOKE PASS: Applied, owned metadata, cook, manifest, "
-            "AlreadyApplied, and RolledBack cleanup"
+            "BOOTSTRAP SMOKE PASS: Applied, Cook/Geometry, sensitivity restore, "
+            "owned metadata, manifest, AlreadyApplied, and RolledBack cleanup"
         )
     finally:
         for path in (

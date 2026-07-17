@@ -25,7 +25,7 @@ from eee_agent.modeling.contracts import (
     RepairTicket,
     ValidatorKind,
 )
-from eee_agent.runtime.models import canonical_json_dumps
+from eee_agent.runtime.models import canonical_json_dumps, thaw_json
 
 
 class ValidationStatus(StrEnum):
@@ -341,6 +341,80 @@ def validate_applied_scene(
     return cook, geometry
 
 
+def _geometry_evidence_digest(query: SceneQueryResult) -> str:
+    payload = {
+        node.path: thaw_json(node.geometry_stats)
+        for node in sorted(query.nodes, key=lambda item: item.path)
+    }
+    return _evidence("scene.sensitivity", payload, "Geometry sensitivity snapshot").digest
+
+
+def validate_parameter_sensitivity(
+    *,
+    changeset: ChangeSet,
+    baseline: SceneQueryResult,
+    samples: tuple[SceneQueryResult, ...],
+    restored: SceneQueryResult,
+) -> ValidatorResult:
+    """Verify a bounded sample changed geometry and exact restoration occurred."""
+    if type(changeset) is not ChangeSet:
+        raise TypeError("changeset must be an exact ChangeSet")
+    if type(baseline) is not SceneQueryResult or type(restored) is not SceneQueryResult:
+        raise TypeError("baseline and restored must be exact SceneQueryResult values")
+    items = tuple(samples)
+    if not items or len(items) > 16 or any(type(item) is not SceneQueryResult for item in items):
+        raise ValueError("samples must contain 1..16 SceneQueryResult values")
+    expected_binding = changeset.scene_binding
+    all_queries = (baseline, *items, restored)
+    if any(
+        query.binding.instance_id != expected_binding.instance_id
+        or query.binding.scene_epoch != expected_binding.scene_epoch
+        for query in all_queries
+    ):
+        return ValidatorResult(
+            ValidatorKind.PARAMETER_SENSITIVITY,
+            ValidationStatus.STALE,
+            "modeling.sensitivity.stale",
+            "One or more sensitivity snapshots no longer match the approved scene binding.",
+        )
+    baseline_digest = _geometry_evidence_digest(baseline)
+    restored_digest = _geometry_evidence_digest(restored)
+    sample_digests = tuple(_geometry_evidence_digest(item) for item in items)
+    payload = {
+        "baseline": baseline_digest,
+        "samples": list(sample_digests),
+        "restored": restored_digest,
+    }
+    evidence = _evidence(
+        "scene.sensitivity",
+        payload,
+        "Bounded parameter sample and exact restoration evidence",
+    )
+    if restored_digest != baseline_digest:
+        return ValidatorResult(
+            ValidatorKind.PARAMETER_SENSITIVITY,
+            ValidationStatus.FAILED,
+            "modeling.sensitivity.restore_failed",
+            "The scene did not return exactly to its baseline geometry evidence.",
+            (evidence,),
+        )
+    if all(sample_digest == baseline_digest for sample_digest in sample_digests):
+        return ValidatorResult(
+            ValidatorKind.PARAMETER_SENSITIVITY,
+            ValidationStatus.FAILED,
+            "modeling.sensitivity.insensitive",
+            "The bounded parameter samples did not change geometry evidence.",
+            (evidence,),
+        )
+    return ValidatorResult(
+        ValidatorKind.PARAMETER_SENSITIVITY,
+        ValidationStatus.PASSED,
+        "modeling.sensitivity.valid",
+        "A bounded parameter sample changed geometry and exact restoration passed.",
+        (evidence,),
+    )
+
+
 def validate_scene_query(
     *,
     report: ValidationReport,
@@ -427,5 +501,6 @@ __all__ = [
     "issue_repair_ticket",
     "validate_applied_scene",
     "validate_compilation",
+    "validate_parameter_sensitivity",
     "validate_scene_query",
 ]

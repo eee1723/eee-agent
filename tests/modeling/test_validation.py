@@ -10,6 +10,7 @@ from eee_agent.modeling.validation import (
     issue_repair_ticket,
     validate_applied_scene,
     validate_compilation,
+    validate_parameter_sensitivity,
     validate_scene_query,
 )
 from eee_agent.houdini_bridge.contracts import (
@@ -181,3 +182,62 @@ def test_bootstrap_validation_ignores_object_container_geometry() -> None:
     )
     assert cook.status is ValidationStatus.PASSED
     assert geometry.status is ValidationStatus.PASSED
+
+
+def _changed_query(query: SceneQueryResult, extent: float) -> SceneQueryResult:
+    nodes = tuple(
+        SelectedNode(
+            path=node.path,
+            node_type=node.node_type,
+            parent_path=node.parent_path,
+            display_name=node.display_name,
+            is_locked=node.is_locked,
+            geometry_stats=(
+                None
+                if node.geometry_stats is None
+                else {
+                    **dict(node.geometry_stats),
+                    "bbox": {
+                        "min": [0.0, 0.0, 0.0],
+                        "max": [extent, extent, extent],
+                    },
+                }
+            ),
+        )
+        for node in query.nodes
+    )
+    return SceneQueryResult(
+        binding=query.binding,
+        selected_nodes=query.selected_nodes,
+        nodes=nodes,
+    )
+
+
+def test_parameter_sensitivity_requires_change_and_exact_restore() -> None:
+    compilation = _compile()
+    baseline = _scene_query(compilation)
+    changed = _changed_query(baseline, 2.0)
+    restored = _changed_query(baseline, 1.0)
+    result = validate_parameter_sensitivity(
+        changeset=compilation.changeset,
+        baseline=baseline,
+        samples=(changed,),
+        restored=restored,
+    )
+    assert result.status is ValidationStatus.PASSED
+
+    unchanged = validate_parameter_sensitivity(
+        changeset=compilation.changeset,
+        baseline=baseline,
+        samples=(baseline,),
+        restored=restored,
+    )
+    assert unchanged.code == "modeling.sensitivity.insensitive"
+
+    failed_restore = validate_parameter_sensitivity(
+        changeset=compilation.changeset,
+        baseline=baseline,
+        samples=(changed,),
+        restored=changed,
+    )
+    assert failed_restore.code == "modeling.sensitivity.restore_failed"
