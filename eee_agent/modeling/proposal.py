@@ -36,6 +36,7 @@ from eee_agent.modeling.contracts import (
     QualityProfile,
 )
 from eee_agent.modeling.validation import validate_compilation
+from eee_agent.runtime.agent_context import RuntimeToolContext
 
 _MAX_SUMMARY_BYTES = 16 * 1024
 
@@ -295,15 +296,22 @@ async def propose_modeling(
     profile ID, and Workspace root binding; the model should supply the strict
     component/node/parameter/input graph rather than inventing scene IDs.
     """
-    context = runtime.context
-    if type(context) is not ModelingToolContext:
+    context = getattr(runtime, "context", None)
+    if type(context) is not RuntimeToolContext:
+        return {
+            "ok": False,
+            "code": "modeling.proposal_context_invalid",
+            "message": "A trusted modeling context is unavailable.",
+        }
+    modeling_context = context.modeling
+    if type(modeling_context) is not ModelingToolContext:
         return {
             "ok": False,
             "code": "modeling.proposal_context_invalid",
             "message": "A trusted modeling context is unavailable.",
         }
     try:
-        summary = await context.coordinator.propose(
+        summary = await modeling_context.coordinator.propose(
             brief_data=brief,
             spec_data=spec,
         )

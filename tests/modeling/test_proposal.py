@@ -35,6 +35,24 @@ from eee_agent.modeling.proposal import (
     ModelingToolContext,
     propose_modeling,
 )
+from eee_agent.runtime.agent_context import RuntimeToolContext
+
+
+class _ReadOnlyProvider:
+    async def scene_status(self):
+        return {}
+
+    async def query_scene(self, node_paths):
+        return {}
+
+    async def inspect_workspace(self, workspace_id):
+        return {}
+
+    async def geometry_stats(self, node_path):
+        return {}
+
+    async def work_status(self, workspace_id):
+        return {}
 
 SES = f"ses_{'1' * 32}"
 RUN = f"run_{'2' * 32}"
@@ -349,7 +367,8 @@ def test_tool_hides_runtime_context_and_returns_bounded_summary() -> None:
     def callback(changeset, decision):
         calls.append(changeset)
 
-    context = ModelingToolContext(ModelingProposalCoordinator(_context(callback)))
+    modeling = ModelingToolContext(ModelingProposalCoordinator(_context(callback)))
+    context = RuntimeToolContext(read_only=_ReadOnlyProvider(), modeling=modeling)
     brief = _brief()
     result = _run(
         propose_modeling.coroutine(  # type: ignore[union-attr]
@@ -382,6 +401,28 @@ def test_tool_fails_closed_without_trusted_context() -> None:
     }
 
 
+def test_proposal_tool_reads_modeling_context_from_runtime_context() -> None:
+    calls: list[object] = []
+
+    def callback(changeset, decision):
+        calls.append((changeset, decision))
+
+    brief = _brief()
+    context = RuntimeToolContext(
+        read_only=_ReadOnlyProvider(),
+        modeling=ModelingToolContext(ModelingProposalCoordinator(_context(callback))),
+    )
+    result = _run(
+        propose_modeling.coroutine(  # type: ignore[union-attr]
+            brief=brief.to_dict(),
+            spec=_spec(brief).to_dict(),
+            runtime=SimpleNamespace(context=context),
+        )
+    )
+    assert result["ok"] is True
+    assert len(calls) == 1
+
+
 def test_proposal_module_has_no_houdini_runtime_or_dynamic_execution_imports() -> None:
     import eee_agent.modeling.proposal as proposal
 
@@ -400,7 +441,6 @@ def test_proposal_module_has_no_houdini_runtime_or_dynamic_execution_imports() -
     assert not any(
         name == "hou"
         or name == "rpyc"
-        or name.startswith("eee_agent.runtime")
         or name.startswith("eee_agent.bridge")
         or name.startswith("sqlite")
         or name.startswith("subprocess")

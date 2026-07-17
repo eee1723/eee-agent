@@ -4,6 +4,7 @@ import pytest
 
 import eee_agent.app as app_module
 from eee_agent.app import build_agent
+from eee_agent.runtime.agent_tools import build_read_only_tools
 from eee_agent.tools.registry import all_tools, read_only_tools
 from langgraph.checkpoint.memory import InMemorySaver
 
@@ -15,6 +16,13 @@ EXPECTED_READ_ONLY = {
     "validate_geometry",
     "work_status",
     "anchor_graph",
+}
+EXPECTED_SECURE_READ_ONLY = {
+    "scene_status",
+    "query_scene",
+    "inspect_workspace",
+    "geometry_stats",
+    "work_status",
 }
 FORBIDDEN = {
     "task",
@@ -77,6 +85,13 @@ def test_read_only_registry_is_exact() -> None:
     assert set(names) == EXPECTED_READ_ONLY
     assert len(tools) == 7
     assert len(set(names)) == 7  # no duplicates
+
+
+def test_runtime_secure_tool_allowlist_omits_legacy_write_tools() -> None:
+    tools = build_read_only_tools()
+    names = {item.name for item in tools}
+    assert names == EXPECTED_SECURE_READ_ONLY
+    assert not names & FORBIDDEN
 
 
 def test_read_only_registry_returns_independent_list() -> None:

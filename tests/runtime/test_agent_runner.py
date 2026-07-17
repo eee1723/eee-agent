@@ -24,13 +24,11 @@ from eee_agent.runtime.agent_runner import (
 from eee_agent.runtime.models import RetentionClass
 
 EXPECTED_READ_ONLY = {
-    "hou_status",
-    "find_nodes",
-    "describe_node_type",
+    "scene_status",
+    "query_scene",
+    "inspect_workspace",
     "geometry_stats",
-    "validate_geometry",
     "work_status",
-    "anchor_graph",
 }
 
 
@@ -657,9 +655,10 @@ def test_factory_uses_read_only_tools_and_same_checkpointer(monkeypatch) -> None
     captured: dict = {}
     sentinel = object()
 
-    def fake_build_agent(*, tools=None, checkpointer=None):
+    def fake_build_agent(*, tools=None, checkpointer=None, context_schema=None):
         captured["tools"] = list(tools) if tools is not None else None
         captured["checkpointer"] = checkpointer
+        captured["context_schema"] = context_schema
         return sentinel
 
     monkeypatch.setattr(ar_module, "build_agent", fake_build_agent)
@@ -669,6 +668,7 @@ def test_factory_uses_read_only_tools_and_same_checkpointer(monkeypatch) -> None
     assert runner._graph is sentinel  # noqa: SLF001
     assert captured["checkpointer"] is saver
     assert {t.name for t in captured["tools"]} == EXPECTED_READ_ONLY
+    assert captured["context_schema"].__name__ == "RuntimeToolContext"
 
 
 def test_factory_opt_in_modeling_adds_only_proposal_tool(monkeypatch) -> None:
@@ -688,4 +688,20 @@ def test_factory_opt_in_modeling_adds_only_proposal_tool(monkeypatch) -> None:
         *EXPECTED_READ_ONLY,
         "propose_modeling",
     }
-    assert captured["context_schema"].__name__ == "ModelingToolContext"
+    assert captured["context_schema"].__name__ == "RuntimeToolContext"
+
+
+def test_agent_runner_builds_only_secure_tools(monkeypatch) -> None:
+    import eee_agent.runtime.agent_runner as ar_module
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        ar_module,
+        "build_agent",
+        lambda **kwargs: captured.update(kwargs) or object(),
+    )
+    build_agent_runner(object(), modeling=True)
+    names = {item.name for item in captured["tools"]}
+    assert names == {*EXPECTED_READ_ONLY, "propose_modeling"}
+    assert not names & {"create_node", "set_parms", "scene_reset", "save_hip"}
+    assert captured["context_schema"].__name__ == "RuntimeToolContext"

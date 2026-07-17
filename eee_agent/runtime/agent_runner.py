@@ -21,7 +21,8 @@ from eee_agent.providers.events import (
 )
 from eee_agent.providers.normalize import normalize_message_chunk
 from eee_agent.runtime.models import RetentionClass
-from eee_agent.tools.registry import read_only_tools
+from eee_agent.runtime.agent_context import RuntimeToolContext
+from eee_agent.runtime.agent_tools import build_read_only_tools
 
 # Tool-result preview cap, matching the existing CLI preview behavior.
 TOOL_RESULT_PREVIEW_CHARS = 600
@@ -250,19 +251,20 @@ def build_agent_runner(
     """
     if type(modeling) is not bool:
         raise TypeError("modeling must be a bool")
-    tools = read_only_tools()
+    tools = build_read_only_tools()
     if modeling:
-        from eee_agent.modeling.proposal import (
-            ModelingToolContext,
-            propose_modeling,
-        )
+        from eee_agent.modeling.proposal import propose_modeling
 
         tools.append(propose_modeling)
         graph = build_agent(
             tools=tools,
             checkpointer=checkpointer,
-            context_schema=ModelingToolContext,
+            context_schema=RuntimeToolContext,
         )
     else:
-        graph = build_agent(tools=tools, checkpointer=checkpointer)
+        graph = build_agent(
+            tools=tools,
+            checkpointer=checkpointer,
+            context_schema=RuntimeToolContext,
+        )
     return AgentRunner(graph)

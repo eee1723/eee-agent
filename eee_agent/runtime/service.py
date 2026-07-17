@@ -80,6 +80,7 @@ from eee_agent.modeling.validation import (
     validate_artifact_capture,
     validate_parameter_sensitivity,
 )
+from eee_agent.runtime.agent_context import ReadOnlyProvider, RuntimeToolContext
 from eee_agent.runtime.agent_runner import (
     AgentRunner,
     RunnerCompleted,
@@ -147,6 +148,33 @@ class _UnavailableWorkspaceFactProvider:
         raise WorkspaceInspectionUnavailable(
             "Trusted workspace inspection is not currently available."
         )
+
+
+class _UnavailableReadOnlyProvider:
+    """Fail-closed Runtime provider; never falls back to the legacy bridge."""
+
+    @staticmethod
+    def _result() -> dict[str, object]:
+        return {
+            "ok": False,
+            "code": "bridge.unavailable",
+            "message": "The trusted read-only provider is unavailable.",
+        }
+
+    async def scene_status(self):
+        return self._result()
+
+    async def query_scene(self, node_paths: list[str]):
+        return self._result()
+
+    async def inspect_workspace(self, workspace_id: str):
+        return self._result()
+
+    async def geometry_stats(self, node_path: str):
+        return self._result()
+
+    async def work_status(self, workspace_id: str):
+        return self._result()
 
 
 def _checkpoint_cleanup_failed() -> AgentException:
@@ -247,6 +275,7 @@ class RuntimeService:
         changeset_bridge_provider: ChangeSetBridgeProvider | None = None,
         workspace_fact_provider: WorkspaceFactProvider | None = None,
         modeling_catalog_provider: Callable[[], NodeCatalog] | None = None,
+        read_only_provider: ReadOnlyProvider | None = None,
     ) -> None:
         self._database = database
         self._paths = paths
@@ -270,6 +299,11 @@ class RuntimeService:
         self._checkpoints: CheckpointManager | None = None
         self._runner: object | None = None
         self._modeling_catalog_provider = modeling_catalog_provider
+        self._read_only_provider: ReadOnlyProvider = (
+            read_only_provider
+            if isinstance(read_only_provider, ReadOnlyProvider)
+            else _UnavailableReadOnlyProvider()
+        )
         self._modeling_validation_provider = (
             changeset_bridge_provider
             if modeling_catalog_provider is not None
@@ -328,6 +362,7 @@ class RuntimeService:
         changeset_bridge_provider: ChangeSetBridgeProvider | None = None,
         workspace_fact_provider: WorkspaceFactProvider | None = None,
         modeling_catalog_provider: Callable[[], NodeCatalog] | None = None,
+        read_only_provider: ReadOnlyProvider | None = None,
     ) -> AsyncIterator["RuntimeService"]:
         """Open a service in the approved order and close it in reverse.
 
@@ -356,18 +391,16 @@ class RuntimeService:
                 changeset_bridge_provider=changeset_bridge_provider,
                 workspace_fact_provider=workspace_fact_provider,
                 modeling_catalog_provider=modeling_catalog_provider,
+                read_only_provider=read_only_provider,
             )
             await service._reconcile()
             checkpoints = CheckpointManager(paths.checkpoints_db)
             await checkpoints.__aenter__()
             service._checkpoints = checkpoints
             service._runner = runner_factory(checkpoints.require_saver())
-            if (
-                service._modeling_catalog_provider is not None
-                and hasattr(service._runner, "set_context_factory")
-            ):
+            if hasattr(service._runner, "set_context_factory"):
                 service._runner.set_context_factory(
-                    service._build_modeling_context
+                    service._build_runtime_context
                 )
             try:
                 yield service
@@ -1308,6 +1341,18 @@ class RuntimeService:
             )
         except Exception:
             return None
+
+    async def _build_runtime_context(
+        self, session_id: str, run_id: str
+    ) -> RuntimeToolContext:
+        """Build one secure context for a Run, including optional modeling."""
+        modeling = None
+        if self._modeling_catalog_provider is not None:
+            modeling = await self._build_modeling_context(session_id, run_id)
+        return RuntimeToolContext(
+            read_only=self._read_only_provider,
+            modeling=modeling,
+        )
 
     async def _run(
         self, session_id: str, run_id: str, user_input: str
