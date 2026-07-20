@@ -6,6 +6,7 @@ import pytest
 
 from eee_agent.core.artifacts import ArtifactRef
 from eee_agent.vision import (
+    DeliveryEvaluation,
     FinalVisionDecision,
     NormalizedVisualReport,
     ProviderCapability,
@@ -98,3 +99,42 @@ def test_every_wire_contract_rejects_unknown_fields() -> None:
     decision_payload["provider_raw"] = "unbounded"
     with pytest.raises(ValueError):
         FinalVisionDecision.from_dict(decision_payload)
+
+
+def test_delivery_evaluation_is_bounded_and_contains_required_evidence() -> None:
+    report = NormalizedVisualReport("ok", ("shape matches",), 0.8, True)
+    decision = FinalVisionDecision(VisionStatus.COMPLETED, True, True, "ok")
+    record = DeliveryEvaluation(
+        brief="build a prop",
+        spec="bounded modeling spec",
+        changeset_digest="b" * 64,
+        approval="approved",
+        receipt="applied",
+        validation_report=("graph:passed", "geometry:passed"),
+        artifact_refs=(_artifact(),),
+        artifact_status=("available",),
+        knowledge_manifest_sha256="c" * 64,
+        vision_status=VisionStatus.COMPLETED,
+        vision_report=report,
+        final_decision=decision,
+        recovery_evidence=(),
+    )
+    payload = record.to_dict()
+    assert payload["changeset_digest"] == "b" * 64
+    assert payload["vision_status"] == "completed"
+    with pytest.raises(ValueError):
+        DeliveryEvaluation(
+            brief="x" * 4097,
+            spec=record.spec,
+            changeset_digest=record.changeset_digest,
+            approval=record.approval,
+            receipt=record.receipt,
+            validation_report=record.validation_report,
+            artifact_refs=record.artifact_refs,
+            artifact_status=record.artifact_status,
+            knowledge_manifest_sha256=record.knowledge_manifest_sha256,
+            vision_status=record.vision_status,
+            vision_report=record.vision_report,
+            final_decision=record.final_decision,
+            recovery_evidence=record.recovery_evidence,
+        )
