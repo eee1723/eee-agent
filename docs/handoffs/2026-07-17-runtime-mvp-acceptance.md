@@ -44,7 +44,10 @@ python tests/runtime/runtime_mvp_provider_e2e.py
 ```
 
 The adapter command must execute the real proposal → approval → Apply/receipt
-→ validation/artifact → replay → cleanup journey.  The harness supplies a
+→ validation/artifact → replay → cleanup journey. The harness treats a zero
+adapter exit code as an adapter-trust-boundary signal; it does not inspect
+provider output or infer those evidence fields. The adapter is responsible for
+failing unless its own bounded evidence checks pass. The harness supplies a
 disposable `EEE_RUNTIME_HOME`, passes the detected HFS path as
 `EEE_RUNTIME_MVP_HFS`, captures (and discards) stdout/stderr, enforces a
 bounded timeout, and prints only a small status record.  Missing opt-in, HFS,
