@@ -13,9 +13,10 @@ and execution plan first:
 
 ## Repository state
 
-- The worktree is clean at the reviewed checkpoint, before this handoff commit.
-- `feature/runtime` is **40 commits ahead** of `origin/feature/runtime`; none of
-  the new Runtime/MVP/Vision commits have been pushed.
+- `feature/runtime` was pushed to `origin` on 2026-07-20 after the P1 Vision
+  wiring closed, so development can continue from another machine. The push
+  deliberately preceded the manual GUI/provider gates; those gates below
+  remain open and are still required before any release.
 - Local branches retained: `main`, `wip/pre-migration-main`, `feature/runtime`.
 - Remote branches retained: `origin/main`, `origin/wip/pre-migration-main`,
   `origin/feature/runtime`.
@@ -25,8 +26,8 @@ and execution plan first:
   `runtime-pre-mvp-2026-07-17`, `foundation-final-2026-07-17`,
   `knowledge-graph-final-2026-07-17`, and
   `runtime-pre-knowledge-integration-2026-07-17`.
-- No Runtime release-candidate tag exists. Do not tag or push until the open P1
-  and manual GUI/provider gates below are closed.
+- No Runtime release-candidate tag exists. Do not create the RC tag until the
+  manual GUI/provider gates below are closed.
 
 ## Completed milestones
 
@@ -51,33 +52,57 @@ Key recent commits:
 - `e1f8f0a` durable `vision.evaluation_completed` service API.
 - `525e727` strict provider evidence, contradictory Vision evidence rejection,
   Vision CI lint/type coverage, and commit-range whitespace checking.
+- `d13fdc3` advisory Vision wired into the production post-Apply flow.
+- `c7f3d0f` bounded Vision evaluation rendering in the Runtime panel.
+- `ed3bc1d` queued Bridge reads cancelled on client disconnect.
+- `9addf8a` artifact panel lifecycle rows merged into captured rows.
 
 ## Verification evidence
 
-Latest complete repository run before `525e727`:
+Latest complete repository run (at `9addf8a`):
 
 ```text
 uv run --frozen --extra eval pytest -q
-2852 passed, 11 skipped in 165.26s
+2900 passed, 11 skipped in 161.91s
 ```
 
 The 11 normal-gate skips are the explicit Houdini Knowledge contract. It was
-run separately:
+run separately (at `d13fdc3`):
 
 ```text
 EEE_RUN_HOUDINI_KB_TESTS=true
-tests/knowledge/test_hfs_contract.py: 11 passed in 15.13s
+tests/knowledge/test_hfs_contract.py: 11 passed in 9.15s
 ```
 
-Fresh verification after `525e727`:
+Static gates at `9addf8a`:
 
 ```text
-MVP + Vision focused suites: 30 passed in 3.69s
-Ruff Runtime + Vision: passed
+Ruff Runtime + Vision + panel: passed
 Mypy selected Runtime boundaries + all Vision: passed
 compileall: passed
 uv lock --check: passed (90 packages)
 git diff --check: passed
+```
+
+Focused suites added on 2026-07-20:
+
+```text
+Vision contracts/router/delivery: 26 passed
+Affected Apply/MVP/e2e/panel suites: 165 passed
+Panel suite incl. Vision parse and artifact dedup: 122 passed
+Bridge transport/queue/preflight/executor suites: 344 passed
+```
+
+One transient failure of `test_lock.py::test_os_releases_lock_on_subprocess_termination`
+was observed once under full-suite load; it passes in isolation and in
+subsequent full runs and is a Windows subprocess-timing flake, not a
+regression.
+
+Earlier evidence predating `525e727` (for the historical record):
+
+```text
+2852 passed, 11 skipped in 165.26s
+MVP + Vision focused suites: 30 passed in 3.69s
 ```
 
 Additional GUI/runtime automation:
@@ -87,17 +112,15 @@ tests/panel: 86 passed
 panel package + Runtime process restart/replay: 15 passed
 ```
 
-The next developer must rerun the full frozen suite after `525e727`; the latest
-complete full-suite evidence predates that commit, although its focused/static
-gates pass.
+The full frozen suite has been rerun after `525e727`; the current evidence is
+the `9addf8a` run above.
 
 ## Resolved blocker
 
 ### P1 (closed 2026-07-20): Vision is wired into the production Apply flow
 
-The wiring change sits in the working tree on top of `1e52d7a` (service,
-`__main__`, new delivery tests and these doc updates); commit it as its own
-change before any tag or push.
+The wiring was committed as `d13fdc3` (service, `__main__`, new delivery
+tests and doc updates) and is included in the 2026-07-20 push.
 
 The production wiring from the original six-step order is implemented:
 
@@ -132,9 +155,10 @@ Mypy selected Runtime boundaries + all Vision: passed
 compileall / uv lock --check / git diff --check: passed
 ```
 
-Remaining open gates are unchanged and all belong to S9: real provider
-journey, dedicated Vision panel rendering, the interactive GUI checklist, the
-RC tag and the push.
+Remaining open gates all belong to S9: the real provider journey and the
+interactive GUI checklist (the dedicated Vision panel rendering landed in
+`c7f3d0f`; the branch was pushed for cross-machine development, while the RC
+tag stays gated).
 
 ## Recently closed audit findings
 
@@ -214,6 +238,8 @@ uv run --frozen --extra eval python -m compileall -q eee_agent houdini_side test
 git diff --check
 ```
 
-Only after the production Vision wiring, real provider gate, manual GUI gate,
-fresh full suite and final code review are all approved should the next
-developer create/push the Runtime RC tag or push `feature/runtime`.
+Only after the real provider gate, the manual GUI gate, a fresh full suite
+and a final code review are all approved should the next developer create and
+push the Runtime RC tag. (The production Vision wiring is done and
+`feature/runtime` was already pushed on 2026-07-20 for cross-machine
+development.)

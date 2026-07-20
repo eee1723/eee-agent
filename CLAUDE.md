@@ -9,10 +9,12 @@ Runtime Control panel.
 
 The source of truth is
 `docs/handoffs/2026-07-20-runtime-development-transfer.md`. The active delivery
-line is `feature/runtime`. The current slice is the production transactional
-parameter-sensitivity Bridge; artifact evidence, richer asset cases,
-vision/evaluation, and final GUI acceptance follow in that order. Offline tests
-and disposable Houdini 21.0.440 `hython` are the default verification path until
+line is `feature/runtime` (pushed to origin on 2026-07-20 for cross-machine
+development). Runtime MVP and advisory Vision are offline-complete and wired
+into the production post-Apply flow; the remaining gates are the real provider
+journey, the interactive Houdini GUI checklist, and the release-candidate tag.
+Offline tests and disposable Houdini 21.0.440 `hython` are the default
+verification path until
 the documented GUI gate is required.
 
 Do not merge `main`, rewrite accepted history, or weaken trusted Workspace,
