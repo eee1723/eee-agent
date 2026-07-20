@@ -68,6 +68,7 @@ from eee_agent.modeling.catalog import houdini_21_minimal_quality_profile
 from eee_agent.modeling.bootstrap import derive_bootstrap_manifest
 from eee_agent.modeling.compiler import NodeCatalog, WorkspaceBootstrapContext
 from eee_agent.modeling.contracts import ValidatorKind
+from eee_agent.vision.evaluation import DeliveryEvaluation
 from eee_agent.modeling.proposal import (
     ModelingProposalContext,
     ModelingProposalCoordinator,
@@ -795,6 +796,23 @@ class RuntimeService:
         for record in result.events:
             await self._notify(record)
         return result
+
+    async def record_vision_evaluation(
+        self,
+        session_id: str,
+        run_id: str,
+        evaluation: DeliveryEvaluation,
+    ) -> EventRecord:
+        """Persist one bounded advisory evaluation record for replay/UI use."""
+        if type(evaluation) is not DeliveryEvaluation:
+            raise TypeError("evaluation must be an exact DeliveryEvaluation")
+        return await self._emit(
+            session_id,
+            run_id,
+            "vision.evaluation_completed",
+            evaluation.to_dict(),
+            RetentionClass.DURABLE,
+        )
 
     async def _validate_applied_changeset(
         self, result: ApplyCompletionResult

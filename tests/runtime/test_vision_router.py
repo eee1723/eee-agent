@@ -7,12 +7,18 @@ from typing import Mapping
 
 from eee_agent.runtime.artifacts import ArtifactStore
 from eee_agent.runtime.database import RuntimeDatabase
+from eee_agent.runtime.events import EventStore
+from eee_agent.runtime.paths import RuntimePaths
 from eee_agent.vision import (
+    DeliveryEvaluation,
+    FinalVisionDecision,
+    NormalizedVisualReport,
     ProviderCapability,
     VisionRequest,
     VisionRouter,
     VisionStatus,
 )
+from eee_agent.runtime.service import RuntimeService
 
 
 SES = "ses_" + "1" * 32
@@ -230,6 +236,47 @@ def test_advisory_success_cannot_override_deterministic_failure(tmp_path: Path) 
             assert not outcome.decision.accepted
             assert not outcome.decision.deterministic_valid
         finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_runtime_service_persists_bounded_vision_delivery_record(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db, _, ref = await _store(tmp_path)
+        paths = RuntimePaths(
+            home=tmp_path,
+            state_dir=tmp_path,
+            app_db=tmp_path / "runtime.sqlite",
+            checkpoints_db=tmp_path / "checkpoints.sqlite",
+            lock_file=tmp_path / "runtime.lock",
+            discovery_file=tmp_path / "runtime.json",
+            token_file=tmp_path / "runtime.token",
+            artifacts_dir=tmp_path / "artifacts",
+        )
+        service = RuntimeService(db, paths)
+        evaluation = DeliveryEvaluation(
+            brief="make a prop",
+            spec="bounded",
+            changeset_digest="a" * 64,
+            approval="approved",
+            receipt="applied",
+            validation_report=("geometry:passed",),
+            artifact_refs=(ref,),
+            artifact_status=("available",),
+            knowledge_manifest_sha256="b" * 64,
+            vision_status=VisionStatus.COMPLETED,
+            vision_report=NormalizedVisualReport("ok", (), 0.9, True),
+            final_decision=FinalVisionDecision(VisionStatus.COMPLETED, True, True, "ok"),
+            recovery_evidence=(),
+        )
+        try:
+            event = await service.record_vision_evaluation(SES, RUN, evaluation)
+            assert event.event_type == "vision.evaluation_completed"
+            replay = await EventStore(db).replay(SES, after_seq=0, limit=10)
+            assert any(item.event_type == event.event_type for item in replay.events)
+        finally:
+            await service._shutdown()
             await db.close()
 
     asyncio.run(scenario())
