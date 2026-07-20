@@ -1,6 +1,6 @@
 # Runtime MVP acceptance handoff
 
-Date: 2026-07-20  
+Date: 2026-07-20
 Scope: deterministic Runtime protocol boundaries and the opt-in provider/HFS
 journey runner from Task 7 of the Runtime MVP plan.
 

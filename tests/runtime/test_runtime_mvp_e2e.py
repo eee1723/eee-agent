@@ -43,6 +43,7 @@ from tests.runtime.test_changeset_recovery import (
     _manifest,
     _policy,
 )
+from tests.runtime.runtime_mvp_provider_e2e import _validate_evidence
 
 
 async def _open_changeset_service(
@@ -289,3 +290,22 @@ def test_mvp_provider_runner_reports_not_run_without_opt_in() -> None:
     assert payload["status"] == "not_run"
     assert payload["reason"] == "explicit_opt_in_required"
     assert "API_KEY" not in completed.stdout
+
+
+def test_mvp_provider_evidence_is_strict_and_cannot_be_a_noop(tmp_path: Path) -> None:
+    path = tmp_path / "evidence.json"
+    evidence = {
+        "proposal_digest": "a" * 64,
+        "approval_event": "approved",
+        "receipt_status": "applied",
+        "validation_status": "passed",
+        "artifact_status": "available",
+        "replay_last_seq": 7,
+        "scene_cleanup": "completed",
+    }
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+    assert _validate_evidence(path)
+    path.write_text(json.dumps({**evidence, "provider_output": "unbounded"}), encoding="utf-8")
+    assert not _validate_evidence(path)
+    path.unlink()
+    assert not _validate_evidence(path)

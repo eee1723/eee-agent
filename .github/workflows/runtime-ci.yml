@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -38,7 +40,15 @@ jobs:
       - name: Compile tracked Python trees
         run: uv run --frozen --extra eval python -m compileall -q eee_agent houdini_side tests
       - name: Check patch whitespace
-        run: git diff --check
+        shell: pwsh
+        run: |
+          if ('${{ github.event_name }}' -eq 'pull_request') {
+            git diff --check '${{ github.event.pull_request.base.sha }}..${{ github.sha }}'
+          } elseif ('${{ github.event.before }}' -and '${{ github.event.before }}' -notmatch '^0+$') {
+            git diff --check '${{ github.event.before }}..${{ github.sha }}'
+          } else {
+            git log --check -1
+          }
 
   static-quality:
     name: Runtime static and dependency checks
@@ -57,8 +67,8 @@ jobs:
           enable-cache: true
       - name: Install frozen quality tools
         run: uv sync --frozen --extra eval --group dev
-      - name: Lint Runtime and reject retired bridge imports
-        run: uv run --frozen --group dev ruff check eee_agent/runtime
+      - name: Lint Runtime/Vision and reject retired bridge imports
+        run: uv run --frozen --group dev ruff check eee_agent/runtime eee_agent/vision
       - name: Type-check DTO and tool boundaries
         run: >-
           uv run --frozen --group dev mypy
@@ -66,6 +76,7 @@ jobs:
           eee_agent/runtime/agent_context.py
           eee_agent/runtime/knowledge.py
           eee_agent/runtime/agent_tools.py
+          eee_agent/vision
       - name: Audit the frozen runtime dependency export
         shell: pwsh
         run: |

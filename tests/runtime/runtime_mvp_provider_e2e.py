@@ -12,15 +12,17 @@ Usage (PowerShell)::
     $env:EEE_RUNTIME_MVP_PROVIDER_COMMAND = "python path\\to\\provider_journey.py"
     python tests/runtime/runtime_mvp_provider_e2e.py
 
-The command receives ``EEE_RUNTIME_HOME`` pointing at a disposable temporary
-directory.  A command exit code of zero is the only condition reported as
-``passed``; its output is intentionally not persisted or displayed.
+The command receives ``EEE_RUNTIME_HOME`` and ``EEE_RUNTIME_MVP_HIP_PATH`` in a
+disposable temporary directory. It must write a strict bounded JSON evidence
+record to ``EEE_RUNTIME_MVP_EVIDENCE_PATH``. A zero exit without that evidence
+is a failure; provider output is intentionally not persisted or displayed.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -36,6 +38,19 @@ _CREDENTIAL_VARS = (
     "ANTHROPIC_API_KEY",
     "DEEPSEEK_API_KEY",
     "OPENAI_API_KEY",
+)
+_MAX_EVIDENCE_BYTES = 16 * 1024
+_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+_EVIDENCE_FIELDS = frozenset(
+    {
+        "proposal_digest",
+        "approval_event",
+        "receipt_status",
+        "validation_status",
+        "artifact_status",
+        "replay_last_seq",
+        "scene_cleanup",
+    }
 )
 
 
@@ -73,6 +88,30 @@ def _record(status: str, reason: str, *, hfs: bool = False, provider: bool = Fal
     return 0 if status in {"passed", "not_run"} else 1
 
 
+def _validate_evidence(path: Path) -> bool:
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(_MAX_EVIDENCE_BYTES + 1)
+        if not raw or len(raw) > _MAX_EVIDENCE_BYTES:
+            return False
+        payload = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if type(payload) is not dict or frozenset(payload) != _EVIDENCE_FIELDS:
+        return False
+    return (
+        type(payload["proposal_digest"]) is str
+        and _DIGEST_RE.fullmatch(payload["proposal_digest"]) is not None
+        and payload["approval_event"] == "approved"
+        and payload["receipt_status"] in {"applied", "already_applied"}
+        and payload["validation_status"] == "passed"
+        and payload["artifact_status"] == "available"
+        and type(payload["replay_last_seq"]) is int
+        and payload["replay_last_seq"] >= 1
+        and payload["scene_cleanup"] == "completed"
+    )
+
+
 def main() -> int:
     if not _enabled(os.getenv(_OPT_IN)):
         return _record("not_run", "explicit_opt_in_required")
@@ -98,9 +137,12 @@ def main() -> int:
     # disposable state and the HFS location; inherited credentials are needed
     # by the adapter but are never echoed by this process.
     with tempfile.TemporaryDirectory(prefix="eee-runtime-mvp-") as temp:
+        evidence_path = Path(temp) / "evidence.json"
         env = dict(os.environ)
         env["EEE_RUNTIME_HOME"] = str(Path(temp) / "runtime")
         env["EEE_RUNTIME_MVP_HFS"] = str(hfs)
+        env["EEE_RUNTIME_MVP_HIP_PATH"] = str(Path(temp) / "scene.hip")
+        env["EEE_RUNTIME_MVP_EVIDENCE_PATH"] = str(evidence_path)
         env["EEE_RUNTIME_MVP_ACCEPTANCE"] = "1"
         try:
             completed = subprocess.run(
@@ -113,7 +155,6 @@ def main() -> int:
                 # never collected by this harness.
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                text=True,
                 timeout=900,
                 check=False,
             )
@@ -121,6 +162,10 @@ def main() -> int:
             return _record("failed", "provider_journey_process_error", hfs=True, provider=True)
         if completed.returncode != 0:
             return _record("failed", "provider_journey_failed", hfs=True, provider=True)
+        if not _validate_evidence(evidence_path):
+            return _record(
+                "failed", "provider_journey_evidence_invalid", hfs=True, provider=True
+            )
 
     return _record("passed", "provider_journey_completed", hfs=True, provider=True)
 

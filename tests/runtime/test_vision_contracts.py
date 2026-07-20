@@ -154,3 +154,37 @@ def test_delivery_evaluation_is_bounded_and_contains_required_evidence() -> None
             final_decision=record.final_decision,
             recovery_evidence=record.recovery_evidence,
         )
+
+
+def test_delivery_evaluation_rejects_contradictory_vision_evidence() -> None:
+    base = {
+        "brief": "brief",
+        "spec": "spec",
+        "changeset_digest": "d" * 64,
+        "approval": "approved",
+        "receipt": "applied",
+        "validation_report": ("geometry:passed",),
+        "artifact_refs": (_artifact(),),
+        "artifact_status": ("available",),
+        "knowledge_manifest_sha256": None,
+        "recovery_evidence": (),
+    }
+    failed_report = NormalizedVisualReport("mismatch", (), 0.8, False)
+    with pytest.raises(ValueError):
+        DeliveryEvaluation(
+            **base,
+            vision_status=VisionStatus.COMPLETED,
+            vision_report=failed_report,
+            final_decision=FinalVisionDecision(
+                VisionStatus.COMPLETED, True, True, "contradiction"
+            ),
+        )
+    with pytest.raises(ValueError):
+        DeliveryEvaluation(
+            **base,
+            vision_status=VisionStatus.UNAVAILABLE,
+            vision_report=failed_report,
+            final_decision=FinalVisionDecision(
+                VisionStatus.UNAVAILABLE, True, True, "provider unavailable"
+            ),
+        )

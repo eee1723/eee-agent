@@ -80,6 +80,22 @@ class DeliveryEvaluation:
             raise ValueError("final_decision must be an exact FinalVisionDecision")
         if self.final_decision.status is not self.vision_status:
             raise ValueError("vision status and final decision must agree")
+        if self.vision_status is VisionStatus.COMPLETED:
+            if self.vision_report is None:
+                raise ValueError("completed vision evaluation requires a report")
+            expected_accepted = (
+                self.final_decision.deterministic_valid
+                and self.vision_report.advisory_passed
+            )
+            if self.final_decision.accepted is not expected_accepted:
+                raise ValueError("completed vision decision contradicts its report")
+        elif self.vision_report is not None:
+            raise ValueError("non-completed vision evaluation cannot carry a report")
+        if (
+            self.vision_status is VisionStatus.FAILED
+            and self.final_decision.accepted
+        ):
+            raise ValueError("failed vision evaluation cannot be accepted")
         _evidence(self.recovery_evidence, "recovery_evidence", 32)
 
     def to_dict(self) -> dict[str, object]:
