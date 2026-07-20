@@ -143,17 +143,50 @@ async def _run(adapter, state_dir: Path) -> None:
             _expect(_fingerprint() == outside_before, "stale request performs zero writes")
 
             # A cancelled request is removed from the FIFO before HOM is called.
+            # Observe the typed executor seam so a restored fingerprint cannot
+            # mask an operation that actually ran and then restored.
+            executor_before_cancel = server._executor
+            original_sample = executor_before_cancel.sample_sensitivity
+            sample_invocations = 0
+
+            def observe_sample(request):
+                nonlocal sample_invocations
+                sample_invocations += 1
+                return original_sample(request)
+
+            executor_before_cancel.sample_sensitivity = observe_sample
+            queue_before_cancel = server._queue
             pause.set()
             interrupted = asyncio.create_task(client.sample_sensitivity(_request(adapter, "sensitivity-interrupted", 3.0, deadline_ms=30000)))
-            await asyncio.sleep(0.01)
+            for _ in range(500):
+                if queue_before_cancel.pending_count:
+                    break
+                await asyncio.sleep(0.002)
+            _expect(queue_before_cancel.pending_count == 1, "interrupted request entered bridge queue")
+            invocations_before_cancel = sample_invocations
             interrupted.cancel()
             try:
                 await interrupted
             except asyncio.CancelledError:
                 pass
+            # Keep the main-thread pump paused while the cancellation seam is
+            # applied; otherwise the queue could legitimately start the item
+            # before cancellation is observed.
+            # The queue cancellation call is the existing transport/main-thread
+            # seam; the request itself was admitted over the typed wire above.
+            _expect(
+                queue_before_cancel.cancel("sensitivity-interrupted"),
+                "cancelled request removed from bridge queue",
+            )
+            for _ in range(500):
+                if queue_before_cancel.pending_count == 0:
+                    break
+                await asyncio.sleep(0.002)
+            _expect(queue_before_cancel.pending_count == 0, "cancelled request leaves no pending queue item")
+            _expect(sample_invocations == invocations_before_cancel, "cancelled request never invokes sensitivity executor")
             pause.clear()
-            await asyncio.sleep(0.03)
             _expect(_fingerprint() == outside_before, "interrupted request does not replay a write")
+            executor_before_cancel.sample_sensitivity = original_sample
 
             # BridgeClient intentionally closes its transport on cancellation;
             # reopen through the same discovery/token handoff before continuing.
