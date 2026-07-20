@@ -22,18 +22,25 @@ from eee_agent.changesets.repository import ChangeSetRepository
 from eee_agent.changesets.service import ChangeSetService
 from eee_agent.core import AgentError, AgentException, ErrorCategory
 from eee_agent.modeling.bootstrap import derive_bootstrap_manifest
+from eee_agent.modeling.contracts import RepairStatus, ValidatorKind
+from eee_agent.modeling.validation import issue_repair_ticket, validate_applied_scene, validate_scene_query
+from eee_agent.runtime.models import RetentionClass
 from eee_agent.runtime.artifacts import ArtifactStore
 from eee_agent.runtime.database import RuntimeDatabase
 from eee_agent.runtime.events import EventStore
 from eee_agent.runtime.knowledge import KnowledgeRuntime, KnowledgeStatusCode
+from eee_agent.runtime.paths import RuntimePaths
+from eee_agent.runtime.service import RuntimeService
 
 from tests.modeling.test_bootstrap import _compile_bootstrap, _receipt
+from tests.modeling.test_validation import _preapply_report, _scene_query, _compile
 from tests.runtime.test_changeset_recovery import (
     CHG,
     NOW,
     SES,
     FakeBridge,
     _changeset,
+    _manifest,
     _policy,
 )
 
@@ -143,17 +150,105 @@ def test_mvp_bridge_unavailable_and_stale_apply_fail_closed(tmp_path: Path) -> N
         db, repo, service = await _open_changeset_service(tmp_path / "stale.sqlite", bridge=bridge)
         try:
             changeset = _changeset()
+            await repo.insert_workspace(_manifest())
             await service.propose(changeset, _policy(changeset))
             await service.approve(CHG, changeset.digest)
-            with pytest.raises(Exception):
-                await service.apply(CHG)
-            # Apply never claims success when the typed Bridge reports stale
-            # scene facts; recovery remains explicit for a later retry.
-            assert (await repo.get_changeset(CHG)).state.value in {
-                "Approved",
-                "Applying",
-                "CriticalRecovery",
-            }
+            runtime = RuntimeService(
+                db,
+                RuntimePaths(
+                    home=tmp_path,
+                    state_dir=tmp_path,
+                    app_db=tmp_path / "stale.sqlite",
+                    checkpoints_db=tmp_path / "checkpoints.sqlite",
+                    lock_file=tmp_path / "runtime.lock",
+                    discovery_file=tmp_path / "runtime.json",
+                    token_file=tmp_path / "runtime.token",
+                    artifacts_dir=tmp_path / "artifacts",
+                ),
+                changeset_clock=lambda: NOW,
+                changeset_bridge_provider=bridge,
+            )
+            with pytest.raises(AgentException) as error:
+                await runtime.apply_changeset_trusted(CHG)
+            assert error.value.error.code == "bridge.stale_scene"
+            await runtime._shutdown()
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_mvp_cook_and_validation_failures_are_explicit() -> None:
+    compilation = _compile()
+    missing_nodes = _scene_query(compilation)
+    missing_nodes = missing_nodes.__class__(
+        binding=missing_nodes.binding,
+        selected_nodes=missing_nodes.selected_nodes,
+        nodes=(),
+    )
+    cook, _geometry = validate_applied_scene(
+        changeset=compilation.changeset, query=missing_nodes
+    )
+    assert cook.status.value == "Failed"
+    assert cook.code == "modeling.cook.failed"
+
+    failed_geometry = validate_scene_query(
+        report=_preapply_report(compilation),
+        changeset=compilation.changeset,
+        query=_scene_query(compilation, empty_last=True),
+    )
+    geometry = next(item for item in failed_geometry.results if item.validator is ValidatorKind.GEOMETRY)
+    assert geometry.status.value == "Failed"
+    assert geometry.code == "modeling.geometry.empty_or_invalid"
+
+
+def test_mvp_repair_exhaustion_is_not_a_success() -> None:
+    from eee_agent.modeling.contracts import RepairBudget
+
+    budget = RepairBudget(max_attempts_per_stage=2, attempts=())
+    for attempt in (1, 2):
+        budget, ticket = issue_repair_ticket(
+            budget=budget,
+            ticket_id=f"repair_mvp_{attempt}",
+            validator=ValidatorKind.GRAPH,
+            failure_code="modeling.graph.invalid",
+            message="graph evidence failed",
+            evidence_digests=("a" * 64,),
+            failed_parameter_samples=(),
+            replay_boundary_digest="a" * 64,
+        )
+        assert ticket.status is RepairStatus.OPEN
+    _unchanged, exhausted = issue_repair_ticket(
+        budget=budget,
+        ticket_id="repair_mvp_3",
+        validator=ValidatorKind.GRAPH,
+        failure_code="modeling.graph.invalid",
+        message="graph evidence failed",
+        evidence_digests=("a" * 64,),
+        failed_parameter_samples=(),
+        replay_boundary_digest="a" * 64,
+    )
+    assert exhausted.status is RepairStatus.EXHAUSTED
+
+
+def test_mvp_restart_replay_has_no_duplicate_events(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db, _repo, _service = await _open_changeset_service(tmp_path / "replay.sqlite")
+        try:
+            events = EventStore(db)
+            await events.append(
+                session_id=SES,
+                run_id=None,
+                event_type="runtime.mvp_marker",
+                payload={"status": "completed"},
+                retention_class=RetentionClass.DURABLE,
+            )
+            first = await events.replay(SES, after_seq=0, limit=10)
+            second = await events.replay(SES, after_seq=0, limit=10)
+            assert [(item.seq, item.event_type) for item in first.events] == [
+                (item.seq, item.event_type) for item in second.events
+            ]
+            assert len(second.events) == 1
         finally:
             await db.close()
 

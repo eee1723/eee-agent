@@ -108,8 +108,11 @@ def main() -> int:
                 cwd=str(Path.cwd()),
                 env=env,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                # Provider output can contain unbounded model text or secrets;
+                # evidence must be emitted by the adapter as bounded records,
+                # never collected by this harness.
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 text=True,
                 timeout=900,
                 check=False,
@@ -124,4 +127,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
