@@ -167,3 +167,34 @@ def test_finish_bounds_large_plain_payload_without_leaking_original_text() -> No
     assert len(repr(result).encode("utf-8")) <= 16 * 1024
     assert "payload-secret" not in repr(result)
     assert result["payload"] == "[truncated]"
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_finish_rejects_non_finite_numbers(value: float) -> None:
+    result = _finish({"ok": True, "value": value})
+
+    assert result == {
+        "ok": False,
+        "code": "bridge.unavailable",
+        "message": "The read-only provider returned unsupported data.",
+    }
+
+
+def test_finish_rejects_integer_with_excessive_decimal_digits() -> None:
+    result = _finish({"ok": True, "value": 10**129})
+
+    assert result == {
+        "ok": False,
+        "code": "bridge.unavailable",
+        "message": "The read-only provider returned unsupported data.",
+    }
+
+
+def test_finish_rejects_integer_too_large_to_serialize() -> None:
+    result = _finish({"ok": True, "value": 10**10_000})
+
+    assert result == {
+        "ok": False,
+        "code": "bridge.unavailable",
+        "message": "The read-only provider returned unsupported data.",
+    }

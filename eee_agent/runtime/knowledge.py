@@ -122,12 +122,15 @@ class KnowledgeRuntime:
     def search(self, query: str, *, limit: int = 5) -> dict[str, object]:
         if not self.status.available:
             return _error_result("kb_unavailable", self._unavailable_message())
+        if type(limit) is not int or not 1 <= limit <= 10:
+            return _error_result(
+                "kb_invalid_input", "knowledge search limit is invalid"
+            )
         bounded_query = query if isinstance(query, str) else ""
-        bounded_limit = min(max(int(limit), 1), 10)
         try:
             response = KnowledgeService(
                 self.path, stale_checker=self._stale_checker
-            ).search(SearchRequest(query=bounded_query, limit=bounded_limit))
+            ).search(SearchRequest(query=bounded_query, limit=limit))
             payload = response.to_dict()
             payload["ok"] = bool(payload.get("ok"))
             return payload
@@ -137,15 +140,18 @@ class KnowledgeRuntime:
     def get(self, entity_id: str, *, max_body_bytes: int = 8_000) -> dict[str, object]:
         if not self.status.available:
             return _error_result("kb_unavailable", self._unavailable_message())
+        if type(max_body_bytes) is not int or not 1 <= max_body_bytes <= 8_000:
+            return _error_result("kb_invalid_input", "knowledge body limit is invalid")
         bounded_entity = entity_id if isinstance(entity_id, str) else ""
-        bounded_bytes = min(max(int(max_body_bytes), 1), 8_000)
         try:
             payload = KnowledgeService(
                 self.path, stale_checker=self._stale_checker
-            ).get(GetRequest(entity_id=bounded_entity, max_chars=bounded_bytes)).to_dict()
+            ).get(
+                GetRequest(entity_id=bounded_entity, max_chars=max_body_bytes)
+            ).to_dict()
             body = payload.get("body")
             if isinstance(body, str):
-                payload["body"] = body[:bounded_bytes]
+                payload["body"] = body[:max_body_bytes]
             return payload
         except Exception:
             return _error_result("kb_unavailable", "knowledge cache unavailable")

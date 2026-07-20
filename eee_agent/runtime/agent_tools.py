@@ -6,6 +6,8 @@ Tools in this module accept only model-safe values and call an injected
 
 from __future__ import annotations
 
+import json
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -16,18 +18,34 @@ from eee_agent.runtime.agent_context import PlainData, RuntimeToolContext
 _MAX_RESULT_BYTES = 16 * 1024
 _MAX_DEPTH = 8
 _MAX_ITEMS = 64
+_MAX_INT_DIGITS = 128
+_MAX_INT_BITS = 426
 
 
 def _error(code: str, message: str) -> dict[str, object]:
     return {"ok": False, "code": code, "message": message}
 
 
+def _bounded_int(value: int) -> bool:
+    """Accept only integers whose decimal form is safe to serialize."""
+    if value.bit_length() > _MAX_INT_BITS:
+        return False
+    try:
+        return len(str(abs(value))) <= _MAX_INT_DIGITS
+    except (OverflowError, ValueError):
+        return False
+
+
 def _bounded(value: Any, *, depth: int = 0) -> PlainData:
     """Copy provider output into a bounded plain JSON-like value."""
     if depth > _MAX_DEPTH:
         return "[truncated]"
-    if value is None or type(value) in (int, float, bool):
+    if value is None or type(value) is bool:
         return value
+    if type(value) is int:
+        return value if _bounded_int(value) else "[truncated]"
+    if type(value) is float:
+        return value if math.isfinite(value) else "[truncated]"
     if type(value) is str:
         return value if len(value) <= 2048 else "[truncated]"
     if isinstance(value, Mapping):
@@ -67,8 +85,18 @@ def _plain_value(
     if budget["items"] <= 0:
         return False
     budget["items"] -= 1
-    if value is None or type(value) in (int, float, bool):
+    if value is None or type(value) is bool:
         return True
+    if type(value) is int:
+        if not _bounded_int(value):
+            return False
+        budget["bytes"] -= len(str(value).encode("ascii"))
+        return budget["bytes"] >= 0
+    if type(value) is float:
+        if not math.isfinite(value):
+            return False
+        budget["bytes"] -= len(repr(value).encode("ascii"))
+        return budget["bytes"] >= 0
     if type(value) is str:
         budget["bytes"] -= min(len(value), 2048)
         return budget["bytes"] >= 0
@@ -132,7 +160,26 @@ def _finish(value: Any) -> dict[str, object]:
         )
     # Avoid carrying opaque objects and cap serialized-size by progressively
     # replacing large values with a deterministic marker.
-    while len(repr(result).encode("utf-8")) > _MAX_RESULT_BYTES:
+    def serialized_bytes(candidate: dict[str, PlainData]) -> int | None:
+        try:
+            return len(
+                json.dumps(
+                    candidate,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+        except (TypeError, ValueError, UnicodeEncodeError):
+            return None
+
+    result_bytes = serialized_bytes(result)
+    if result_bytes is None:
+        return _error(
+            "bridge.unavailable",
+            "The read-only provider returned unsupported data.",
+        )
+    while result_bytes > _MAX_RESULT_BYTES:
         largest = max(
             ((key, repr(item)) for key, item in result.items()),
             key=lambda pair: len(pair[1]),
@@ -141,6 +188,12 @@ def _finish(value: Any) -> dict[str, object]:
         if largest is None or largest[1] == "'[truncated]'":
             break
         result[largest[0]] = "[truncated]"
+        result_bytes = serialized_bytes(result)
+        if result_bytes is None:
+            return _error(
+                "bridge.unavailable",
+                "The read-only provider returned unsupported data.",
+            )
     return result
 
 

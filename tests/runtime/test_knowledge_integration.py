@@ -81,6 +81,48 @@ def test_knowledge_body_query_is_bounded_and_logical_path_only(tmp_path: Path) -
     assert len(response.get("body", "")) <= 8_000
 
 
+@pytest.mark.parametrize("limit", ["5", None, True, False, -1, 11])
+def test_ready_knowledge_search_rejects_invalid_limits_without_raising(
+    tmp_path: Path, limit: object
+) -> None:
+    runtime = KnowledgeRuntime(tmp_path / "cache.sqlite")
+    runtime._status = runtime._status.__class__(
+        code=KnowledgeStatusCode.READY,
+        available=True,
+        message="ready",
+    )
+
+    result = runtime.search("nodes", limit=limit)  # type: ignore[arg-type]
+
+    assert result == {
+        "ok": False,
+        "code": "kb_invalid_input",
+        "message": "knowledge search limit is invalid",
+    }
+
+
+@pytest.mark.parametrize("max_body_bytes", ["4000", None, True, False, -1, 8_001])
+def test_ready_knowledge_get_rejects_invalid_body_limits_without_raising(
+    tmp_path: Path, max_body_bytes: object
+) -> None:
+    runtime = KnowledgeRuntime(tmp_path / "cache.sqlite")
+    runtime._status = runtime._status.__class__(
+        code=KnowledgeStatusCode.READY,
+        available=True,
+        message="ready",
+    )
+
+    result = runtime.get(  # type: ignore[arg-type]
+        "entity", max_body_bytes=max_body_bytes
+    )
+
+    assert result == {
+        "ok": False,
+        "code": "kb_invalid_input",
+        "message": "knowledge body limit is invalid",
+    }
+
+
 def test_live_catalog_remains_authority_for_creatability() -> None:
     runtime = KnowledgeRuntime(Path("missing.sqlite"))
     assert runtime.can_create("geo") is False
