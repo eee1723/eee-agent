@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Mapping, Protocol, runtime_checkable
 
 from eee_agent.runtime.artifacts import ArtifactStore
@@ -58,6 +59,12 @@ def _unavailable(
         ),
         unavailable=unavailable,
     )
+
+
+def _read_bounded(path: Path, maximum: int) -> bytes:
+    """Read at most ``maximum + 1`` bytes from an already-rooted artifact."""
+    with path.open("rb") as stream:
+        return stream.read(maximum + 1)
 
 
 class VisionRouter:
@@ -152,7 +159,13 @@ class VisionRouter:
             )
         path = self._artifacts.path_for(stored)
         try:
-            image_bytes = await asyncio.to_thread(path.read_bytes)
+            resolved_root = self._artifacts.root.resolve(strict=True)
+            resolved_path = path.resolve(strict=True)
+            if not resolved_path.is_relative_to(resolved_root) or not resolved_path.is_file():
+                raise OSError("artifact escaped its managed root")
+            image_bytes = await asyncio.to_thread(
+                _read_bounded, resolved_path, capability.max_image_bytes
+            )
         except OSError:
             return _unavailable(
                 "vision.artifact_unavailable",

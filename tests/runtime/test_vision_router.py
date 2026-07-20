@@ -198,6 +198,27 @@ def test_missing_and_changed_artifact_never_reaches_provider(tmp_path: Path) -> 
     asyncio.run(scenario())
 
 
+def test_artifact_growth_is_bounded_before_provider_call(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db, store, ref = await _store(tmp_path)
+        provider = FakeProvider()
+        provider.capability_result = ProviderCapability(
+            "fake", True, ("image/png",), len(IMAGE), None
+        )
+        try:
+            store.path_for(ref).write_bytes(IMAGE + b"unbounded-tail")
+            outcome = await VisionRouter(store, provider).evaluate(
+                VisionRequest("vision-1", ref, "check"), deterministic_valid=True
+            )
+            assert outcome.unavailable is not None
+            assert outcome.unavailable.reason_code == "vision.artifact_integrity_failed"
+            assert provider.received == []
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
 def test_advisory_success_cannot_override_deterministic_failure(tmp_path: Path) -> None:
     async def scenario() -> None:
         db, store, ref = await _store(tmp_path)
