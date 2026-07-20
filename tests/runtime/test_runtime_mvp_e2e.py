@@ -20,7 +20,8 @@ import pytest
 
 from eee_agent.changesets.repository import ChangeSetRepository
 from eee_agent.changesets.service import ChangeSetService
-from eee_agent.core import AgentException
+from eee_agent.core import AgentError, AgentException, ErrorCategory
+from eee_agent.modeling.bootstrap import derive_bootstrap_manifest
 from eee_agent.runtime.artifacts import ArtifactStore
 from eee_agent.runtime.database import RuntimeDatabase
 from eee_agent.runtime.events import EventStore
@@ -77,9 +78,7 @@ async def _open_changeset_service(
 def test_mvp_empty_scene_bootstrap_is_offline_ready() -> None:
     """A typed applied receipt derives ownership without a live provider."""
     changeset = _compile_bootstrap().changeset
-    manifest = __import__(
-        "eee_agent.modeling.bootstrap", fromlist=["derive_bootstrap_manifest"]
-    ).derive_bootstrap_manifest(changeset, _receipt())
+    manifest = derive_bootstrap_manifest(changeset, _receipt())
     assert manifest.workspace_id
     assert manifest.roots and manifest.roots[0].role == "root"
     assert manifest.nodes[0].path == "/obj/eee_model"
@@ -135,9 +134,9 @@ def test_mvp_bridge_unavailable_and_stale_apply_fail_closed(tmp_path: Path) -> N
 
         bridge = FakeBridge()
         bridge.apply_result = AgentException(
-            __import__("eee_agent.core", fromlist=["AgentError"]).AgentError(
+            AgentError(
                 code="bridge.stale_scene",
-                category=__import__("eee_agent.core", fromlist=["ErrorCategory"]).ErrorCategory.HOUDINI_BRIDGE,
+                category=ErrorCategory.HOUDINI_BRIDGE,
                 message_for_user="scene changed",
             )
         )
