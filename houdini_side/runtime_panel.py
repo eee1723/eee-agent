@@ -33,11 +33,14 @@ from eee_agent.panel.client_state import (  # noqa: E402
 from eee_agent.panel.runtime_state import (  # noqa: E402
     RuntimePanelState,
     append_artifact_summary,
+    append_vision_summary,
     approval_is_actionable,
     artifact_refresh_required,
     changeset_refresh_required,
     parse_artifact_event,
     parse_changeset_list,
+    parse_vision_event,
+    vision_refresh_required,
 )
 from houdini_side.secure_bridge_host import (  # noqa: E402
     SelectionQueryError,
@@ -460,6 +463,7 @@ class RuntimeObserverClient(QtCore.QObject):
     commandFailed = QtCore.Signal(str, str, str, bool, bool)
     eventObserved = QtCore.Signal(str, int)
     artifactObserved = QtCore.Signal(object)
+    visionObserved = QtCore.Signal(object)
 
     _DELAYS_MS = (250, 500, 1000, 2000, 5000)
 
@@ -926,6 +930,13 @@ class RuntimeObserverClient(QtCore.QObject):
                     self.connectionChanged.emit("error", str(exc))
                     return
                 self.artifactObserved.emit(summary)
+            if vision_refresh_required(message):
+                try:
+                    vision_summary = parse_vision_event(message)
+                except PanelClientError as exc:
+                    self.connectionChanged.emit("error", str(exc))
+                    return
+                self.visionObserved.emit(vision_summary)
             self.eventObserved.emit(message["type"], seq)
             if session_id == self._current_session_id:
                 self.sessionChanged.emit(
@@ -950,6 +961,7 @@ class RuntimePanel(QtWidgets.QWidget):
         self._client.runtimeSnapshotChanged.connect(self._set_runtime_snapshot)
         self._client.changesetsChanged.connect(self._set_changesets)
         self._client.artifactObserved.connect(self._artifact_observed)
+        self._client.visionObserved.connect(self._vision_observed)
         self._client.commandSucceeded.connect(self._command_succeeded)
         self._client.commandFailed.connect(self._command_failed)
         self._client.eventObserved.connect(self._set_event)
@@ -958,6 +970,7 @@ class RuntimePanel(QtWidgets.QWidget):
         self._active_run_status = ""
         self._changesets = ()
         self._artifacts = ()
+        self._visions = ()
         self._decision_busy = False
         self._session_title_dialog: SessionTitleDialog | None = None
         self._selection_worker = SelectionQueryWorker(self)
@@ -1380,6 +1393,46 @@ class RuntimePanel(QtWidgets.QWidget):
             3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
         )
         layout.addWidget(self.artifact_list, 1)
+
+        layout.addWidget(self._divider())
+        vision_title = QtWidgets.QLabel("VISION EVALUATIONS")
+        vision_title.setObjectName("Kicker")
+        layout.addWidget(vision_title)
+        self.vision_status = QtWidgets.QLabel("NO VISION EVALUATIONS OBSERVED")
+        self.vision_status.setObjectName("RunState")
+        layout.addWidget(self.vision_status)
+        vision_note = QtWidgets.QLabel(
+            "Advisory evaluation of the captured bytes. It can reject a "
+            "delivery but can never override a failed deterministic check."
+        )
+        vision_note.setObjectName("Meta")
+        vision_note.setWordWrap(True)
+        layout.addWidget(vision_note)
+        self.vision_list = QtWidgets.QTreeWidget()
+        self.vision_list.setObjectName("SelectionTable")
+        self.vision_list.setColumnCount(4)
+        self.vision_list.setHeaderLabels(
+            ["STATUS", "DECISION", "ADVISORY", "SUMMARY"]
+        )
+        self.vision_list.setRootIsDecorated(False)
+        self.vision_list.setAlternatingRowColors(True)
+        self.vision_list.setSelectionMode(
+            QtWidgets.QAbstractItemView.SingleSelection
+        )
+        self.vision_list.header().setStretchLastSection(False)
+        self.vision_list.header().setSectionResizeMode(
+            0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.vision_list.header().setSectionResizeMode(
+            1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.vision_list.header().setSectionResizeMode(
+            2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.vision_list.header().setSectionResizeMode(
+            3, QtWidgets.QHeaderView.ResizeMode.Stretch
+        )
+        layout.addWidget(self.vision_list, 1)
         return tab
 
     def _rail_item(self, layout, column, key, value, attr) -> None:
@@ -1854,6 +1907,8 @@ class RuntimePanel(QtWidgets.QWidget):
         if session_id != getattr(self, "_session_id", ""):
             self._artifacts = ()
             self._render_artifacts()
+            self._visions = ()
+            self._render_visions()
         self._session_id = session_id
         self._session_title = title if session_id else "—"
         self._cursor = cursor
@@ -1900,6 +1955,41 @@ class RuntimePanel(QtWidgets.QWidget):
                 item.setToolTip(0, summary["change_id"])
                 item.setToolTip(3, summary["code"])
             self.artifact_list.addTopLevelItem(item)
+
+    @QtCore.Slot(object)
+    def _vision_observed(self, summary) -> None:
+        self._visions = append_vision_summary(self._visions, summary)
+        self._render_visions()
+
+    def _render_visions(self) -> None:
+        self.vision_list.clear()
+        count = len(self._visions)
+        self.vision_status.setText(
+            "NO VISION EVALUATIONS OBSERVED"
+            if count == 0
+            else f"{count:02d} VISION EVALUATIONS"
+        )
+        for summary in self._visions:
+            status = str(summary["status"]).upper()
+            decision = "ACCEPTED" if summary["accepted"] else "REJECTED"
+            advisory = summary["advisory_passed"]
+            advisory_text = (
+                "-" if advisory is None else ("PASS" if advisory else "FAIL")
+            )
+            item = QtWidgets.QTreeWidgetItem(
+                [status, decision, advisory_text, str(summary["summary"])]
+            )
+            details = [
+                f"deterministic valid: {summary['deterministic_valid']}",
+                f"observations: {summary['observation_count']}",
+                f"artifacts: {summary['artifact_count']}",
+                f"changeset: {summary['changeset_digest']}",
+            ]
+            if summary["report_summary"] is not None:
+                details.insert(0, f"report: {summary['report_summary']}")
+            item.setToolTip(0, "\n".join(details))
+            item.setToolTip(3, str(summary["summary"]))
+            self.vision_list.addTopLevelItem(item)
 
     @QtCore.Slot(str, int)
     def _set_event(self, event_type: str, seq: int) -> None:

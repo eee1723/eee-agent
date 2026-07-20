@@ -165,8 +165,12 @@ Still required:
 
 - Real provider journey using approved credentials and the strict evidence
   sidecar. Current status: `not run`.
-- Dedicated panel rendering for normalized Vision status/report. The durable
-  event currently appears only through generic event/replay state.
+- ~~Dedicated panel rendering for normalized Vision status/report~~ Done
+  2026-07-20: `parse_vision_event()` validates the durable
+  `vision.evaluation_completed` payload into a bounded summary and the
+  ARTIFACTS tab renders a dedicated VISION EVALUATIONS section (status,
+  decision, advisory result, bounded summary). Visual layout acceptance stays
+  part of the interactive GUI checklist below.
 - Interactive Houdini GUI checklist: narrow/docked layout, focus, Chinese IME,
   review/approval mouse flow, reconnect/restart, artifacts, recovery, and full
   MODEL -> REVIEW -> Approve and build -> RESULT journey.

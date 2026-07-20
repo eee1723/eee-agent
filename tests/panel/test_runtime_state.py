@@ -8,12 +8,15 @@ from eee_agent.panel.client_state import PanelClientError
 from eee_agent.panel.runtime_state import (
     RuntimePanelState,
     append_artifact_summary,
+    append_vision_summary,
     approval_is_actionable,
     artifact_refresh_required,
     changeset_refresh_required,
     parse_artifact_event,
     parse_changeset_list,
     parse_session_snapshot,
+    parse_vision_event,
+    vision_refresh_required,
 )
 
 SID = "ses_" + "a" * 32
@@ -416,3 +419,191 @@ def test_append_artifact_summary_bounds_to_newest_fifty() -> None:
     # Newest first; the five oldest were dropped.
     assert items[0]["code"] == "c54"
     assert items[-1]["code"] == "c5"
+
+
+# --------------------------------------------------------------------------
+# Vision evaluation events
+# --------------------------------------------------------------------------
+
+VISION_ART = "art_" + "f" * 32
+
+
+def _vision_artifact() -> dict[str, object]:
+    return {
+        "artifact_id": VISION_ART,
+        "relative_path": f"{SID}/{RID}/{VISION_ART}.png",
+        "sha256": "c" * 64,
+        "media_type": "image/png",
+        "size_bytes": 4096,
+        "schema_version": 1,
+    }
+
+
+def _vision_message(**overrides: object) -> dict[str, object]:
+    message: dict[str, object] = {
+        "kind": "event",
+        "type": "vision.evaluation_completed",
+        "seq": 11,
+        "payload": {
+            "brief": "make a box",
+            "spec": "operations=1; effects=parm.set; targets=/obj/ws/box1",
+            "changeset_digest": "a" * 64,
+            "approval": "Consumed:local_user:apr_" + "d" * 32,
+            "receipt": "applied:" + "b" * 64,
+            "validation_report": ["Cook:Passed:modeling.cook.ok"],
+            "artifact_refs": [_vision_artifact()],
+            "artifact_status": ["available"],
+            "knowledge_manifest_sha256": "e" * 64,
+            "vision_status": "completed",
+            "vision_report": {
+                "summary": "silhouette matches",
+                "observations": ["bounded observation"],
+                "confidence": 0.9,
+                "advisory_passed": True,
+            },
+            "final_decision": {
+                "status": "completed",
+                "accepted": True,
+                "deterministic_valid": True,
+                "summary": "silhouette matches",
+            },
+            "recovery_evidence": [],
+        },
+    }
+    message.update(overrides)
+    return message
+
+
+def _unavailable_vision_message() -> dict[str, object]:
+    message = _vision_message()
+    payload = message["payload"]  # type: ignore[index]
+    payload["vision_status"] = "unavailable"
+    payload["vision_report"] = None
+    payload["final_decision"] = {
+        "status": "unavailable",
+        "accepted": True,
+        "deterministic_valid": True,
+        "summary": "Visual evaluation provider is unavailable.",
+    }
+    return message
+
+
+def test_vision_events_require_authoritative_refresh() -> None:
+    assert vision_refresh_required(
+        {"kind": "event", "type": "vision.evaluation_completed"}
+    )
+    assert not vision_refresh_required({"kind": "event", "type": "model.text_delta"})
+    assert not vision_refresh_required(
+        {"kind": "command", "type": "vision.evaluation_completed"}
+    )
+
+
+def test_parse_vision_completed_event_returns_bounded_summary() -> None:
+    summary = parse_vision_event(_vision_message())
+    assert summary["kind"] == "vision"
+    assert summary["status"] == "completed"
+    assert summary["accepted"] is True
+    assert summary["deterministic_valid"] is True
+    assert summary["advisory_passed"] is True
+    assert summary["summary"] == "silhouette matches"
+    assert summary["report_summary"] == "silhouette matches"
+    assert summary["observation_count"] == 1
+    assert summary["artifact_count"] == 1
+    assert summary["changeset_digest"] == "a" * 64
+    assert summary["seq"] == 11
+
+
+def test_parse_vision_unavailable_event_has_no_report() -> None:
+    summary = parse_vision_event(_unavailable_vision_message())
+    assert summary["kind"] == "vision"
+    assert summary["status"] == "unavailable"
+    assert summary["accepted"] is True
+    assert summary["deterministic_valid"] is True
+    assert summary["advisory_passed"] is None
+    assert summary["summary"] == "Visual evaluation provider is unavailable."
+    assert summary["report_summary"] is None
+    assert summary["observation_count"] == 0
+    assert summary["artifact_count"] == 1
+
+
+def test_parse_vision_event_rejects_non_vision_types() -> None:
+    with pytest.raises(PanelClientError):
+        parse_vision_event(
+            {"kind": "event", "type": "model.text_delta", "seq": 1, "payload": {}}
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda m: m["payload"].pop("spec"),
+        lambda m: m["payload"].__setitem__("extra", True),
+        lambda m: m["payload"].__setitem__("brief", ""),
+        lambda m: m["payload"].__setitem__("brief", "x" * 4097),
+        lambda m: m["payload"].__setitem__("changeset_digest", "not-a-digest"),
+        lambda m: m["payload"].__setitem__("approval", "x" * 513),
+        lambda m: m["payload"].__setitem__("validation_report", "not-a-list"),
+        lambda m: m["payload"].__setitem__("validation_report", ["x"] * 65),
+        lambda m: m["payload"].__setitem__("validation_report", ["x" * 513]),
+        lambda m: m["payload"].__setitem__("artifact_refs", [_vision_artifact()] * 17),
+        lambda m: m["payload"]["artifact_refs"][0].__setitem__("size_bytes", 0),
+        lambda m: m["payload"]["artifact_refs"][0].__setitem__("artifact_id", RID),
+        lambda m: m["payload"].__setitem__("artifact_status", ["available", "available"]),
+        lambda m: m["payload"].__setitem__("artifact_status", ["bogus"]),
+        lambda m: m["payload"].__setitem__("knowledge_manifest_sha256", "zz"),
+        lambda m: m["payload"].__setitem__("vision_status", "bogus"),
+        lambda m: m["payload"]["vision_report"].__setitem__("confidence", float("nan")),
+        lambda m: m["payload"]["vision_report"].__setitem__("confidence", 1.5),
+        lambda m: m["payload"]["vision_report"].__setitem__("observations", ["x"] * 33),
+        lambda m: m["payload"]["final_decision"].__setitem__("status", "unavailable"),
+        lambda m: m["payload"]["final_decision"].__setitem__("accepted", "yes"),
+        lambda m: m["payload"].__setitem__("recovery_evidence", ["x"] * 33),
+        lambda m: m.__setitem__("seq", 0),
+        # Completed without a report.
+        lambda m: m["payload"].__setitem__("vision_report", None),
+        # Accepted cannot contradict deterministic failure.
+        lambda m: m["payload"]["final_decision"].__setitem__("deterministic_valid", False),
+        # Accepted cannot contradict an advisory failure.
+        lambda m: m["payload"]["vision_report"].__setitem__("advisory_passed", False),
+    ],
+)
+def test_parse_vision_event_is_strict(mutation) -> None:
+    message = _vision_message()
+    mutation(message)
+    with pytest.raises(PanelClientError):
+        parse_vision_event(message)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        # Non-completed statuses cannot carry a report.
+        lambda m: m["payload"].__setitem__(
+            "vision_report",
+            {
+                "summary": "s",
+                "observations": [],
+                "confidence": 0.5,
+                "advisory_passed": True,
+            },
+        ),
+        # Decision status must agree with the evaluation status.
+        lambda m: m["payload"]["final_decision"].__setitem__("status", "completed"),
+    ],
+)
+def test_parse_vision_unavailable_event_is_strict(mutation) -> None:
+    message = _unavailable_vision_message()
+    mutation(message)
+    with pytest.raises(PanelClientError):
+        parse_vision_event(message)
+
+
+def test_append_vision_summary_bounds_to_newest_fifty() -> None:
+    items: tuple = ()
+    for index in range(55):
+        items = append_vision_summary(
+            items, {"kind": "vision", "status": "completed", "seq": index}
+        )
+    assert len(items) == 50
+    assert items[0]["seq"] == 54
+    assert items[-1]["seq"] == 5

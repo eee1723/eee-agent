@@ -70,8 +70,10 @@ known. Restart Houdini before treating any manual GUI result as current.
 - Provider execution failures currently use `VisionStatus.UNAVAILABLE` with a
   specific `vision.provider_failed` reason. The unused `FAILED` status should
   be selected only if the product needs a distinct UI state.
-- The Houdini panel currently records the durable Vision event in the generic
-  event/replay stream but has no dedicated normalized Vision report view.
+- The Houdini panel renders the durable Vision event through a dedicated
+  bounded VISION EVALUATIONS section in the ARTIFACTS tab since 2026-07-20
+  (`parse_vision_event` + `append_vision_summary` in
+  `eee_agent/panel/runtime_state.py`).
 - `VisionRouter` is invoked from the production post-Apply validation/capture
   path since 2026-07-20; delivery evidence is durable and replayable.
 - GUI acceptance, real provider evidence, release tag and pushing the Runtime

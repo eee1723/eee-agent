@@ -105,6 +105,32 @@ _FRAMING_FIELDS = frozenset(
     }
 )
 _MAX_ARTIFACTS = 50
+_VISION_REFRESH_EVENTS = frozenset({"vision.evaluation_completed"})
+_VISION_EVALUATION_FIELDS = frozenset(
+    {
+        "brief",
+        "spec",
+        "changeset_digest",
+        "approval",
+        "receipt",
+        "validation_report",
+        "artifact_refs",
+        "artifact_status",
+        "knowledge_manifest_sha256",
+        "vision_status",
+        "vision_report",
+        "final_decision",
+        "recovery_evidence",
+    }
+)
+_VISION_STATUSES = frozenset({"completed", "unavailable", "waived", "failed"})
+_VISION_REPORT_FIELDS = frozenset(
+    {"summary", "observations", "confidence", "advisory_passed"}
+)
+_VISION_DECISION_FIELDS = frozenset(
+    {"status", "accepted", "deterministic_valid", "summary"}
+)
+_MAX_VISION = 50
 _RUN_FIELDS = frozenset(
     {
         "run_id",
@@ -673,6 +699,170 @@ def append_artifact_summary(
     return (summary, *items)[:_MAX_ARTIFACTS]
 
 
+def vision_refresh_required(message: Mapping[str, object]) -> bool:
+    return (
+        message.get("kind") == "event"
+        and message.get("type") in _VISION_REFRESH_EVENTS
+    )
+
+
+def _bounded_vision_text(value: object, maximum: int) -> str:
+    if type(value) is not str or not value or len(value) > maximum:
+        raise PanelClientError("Runtime vision event is invalid.")
+    return value
+
+
+def _bounded_vision_text_list(
+    value: object, *, maximum_items: int, maximum_chars: int
+) -> None:
+    if type(value) is not list or len(value) > maximum_items:
+        raise PanelClientError("Runtime vision event is invalid.")
+    for item in value:
+        _bounded_vision_text(item, maximum_chars)
+
+
+def _vision_artifact_ref(value: object) -> None:
+    if type(value) is not dict or set(value) != _ARTIFACT_FIELDS:
+        raise PanelClientError("Runtime vision event is invalid.")
+    _matching(value["artifact_id"], _ARTIFACT_ID_RE)
+    relative_path = value["relative_path"]
+    if (
+        type(relative_path) is not str
+        or not relative_path
+        or len(relative_path) > 512
+        or relative_path.startswith("/")
+        or "\\" in relative_path
+        or ".." in relative_path.split("/")
+    ):
+        raise PanelClientError("Runtime vision event is invalid.")
+    _matching(value["sha256"], _DIGEST_RE)
+    media_type = value["media_type"]
+    if type(media_type) is not str or not media_type or len(media_type) > 255:
+        raise PanelClientError("Runtime vision event is invalid.")
+    size_bytes = value["size_bytes"]
+    if type(size_bytes) is not int or not 1 <= size_bytes <= 16_777_216:
+        raise PanelClientError("Runtime vision event is invalid.")
+    if value["schema_version"] != 1:
+        raise PanelClientError("Runtime vision event is invalid.")
+
+
+def parse_vision_event(message: Mapping[str, object]) -> Mapping[str, object]:
+    """Validate one durable vision evaluation into a bounded panel summary.
+
+    The summary carries normalized status/decision metadata only; report
+    observations stay as counts so unbounded provider text is never
+    rendered without an explicit bounded selection.
+    """
+    if not vision_refresh_required(message):
+        raise PanelClientError("Runtime vision event is invalid.")
+    seq = message.get("seq")
+    if type(seq) is not int or seq <= 0:
+        raise PanelClientError("Runtime vision event is invalid.")
+    payload = message.get("payload")
+    if type(payload) is not dict or set(payload) != _VISION_EVALUATION_FIELDS:
+        raise PanelClientError("Runtime vision event is invalid.")
+    _bounded_vision_text(payload["brief"], 4096)
+    _bounded_vision_text(payload["spec"], 4096)
+    _matching(payload["changeset_digest"], _DIGEST_RE)
+    _bounded_vision_text(payload["approval"], 512)
+    _bounded_vision_text(payload["receipt"], 512)
+    _bounded_vision_text_list(
+        payload["validation_report"], maximum_items=64, maximum_chars=512
+    )
+    artifact_refs = payload["artifact_refs"]
+    if type(artifact_refs) is not list or len(artifact_refs) > 16:
+        raise PanelClientError("Runtime vision event is invalid.")
+    for ref in artifact_refs:
+        _vision_artifact_ref(ref)
+    artifact_status = payload["artifact_status"]
+    if (
+        type(artifact_status) is not list
+        or len(artifact_status) != len(artifact_refs)
+    ):
+        raise PanelClientError("Runtime vision event is invalid.")
+    for state in artifact_status:
+        if type(state) is not str or state not in _ARTIFACT_LIFECYCLE_STATES:
+            raise PanelClientError("Runtime vision event is invalid.")
+    manifest = payload["knowledge_manifest_sha256"]
+    if manifest is not None:
+        _matching(manifest, _DIGEST_RE)
+    status = payload["vision_status"]
+    if type(status) is not str or status not in _VISION_STATUSES:
+        raise PanelClientError("Runtime vision event is invalid.")
+    report = payload["vision_report"]
+    if report is not None:
+        if type(report) is not dict or set(report) != _VISION_REPORT_FIELDS:
+            raise PanelClientError("Runtime vision event is invalid.")
+        _bounded_vision_text(report["summary"], 2048)
+        _bounded_vision_text_list(
+            report["observations"], maximum_items=32, maximum_chars=512
+        )
+        confidence = report["confidence"]
+        if (
+            type(confidence) is bool
+            or type(confidence) not in (int, float)
+            or not math.isfinite(confidence)
+            or not 0 <= confidence <= 1
+        ):
+            raise PanelClientError("Runtime vision event is invalid.")
+        if type(report["advisory_passed"]) is not bool:
+            raise PanelClientError("Runtime vision event is invalid.")
+    decision = payload["final_decision"]
+    if type(decision) is not dict or set(decision) != _VISION_DECISION_FIELDS:
+        raise PanelClientError("Runtime vision event is invalid.")
+    decision_status = decision["status"]
+    if (
+        type(decision_status) is not str
+        or decision_status not in _VISION_STATUSES
+        or decision_status != status
+    ):
+        raise PanelClientError("Runtime vision event is invalid.")
+    if (
+        type(decision["accepted"]) is not bool
+        or type(decision["deterministic_valid"]) is not bool
+    ):
+        raise PanelClientError("Runtime vision event is invalid.")
+    _bounded_vision_text(decision["summary"], 1024)
+    _bounded_vision_text_list(
+        payload["recovery_evidence"], maximum_items=32, maximum_chars=512
+    )
+    if status == "completed":
+        if report is None:
+            raise PanelClientError("Runtime vision event is invalid.")
+        expected = decision["deterministic_valid"] and report["advisory_passed"]
+        if decision["accepted"] is not expected:
+            raise PanelClientError("Runtime vision event is invalid.")
+    elif report is not None:
+        raise PanelClientError("Runtime vision event is invalid.")
+    if not decision["deterministic_valid"] and decision["accepted"]:
+        raise PanelClientError("Runtime vision event is invalid.")
+    if status == "failed" and decision["accepted"]:
+        raise PanelClientError("Runtime vision event is invalid.")
+    return MappingProxyType(
+        {
+            "kind": "vision",
+            "status": status,
+            "accepted": decision["accepted"],
+            "deterministic_valid": decision["deterministic_valid"],
+            "advisory_passed": None if report is None else report["advisory_passed"],
+            "summary": decision["summary"],
+            "report_summary": None if report is None else report["summary"],
+            "observation_count": 0 if report is None else len(report["observations"]),
+            "artifact_count": len(artifact_refs),
+            "changeset_digest": payload["changeset_digest"],
+            "seq": seq,
+        }
+    )
+
+
+def append_vision_summary(
+    items: tuple[Mapping[str, object], ...],
+    summary: Mapping[str, object],
+) -> tuple[Mapping[str, object], ...]:
+    """Prepend one parsed vision summary, bounded to the newest 50."""
+    return (summary, *items)[:_MAX_VISION]
+
+
 def approval_is_actionable(
     summary: Mapping[str, object],
     *,
@@ -696,10 +886,13 @@ def approval_is_actionable(
 __all__ = [
     "RuntimePanelState",
     "append_artifact_summary",
+    "append_vision_summary",
     "approval_is_actionable",
     "artifact_refresh_required",
     "changeset_refresh_required",
     "parse_artifact_event",
     "parse_changeset_list",
     "parse_session_snapshot",
+    "parse_vision_event",
+    "vision_refresh_required",
 ]

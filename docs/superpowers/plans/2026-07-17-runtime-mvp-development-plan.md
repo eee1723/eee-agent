@@ -15,8 +15,9 @@
   production post-Apply flow; captured artifacts flow as exact ArtifactStore
   bytes through `VisionRouter` into a durable `vision.evaluation_completed`
   delivery record. Real-provider execution is still `not run`.
-- S9 incomplete: dedicated Vision panel presentation, interactive Houdini GUI
-  checklist, real-provider evidence, release tag and push remain pending.
+- S9 incomplete: the interactive Houdini GUI checklist, real-provider
+  evidence, release tag and push remain pending. Dedicated Vision panel
+  presentation landed 2026-07-20 (bounded parse + ARTIFACTS tab section).
 - Current transfer and exact verification evidence:
   `docs/handoffs/2026-07-20-runtime-development-transfer.md`.
 
