@@ -607,3 +607,70 @@ def test_append_vision_summary_bounds_to_newest_fifty() -> None:
     assert len(items) == 50
     assert items[0]["seq"] == 54
     assert items[-1]["seq"] == 5
+
+
+# --------------------------------------------------------------------------
+# Artifact summary lifecycle de-duplication
+# --------------------------------------------------------------------------
+
+
+def test_lifecycle_event_merges_into_existing_captured_row() -> None:
+    items: tuple = ()
+    captured = parse_artifact_event(_artifact_message())
+    items = append_artifact_summary(items, captured)
+    lifecycle = parse_artifact_event(
+        {
+            "kind": "event",
+            "type": "modeling.artifact_state_changed",
+            "seq": 12,
+            "payload": {"artifact_id": ART, "state": "evicted"},
+        }
+    )
+    items = append_artifact_summary(items, lifecycle)
+    # One row, not two: the lifecycle event updates the captured row.
+    assert len(items) == 1
+    assert items[0]["kind"] == "captured"
+    assert items[0]["artifact_id"] == ART
+    assert items[0]["state"] == "evicted"
+    assert items[0]["viewable"] is False
+    assert items[0]["seq"] == 12
+
+
+def test_lifecycle_event_for_unknown_artifact_keeps_its_own_row() -> None:
+    items: tuple = ()
+    lifecycle = parse_artifact_event(
+        {
+            "kind": "event",
+            "type": "artifact.reconciled",
+            "seq": 12,
+            "payload": {"artifact_id": ART, "from_state": "pending", "state": "missing"},
+        }
+    )
+    items = append_artifact_summary(items, lifecycle)
+    assert len(items) == 1
+    assert items[0]["kind"] == "lifecycle"
+    assert items[0]["state"] == "missing"
+    assert items[0]["viewable"] is False
+    assert items[0]["recovery"] is True
+
+
+def test_lifecycle_merge_does_not_touch_other_artifacts() -> None:
+    items: tuple = ()
+    items = append_artifact_summary(items, parse_artifact_event(_artifact_message()))
+    other = _artifact_message()
+    other["payload"]["artifact"]["artifact_id"] = "art_" + "9" * 32  # type: ignore[index]
+    other["payload"]["artifact"]["relative_path"] = f"{SID}/{RID}/{'art_' + '9' * 32}.png"  # type: ignore[index]
+    items = append_artifact_summary(items, parse_artifact_event(other))
+    lifecycle = parse_artifact_event(
+        {
+            "kind": "event",
+            "type": "modeling.artifact_state_changed",
+            "seq": 13,
+            "payload": {"artifact_id": ART, "state": "failed"},
+        }
+    )
+    items = append_artifact_summary(items, lifecycle)
+    assert len(items) == 2
+    states = {item.get("artifact_id"): item["state"] for item in items}
+    assert states[ART] == "failed"
+    assert states["art_" + "9" * 32] == "available"

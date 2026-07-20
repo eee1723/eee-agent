@@ -189,8 +189,11 @@ Still required:
   Proven by `test_client_disconnect_cancels_queued_request` and the healthy
   sequential-traffic regression test in
   `tests/runtime/test_houdini_bridge_transport.py`.
-- Artifact panel summaries may show duplicate lifecycle/captured rows; failed
-  canonical artifact bytes can remain for later cleanup.
+- ~~Artifact panel summaries may show duplicate lifecycle/captured rows~~
+  Closed 2026-07-20: `append_artifact_summary()` now merges a lifecycle event
+  into the already-listed captured row for the same artifact instead of
+  adding a duplicate row. Failed canonical artifact bytes intentionally remain
+  for the retryable cleanup path.
 - The local `pip-audit` command reached its correct exported dependency input
   but PyPI advisory lookup failed once due a local SSL EOF. Validate it in CI.
 

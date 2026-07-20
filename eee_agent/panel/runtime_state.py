@@ -695,7 +695,23 @@ def append_artifact_summary(
     items: tuple[Mapping[str, object], ...],
     summary: Mapping[str, object],
 ) -> tuple[Mapping[str, object], ...]:
-    """Prepend one parsed artifact summary, bounded to the newest 50."""
+    """Prepend one parsed artifact summary, bounded to the newest 50.
+
+    A lifecycle event for an already-listed captured artifact updates
+    that row's state in place instead of adding a duplicate row; every
+    other summary prepends a new row.
+    """
+    if summary["kind"] == "lifecycle":
+        artifact_id = summary["artifact_id"]
+        for index, item in enumerate(items):
+            if item["kind"] == "captured" and item.get("artifact_id") == artifact_id:
+                merged = dict(item)
+                merged["state"] = summary["state"]
+                merged["viewable"] = summary["viewable"]
+                merged["seq"] = summary["seq"]
+                updated = list(items)
+                updated[index] = MappingProxyType(merged)
+                return tuple(updated)[:_MAX_ARTIFACTS]
     return (summary, *items)[:_MAX_ARTIFACTS]
 
 
