@@ -234,9 +234,49 @@ async def work_status(
     return await _call(runtime, "work_status", workspace_value)
 
 
+@tool
+async def search_houdini_knowledge(
+    query: str,
+    runtime: ToolRuntime,
+    limit: int = 5,
+) -> dict[str, object]:
+    """Search the bounded, read-only Houdini Knowledge Graph cache."""
+    query_value = _valid_text(query, max_len=512)
+    if query_value is None or type(limit) is not int or not 1 <= limit <= 10:
+        return _error("runtime.tool_input_invalid", "knowledge search input is invalid.")
+    return await _call(runtime, "search_houdini_knowledge", query_value, limit)
+
+
+@tool
+async def get_houdini_knowledge(
+    entity_id: str,
+    runtime: ToolRuntime,
+    max_body_bytes: int = 4_000,
+) -> dict[str, object]:
+    """Read one bounded Knowledge Graph entity by logical entity id."""
+    entity_value = _valid_text(entity_id, max_len=256)
+    if (
+        entity_value is None
+        or type(max_body_bytes) is not int
+        or not 1 <= max_body_bytes <= 8_000
+    ):
+        return _error("runtime.tool_input_invalid", "knowledge get input is invalid.")
+    return await _call(
+        runtime, "get_houdini_knowledge", entity_value, max_body_bytes
+    )
+
+
 def build_read_only_tools() -> list[Any]:
     """Return a fresh secure Runtime read-only tool allowlist."""
-    return [scene_status, query_scene, inspect_workspace, geometry_stats, work_status]
+    return [
+        scene_status,
+        query_scene,
+        inspect_workspace,
+        geometry_stats,
+        work_status,
+        search_houdini_knowledge,
+        get_houdini_knowledge,
+    ]
 
 
 __all__ = [
@@ -246,4 +286,6 @@ __all__ = [
     "query_scene",
     "scene_status",
     "work_status",
+    "search_houdini_knowledge",
+    "get_houdini_knowledge",
 ]

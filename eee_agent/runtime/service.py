@@ -91,6 +91,7 @@ from eee_agent.runtime.artifacts import ArtifactStore
 from eee_agent.runtime.checkpoints import CheckpointManager
 from eee_agent.runtime.database import RuntimeDatabase
 from eee_agent.runtime.events import EventStore, ReplayResult
+from eee_agent.runtime.knowledge import KnowledgeRuntime
 from eee_agent.runtime.models import (
     EventRecord,
     RetentionClass,
@@ -175,6 +176,41 @@ class _UnavailableReadOnlyProvider:
 
     async def work_status(self, workspace_id: str):
         return self._result()
+
+    async def search_houdini_knowledge(self, query: str, limit: int):
+        return self._result()
+
+    async def get_houdini_knowledge(self, entity_id: str, max_body_bytes: int):
+        return self._result()
+
+
+class _RuntimeReadOnlyProvider:
+    """Compose the injected live-scene provider with advisory Knowledge."""
+
+    def __init__(self, base: ReadOnlyProvider, knowledge: KnowledgeRuntime) -> None:
+        self._base = base
+        self._knowledge = knowledge
+
+    async def scene_status(self):
+        return await self._base.scene_status()
+
+    async def query_scene(self, node_paths: list[str]):
+        return await self._base.query_scene(node_paths)
+
+    async def inspect_workspace(self, workspace_id: str):
+        return await self._base.inspect_workspace(workspace_id)
+
+    async def geometry_stats(self, node_path: str):
+        return await self._base.geometry_stats(node_path)
+
+    async def work_status(self, workspace_id: str):
+        return await self._base.work_status(workspace_id)
+
+    async def search_houdini_knowledge(self, query: str, limit: int):
+        return self._knowledge.search(query, limit=limit)
+
+    async def get_houdini_knowledge(self, entity_id: str, max_body_bytes: int):
+        return self._knowledge.get(entity_id, max_body_bytes=max_body_bytes)
 
 
 def _checkpoint_cleanup_failed() -> AgentException:
@@ -276,6 +312,7 @@ class RuntimeService:
         workspace_fact_provider: WorkspaceFactProvider | None = None,
         modeling_catalog_provider: Callable[[], NodeCatalog] | None = None,
         read_only_provider: ReadOnlyProvider | None = None,
+        knowledge_runtime: KnowledgeRuntime | None = None,
     ) -> None:
         self._database = database
         self._paths = paths
@@ -299,10 +336,14 @@ class RuntimeService:
         self._checkpoints: CheckpointManager | None = None
         self._runner: object | None = None
         self._modeling_catalog_provider = modeling_catalog_provider
-        self._read_only_provider: ReadOnlyProvider = (
+        base_read_only_provider: ReadOnlyProvider = (
             read_only_provider
             if isinstance(read_only_provider, ReadOnlyProvider)
             else _UnavailableReadOnlyProvider()
+        )
+        self._knowledge = knowledge_runtime or KnowledgeRuntime(paths.knowledge_cache_path)
+        self._read_only_provider: ReadOnlyProvider = _RuntimeReadOnlyProvider(
+            base_read_only_provider, self._knowledge
         )
         self._modeling_validation_provider = (
             changeset_bridge_provider
@@ -345,6 +386,11 @@ class RuntimeService:
         """The configured graceful-shutdown timeout (seconds)."""
         return self._graceful_timeout
 
+    @property
+    def knowledge_status(self):
+        """Current advisory Knowledge cache status for UI/status consumers."""
+        return self._knowledge.status
+
     # ------------------------------------------------------------------
     # lifecycle
     # ------------------------------------------------------------------
@@ -363,6 +409,7 @@ class RuntimeService:
         workspace_fact_provider: WorkspaceFactProvider | None = None,
         modeling_catalog_provider: Callable[[], NodeCatalog] | None = None,
         read_only_provider: ReadOnlyProvider | None = None,
+        knowledge_runtime: KnowledgeRuntime | None = None,
     ) -> AsyncIterator["RuntimeService"]:
         """Open a service in the approved order and close it in reverse.
 
@@ -392,6 +439,7 @@ class RuntimeService:
                 workspace_fact_provider=workspace_fact_provider,
                 modeling_catalog_provider=modeling_catalog_provider,
                 read_only_provider=read_only_provider,
+                knowledge_runtime=knowledge_runtime,
             )
             await service._reconcile()
             checkpoints = CheckpointManager(paths.checkpoints_db)
@@ -588,6 +636,9 @@ class RuntimeService:
         # (one call per start_run). Atomic global acquisition happens inside
         # create_and_acquire.
         model_snapshot = runtime_version_report()
+        # Freeze Knowledge provenance into every Run snapshot.  These fields
+        # are advisory metadata only and never grant scene creatability.
+        model_snapshot.update(self._knowledge.snapshot_fields())
         run = await self._runs.create_and_acquire(
             session_id, user_input, model_snapshot
         )
@@ -707,6 +758,8 @@ class RuntimeService:
 
     async def snapshot(self, session_id: str) -> SessionSnapshot:
         data = await self._events.snapshot_data(session_id)
+        version_report = runtime_version_report()
+        version_report.update(self._knowledge.snapshot_fields())
         return SessionSnapshot(
             session=data.session,
             runs=data.runs,
@@ -714,7 +767,7 @@ class RuntimeService:
             snapshot_seq=data.snapshot_seq,
             has_earlier_runs=data.has_earlier_runs,
             earliest_included_run_id=data.earliest_included_run_id,
-            version_report=runtime_version_report(),
+            version_report=version_report,
         )
 
     def subscribe(self, callback: EventCallback) -> Callable[[], None]:

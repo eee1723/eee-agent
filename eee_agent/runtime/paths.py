@@ -15,6 +15,9 @@ class RuntimePaths:
     discovery_file: Path
     token_file: Path
     artifacts_dir: Path
+    # Shared Knowledge Graph cache is deliberately outside state/session data.
+    # ``None`` preserves compatibility with older explicit test fixtures.
+    knowledge_cache: Path | None = None
 
     @classmethod
     def from_environment(cls) -> "RuntimePaths":
@@ -47,8 +50,14 @@ class RuntimePaths:
             discovery_file=state / "runtime.json",
             token_file=state / "runtime.token",
             artifacts_dir=state / "artifacts",
+            knowledge_cache=home / "knowledge-cache" / "houdini.sqlite",
         )
+
+    @property
+    def knowledge_cache_path(self) -> Path:
+        return self.knowledge_cache or (self.home / "knowledge-cache" / "houdini.sqlite")
 
     def create_used_directories(self) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
+        self.knowledge_cache_path.parent.mkdir(parents=True, exist_ok=True)

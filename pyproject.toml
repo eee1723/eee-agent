@@ -31,3 +31,6 @@ include = ["eee_agent*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+markers = [
+    "houdini_kb: opt-in tests that require a local Houdini Knowledge cache/build",
+]

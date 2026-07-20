@@ -13,6 +13,8 @@ EXPECTED_SECURE_READ_ONLY = {
     "inspect_workspace",
     "geometry_stats",
     "work_status",
+    "search_houdini_knowledge",
+    "get_houdini_knowledge",
 }
 FORBIDDEN = {
     "task",
