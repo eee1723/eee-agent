@@ -4,6 +4,21 @@
 
 **Goal:** 在 `feature/runtime` 上完成 Secure read-only Runtime、Artifact 一致性修复、真实 sensitivity 验证、Knowledge Graph 集成、Runtime MVP、Vision/Evaluation 和最终 GUI/发布门禁。
 
+## 2026-07-20 progress snapshot
+
+- S0-S6 complete: baseline, Secure Runtime/read-only tools, legacy write-path
+  removal, Artifact lifecycle, real Houdini sensitivity, Knowledge integration,
+  boundary hardening and CI gates.
+- S7 offline acceptance complete. Real-provider execution is still `not run`;
+  the runner now requires a strict bounded evidence sidecar.
+- S8 core contracts/router/evaluation/event API implemented, but **not
+  end-to-end complete**: production post-Apply code does not yet invoke
+  `VisionRouter` or produce the delivery event automatically.
+- S9 incomplete: dedicated Vision panel presentation, interactive Houdini GUI
+  checklist, real-provider evidence, release tag and push remain pending.
+- Current transfer and exact verification evidence:
+  `docs/handoffs/2026-07-20-runtime-development-transfer.md`.
+
 **Architecture:** Runtime Agent 只通过受限的 Secure read-only tool adapter 查询 Houdini，通过严格 Brief/Spec 和确定性 compiler 产生 typed ChangeSet；所有写入必须经过 exact approval、single FIFO/main-thread Apply、receipt 和 deterministic validation。Knowledge Graph 作为共享、可重建、可追溯的只读 capability 集成到 Runtime；ArtifactStore 使用可恢复状态机协调 SQLite 元数据与文件系统，避免跨介质 rollback 不一致。
 
 **Tech Stack:** Python 3.11、uv frozen lock、LangChain/Deep Agents、LangGraph、aiosqlite/SQLite、WebSocket Runtime、Houdini 21.0.440 hython、Secure Bridge typed JSON DTO、pytest。

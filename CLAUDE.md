@@ -8,7 +8,7 @@ Runtime Control panel.
 ## Current development handoff
 
 The source of truth is
-`docs/handoffs/2026-07-17-cross-machine-modeling-handoff.md`. The active delivery
+`docs/handoffs/2026-07-20-runtime-development-transfer.md`. The active delivery
 line is `feature/runtime`. The current slice is the production transactional
 parameter-sensitivity Bridge; artifact evidence, richer asset cases,
 vision/evaluation, and final GUI acceptance follow in that order. Offline tests

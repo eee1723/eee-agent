@@ -3,6 +3,10 @@
 Date: 2026-07-20
 Branch: `feature/runtime`
 
+> Handoff status: core contracts/router/event API are implemented, but the
+> router is not yet invoked by the production post-Apply flow. See
+> `2026-07-20-runtime-development-transfer.md`; do not mark Task 8 complete.
+
 ## Delivered
 
 - Strict frozen Vision DTOs reject unknown fields, unsupported media, absolute
@@ -33,6 +37,8 @@ Branch: `feature/runtime`
 - Panel package plus Runtime process restart/replay suite: **15 passed**.
 - Ruff, focused Mypy, compileall, `uv lock --check`, and `git diff --check`
   passed.
+- After the final evidence/CI hardening commit, the combined MVP + Vision
+  focused suite is **30 passed**; the full frozen suite must be rerun.
 
 ## Gate status
 
@@ -65,5 +71,7 @@ known. Restart Houdini before treating any manual GUI result as current.
   be selected only if the product needs a distinct UI state.
 - The Houdini panel currently records the durable Vision event in the generic
   event/replay stream but has no dedicated normalized Vision report view.
+- `VisionRouter` is not yet called from the production post-Apply
+  validation/capture path; this is the current P1 implementation blocker.
 - GUI acceptance, real provider evidence, release tag and pushing the Runtime
   branch remain intentionally incomplete.

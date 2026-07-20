@@ -44,15 +44,15 @@ python tests/runtime/runtime_mvp_provider_e2e.py
 ```
 
 The adapter command must execute the real proposal → approval → Apply/receipt
-→ validation/artifact → replay → cleanup journey. The harness treats a zero
-adapter exit code as an adapter-trust-boundary signal; it does not inspect
-provider output or infer those evidence fields. The adapter is responsible for
-failing unless its own bounded evidence checks pass. The harness supplies a
-disposable `EEE_RUNTIME_HOME`, passes the detected HFS path as
-`EEE_RUNTIME_MVP_HFS`, captures (and discards) stdout/stderr, enforces a
-bounded timeout, and prints only a small status record.  Missing opt-in, HFS,
-credentials, or command returns `{"status":"not_run", ...}`.  A non-zero
-adapter exit is a failed journey, not a pass.
+→ validation/artifact → replay → cleanup journey. The harness supplies a
+disposable `EEE_RUNTIME_HOME`, `EEE_RUNTIME_MVP_HIP_PATH`, detected HFS path,
+and `EEE_RUNTIME_MVP_EVIDENCE_PATH`. A zero exit is insufficient: the adapter
+must write a <=16 KiB exact-schema JSON sidecar proving proposal digest,
+approval, receipt, validation, available artifact, replay sequence and scene
+cleanup. Missing/extra/malformed evidence fails the journey. Provider
+stdout/stderr is discarded, the process has a bounded timeout, and only a small
+status record is printed. Missing opt-in, HFS, credentials, or command returns
+`{"status":"not_run", ...}`.
 
 ## Remaining follow-ups
 

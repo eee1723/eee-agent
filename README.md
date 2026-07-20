@@ -6,8 +6,8 @@ geometry back, validates, self-corrects, and exports — exposing tunables as
 parms so a model can be reshaped without rebuilding.
 
 > **Read first each session:** `CLAUDE.md` (full context + gotchas) and the
-> current cross-computer handoff,
-> `docs/handoffs/2026-07-17-cross-machine-modeling-handoff.md`. This README is the
+> current development transfer,
+> `docs/handoffs/2026-07-20-runtime-development-transfer.md`. This README is the
 > orientation map; older handoffs retain milestone history.
 
 ## Architecture (three processes, deps isolated)
