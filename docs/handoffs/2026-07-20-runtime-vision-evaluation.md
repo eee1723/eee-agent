@@ -60,11 +60,6 @@ known. Restart Houdini before treating any manual GUI result as current.
 
 ## Remaining risks
 
-- A directly constructed `DeliveryEvaluation` can contain an `ArtifactRef`
-  whose relative path or declared size exceeds the Vision request budget.
-  Runtime-generated artifact refs remain bounded by ArtifactStore and the
-  event payload cap; align the delivery DTO with the request limits before
-  accepting external evaluation records.
 - Provider execution failures currently use `VisionStatus.UNAVAILABLE` with a
   specific `vision.provider_failed` reason. The unused `FAILED` status should
   be selected only if the product needs a distinct UI state.
