@@ -3,9 +3,10 @@
 Date: 2026-07-20
 Branch: `feature/runtime`
 
-> Handoff status: core contracts/router/event API are implemented, but the
-> router is not yet invoked by the production post-Apply flow. See
-> `2026-07-20-runtime-development-transfer.md`; do not mark Task 8 complete.
+> Handoff status: the router is now wired into the production post-Apply flow
+> (see `2026-07-20-runtime-development-transfer.md`, "Resolved blocker"). The
+> remaining Vision gates are the real provider journey and dedicated panel
+> rendering, both S9.
 
 ## Delivered
 
@@ -71,7 +72,7 @@ known. Restart Houdini before treating any manual GUI result as current.
   be selected only if the product needs a distinct UI state.
 - The Houdini panel currently records the durable Vision event in the generic
   event/replay stream but has no dedicated normalized Vision report view.
-- `VisionRouter` is not yet called from the production post-Apply
-  validation/capture path; this is the current P1 implementation blocker.
+- `VisionRouter` is invoked from the production post-Apply validation/capture
+  path since 2026-07-20; delivery evidence is durable and replayable.
 - GUI acceptance, real provider evidence, release tag and pushing the Runtime
   branch remain intentionally incomplete.

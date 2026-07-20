@@ -40,6 +40,7 @@ from eee_agent.runtime.paths import RuntimePaths
 from eee_agent.runtime.protocol import PROTOCOL
 from eee_agent.runtime.server import RuntimeWebSocketServer
 from eee_agent.runtime.service import RuntimeService
+from eee_agent.vision.router import VisionProvider
 
 # The first implementation binds 127.0.0.1 exclusively (spec §3.3).
 _DEFAULT_HOST = "127.0.0.1"
@@ -178,6 +179,18 @@ async def _serve_until_shutdown(
         cleanup_identity_files(identity, state_dir)
 
 
+def _vision_provider() -> VisionProvider | None:
+    """Production advisory Vision provider seam.
+
+    No visual provider has passed the real-provider credential/journey gate
+    yet, so production wires ``None``: the router then records truthful
+    ``vision.provider_unavailable`` evidence for every captured delivery. The
+    approved provider adapter plugs in here; provider SDKs and credentials
+    must never be imported into Houdini-side modules.
+    """
+    return None
+
+
 async def async_main(argv: Sequence[str] | None = None) -> int:
     """Run the Runtime lifecycle until shutdown, then release every resource.
 
@@ -215,6 +228,7 @@ async def async_main(argv: Sequence[str] | None = None) -> int:
             changeset_bridge_provider=changeset_bridge_provider,
             workspace_fact_provider=workspace_fact_provider,
             modeling_catalog_provider=houdini_21_minimal_catalog,
+            vision_provider=_vision_provider(),
         ) as service:
             server = RuntimeWebSocketServer(
                 service, identity, host=args.host, port=args.port

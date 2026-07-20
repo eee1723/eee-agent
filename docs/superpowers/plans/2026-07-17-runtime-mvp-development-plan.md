@@ -11,9 +11,10 @@
   boundary hardening and CI gates.
 - S7 offline acceptance complete. Real-provider execution is still `not run`;
   the runner now requires a strict bounded evidence sidecar.
-- S8 core contracts/router/evaluation/event API implemented, but **not
-  end-to-end complete**: production post-Apply code does not yet invoke
-  `VisionRouter` or produce the delivery event automatically.
+- S8 offline complete: Vision contracts/router/evaluation are wired into the
+  production post-Apply flow; captured artifacts flow as exact ArtifactStore
+  bytes through `VisionRouter` into a durable `vision.evaluation_completed`
+  delivery record. Real-provider execution is still `not run`.
 - S9 incomplete: dedicated Vision panel presentation, interactive Houdini GUI
   checklist, real-provider evidence, release tag and push remain pending.
 - Current transfer and exact verification evidence:

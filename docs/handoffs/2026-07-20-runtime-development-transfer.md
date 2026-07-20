@@ -40,7 +40,7 @@ and execution plan first:
 | S5 | complete | Read-only Knowledge cache integrated with strict status/snapshot metadata. |
 | S6 | complete | Input/DTO hardening and Windows frozen/static/HFS CI workflow added. |
 | S7 | offline complete | Deterministic MVP acceptance plus strict provider evidence harness. |
-| S8 | core APIs complete | Vision DTO/router/evaluation and durable event API implemented. |
+| S8 | offline complete | Vision wired into the production post-Apply flow; real provider journey is an S9 gate. |
 | S9 | incomplete | GUI/manual provider/release gates remain open. |
 
 Key recent commits:
@@ -91,33 +91,50 @@ The next developer must rerun the full frozen suite after `525e727`; the latest
 complete full-suite evidence predates that commit, although its focused/static
 gates pass.
 
-## Open blocker
+## Resolved blocker
 
-### P1: Vision is not wired into the production Apply flow
+### P1 (closed 2026-07-20): Vision is wired into the production Apply flow
 
-`VisionRouter` and `RuntimeService.record_vision_evaluation()` are tested, but
-production code does not construct/call the router. After a real Apply,
-`RuntimeService._validate_applied_changeset()` performs deterministic
-validation/capture and stops without a Vision evaluation. Therefore Task 8 is
-not end-to-end complete.
+The wiring change sits in the working tree on top of `1e52d7a` (service,
+`__main__`, new delivery tests and these doc updates); commit it as its own
+change before any tag or push.
 
-Implement in this order:
+The production wiring from the original six-step order is implemented:
 
-1. Add an optional typed `VisionProvider`/router seam to
-   `RuntimeService.__init__()` and `RuntimeService.open()`.
-2. Pass the seam from `eee_agent/runtime/__main__.py`; do not import provider
-   credentials or provider SDKs into Houdini.
-3. After a successful ArtifactStore capture and deterministic validation,
-   construct `VisionRequest` from the stored `ArtifactRef`, invoke
-   `VisionRouter`, and create a semantically consistent `DeliveryEvaluation`.
-4. Persist it with `record_vision_evaluation()` after the deterministic
-   validation event. Advisory/provider failure must never replay or undo Apply.
-5. Add a production-flow test proving capture -> exact ArtifactStore bytes ->
-   Vision -> durable replayed `vision.evaluation_completed`.
-6. Keep deterministic failure precedence: Vision cannot turn a failed
-   deterministic report into `accepted=true`.
+1. `RuntimeService.__init__()` and `RuntimeService.open()` accept an optional
+   typed `vision_provider` seam and always construct a `VisionRouter` over the
+   service `ArtifactStore`.
+2. `eee_agent/runtime/__main__.py` injects the seam via `_vision_provider()`
+   (currently `None` until the real-provider gate; no provider SDK or
+   credential is imported into Houdini-side modules).
+3. After a successful ArtifactStore capture and the durable deterministic
+   validation event, `RuntimeService._record_delivery_evaluation()` builds a
+   `VisionRequest` from the registered `ArtifactRef` (never the Bridge source
+   path), invokes `VisionRouter`, and persists a semantically consistent
+   `DeliveryEvaluation` with `record_vision_evaluation()`.
+4. Advisory/provider failure is recorded as bounded unavailable evidence and
+   never replays, undoes, or fails the durable Apply.
+5. `tests/runtime/test_vision_delivery.py` proves capture -> exact
+   ArtifactStore bytes -> Vision -> durable replayed
+   `vision.evaluation_completed`, plus deterministic failure precedence,
+   provider failure isolation, and no event without a registered capture.
+6. Deterministic failure precedence holds: a failed deterministic report can
+   never become `accepted=true`.
 
-Do not mark S8 complete solely because the isolated router/service tests pass.
+Verification after the wiring:
+
+```text
+Full frozen suite: 2859 passed, 11 skipped in 155.06s
+Vision focused (contracts/router/delivery): 26 passed
+Affected Apply/MVP/e2e/panel suites: 165 passed
+Ruff Runtime + Vision: passed
+Mypy selected Runtime boundaries + all Vision: passed
+compileall / uv lock --check / git diff --check: passed
+```
+
+Remaining open gates are unchanged and all belong to S9: real provider
+journey, dedicated Vision panel rendering, the interactive GUI checklist, the
+RC tag and the push.
 
 ## Recently closed audit findings
 

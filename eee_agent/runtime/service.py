@@ -68,7 +68,9 @@ from eee_agent.modeling.catalog import houdini_21_minimal_quality_profile
 from eee_agent.modeling.bootstrap import derive_bootstrap_manifest
 from eee_agent.modeling.compiler import NodeCatalog, WorkspaceBootstrapContext
 from eee_agent.modeling.contracts import ValidatorKind
+from eee_agent.vision.contracts import VisionRequest
 from eee_agent.vision.evaluation import DeliveryEvaluation
+from eee_agent.vision.router import VisionProvider, VisionRouter
 from eee_agent.modeling.proposal import (
     ModelingProposalContext,
     ModelingProposalCoordinator,
@@ -243,6 +245,31 @@ def _artifact_cleanup_failed() -> AgentException:
     )
 
 
+_VISION_MEDIA_TYPES = frozenset({"image/png", "image/jpeg", "image/webp"})
+
+# Advisory Vision instruction prefix; the run brief is appended and the
+# whole instruction is truncated to the strict VisionRequest budget.
+_VISION_INSTRUCTION_PREFIX = (
+    "Advisory visual evaluation of the post-Apply viewport capture. "
+    "Assess whether the rendered result visibly matches the approved change. "
+    "User brief: "
+)
+
+
+def _vision_instruction(brief: str) -> str:
+    return (_VISION_INSTRUCTION_PREFIX + brief)[:4096]
+
+
+def _changeset_delivery_spec(changeset: ChangeSet) -> str:
+    """Bounded human-readable summary of the approved ChangeSet."""
+    risk = changeset.risk_summary
+    effects = ",".join(risk.effect_names) or "none"
+    targets = ",".join(risk.affected_paths) or "none"
+    return (
+        f"operations={risk.operation_count}; effects={effects}; targets={targets}"
+    )[:4096]
+
+
 async def _run_uncancelled(coro: Awaitable[object]) -> object:
     """Run ``coro`` to completion, deferring cancellation of this task.
 
@@ -315,6 +342,7 @@ class RuntimeService:
         modeling_catalog_provider: Callable[[], NodeCatalog] | None = None,
         read_only_provider: ReadOnlyProvider | None = None,
         knowledge_runtime: KnowledgeRuntime | None = None,
+        vision_provider: VisionProvider | None = None,
     ) -> None:
         self._database = database
         self._paths = paths
@@ -382,6 +410,11 @@ class RuntimeService:
                 else workspace_fact_provider
             ),
         )
+        self._changeset_repository = changeset_repository
+        # Advisory Vision seam. The router resolves only ArtifactStore-
+        # registered refs and hands providers the exact verified bytes; with
+        # no provider it still records truthful unavailable evidence.
+        self._vision_router = VisionRouter(self._artifacts, vision_provider)
 
     @property
     def graceful_timeout(self) -> float:
@@ -412,6 +445,7 @@ class RuntimeService:
         modeling_catalog_provider: Callable[[], NodeCatalog] | None = None,
         read_only_provider: ReadOnlyProvider | None = None,
         knowledge_runtime: KnowledgeRuntime | None = None,
+        vision_provider: VisionProvider | None = None,
     ) -> AsyncIterator["RuntimeService"]:
         """Open a service in the approved order and close it in reverse.
 
@@ -442,6 +476,7 @@ class RuntimeService:
                 modeling_catalog_provider=modeling_catalog_provider,
                 read_only_provider=read_only_provider,
                 knowledge_runtime=knowledge_runtime,
+                vision_provider=vision_provider,
             )
             await service._reconcile()
             checkpoints = CheckpointManager(paths.checkpoints_db)
@@ -822,6 +857,8 @@ class RuntimeService:
         if provider is None or not result.receipt.is_success:
             return
         event_type = "modeling.validation_completed"
+        capture: tuple[ArtifactRef, CaptureFramingReport] | None = None
+        validator_results: list[ValidatorResult] = []
         try:
             query = await provider.inspect_geometry(result.changeset)
             validator_results = list(
@@ -927,6 +964,84 @@ class RuntimeService:
             payload,
             RetentionClass.DURABLE,
         )
+        validation_report = tuple(
+            f"{item.validator.value}:{item.status.value}:{item.code}"
+            for item in validator_results
+        )
+        if event_type == "modeling.validation_unavailable":
+            validation_report = validation_report + (
+                f"validation:unavailable:{payload['code']}",
+            )
+        await self._record_delivery_evaluation(
+            result,
+            capture=capture,
+            deterministic_valid=bool(payload["complete"]),
+            validation_report=validation_report,
+        )
+
+    async def _record_delivery_evaluation(
+        self,
+        result: ApplyCompletionResult,
+        *,
+        capture: tuple[ArtifactRef, CaptureFramingReport] | None,
+        deterministic_valid: bool,
+        validation_report: tuple[str, ...],
+    ) -> None:
+        """Record advisory Vision evidence over the registered capture.
+
+        Runs only after the deterministic validation event is durable and
+        only over the ArtifactStore-registered capture (never the Bridge
+        source path). Expected provider/artifact failures are already
+        bounded unavailable evidence inside the router outcome; any
+        unexpected error is swallowed so advisory evaluation can never
+        replay, undo, or fail the already-durable Apply.
+        """
+        if capture is None:
+            return
+        artifact, _framing = capture
+        if artifact.media_type not in _VISION_MEDIA_TYPES:
+            return
+        changeset = result.changeset
+        try:
+            run = await self._runs.get(changeset.run_id)
+            approval = await self._changeset_repository.get_approval(
+                changeset.change_id
+            )
+            outcome = await self._vision_router.evaluate(
+                VisionRequest(
+                    request_id=f"vision-{changeset.change_id}",
+                    artifact=artifact,
+                    instruction=_vision_instruction(run.user_input),
+                ),
+                deterministic_valid=deterministic_valid,
+            )
+            evaluation = DeliveryEvaluation(
+                brief=run.user_input[:4096],
+                spec=_changeset_delivery_spec(changeset),
+                changeset_digest=changeset.digest,
+                approval=(
+                    f"{approval.decision.value}:"
+                    f"{approval.decided_by}:{approval.approval_id}"
+                ),
+                receipt=(
+                    f"{result.receipt.status.value}:"
+                    f"{result.receipt.after_revision}"
+                ),
+                validation_report=validation_report,
+                artifact_refs=(artifact,),
+                artifact_status=("available",),
+                knowledge_manifest_sha256=self._knowledge.status.manifest_sha256,
+                vision_status=outcome.decision.status,
+                vision_report=outcome.report,
+                final_decision=outcome.decision,
+                recovery_evidence=(),
+            )
+            await self.record_vision_evaluation(
+                changeset.session_id, changeset.run_id, evaluation
+            )
+        except Exception:  # noqa: BLE001 - Apply is already durable
+            return
+
 
     async def _sensitivity_sample_plan(
         self, changeset: ChangeSet
