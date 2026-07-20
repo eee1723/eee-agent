@@ -80,10 +80,12 @@ from eee_agent.houdini_bridge.workspaces import (
     parse_workspace_inspect_request,
 )
 from eee_agent.houdini_bridge.queue import (
+    AwaitSignal,
     MainThreadReadQueue,
     QueueItemCancelled,
     QueueItemExpired,
     QueueRejected,
+    await_with_signal,
 )
 
 _HIP_UNSAVED_SENTINEL = "untitled"
@@ -687,7 +689,7 @@ class BridgeServer:
                         ),
                     )
                     return
-                response = await self._serve(frame)
+                response = await self._serve(frame, reader=reader)
                 await self._send(writer, response)
         finally:
             self._safe_close(writer)
@@ -720,7 +722,9 @@ class BridgeServer:
             return False
         return validate_bridge_token(self._identity, obj.get("token"))
 
-    async def _serve(self, frame_bytes: bytes) -> bytes:
+    async def _serve(
+        self, frame_bytes: bytes, *, reader: object | None = None
+    ) -> bytes:
         """Strict typed dispatch: route one request frame to its typed handler.
 
         Accepted operations are ``scene.query``, ``workspace.inspect``, the
@@ -741,7 +745,7 @@ class BridgeServer:
             )
         operation = obj.get("operation")
         if operation == "scene.query":
-            return await self._serve_scene_query(frame_bytes)
+            return await self._serve_scene_query(frame_bytes, reader=reader)
         if operation == WORKSPACE_INSPECT_OPERATION:
             if WORKSPACE_V1 not in self._capabilities:
                 request_id = obj.get("request_id")
@@ -753,7 +757,7 @@ class BridgeServer:
                     category="capability",
                     message_for_user="The bridge does not support workspace inspection.",
                 )
-            return await self._serve_workspace_inspect(frame_bytes)
+            return await self._serve_workspace_inspect(frame_bytes, reader=reader)
         if operation == "changeset.preflight":
             # Admission: an old server that does not advertise changeset.v1 must
             # fail closed for preflight BEFORE any HOM access or payload parsing.
@@ -767,7 +771,7 @@ class BridgeServer:
                     category="capability",
                     message_for_user="The bridge does not support changeset preflight.",
                 )
-            return await self._serve_preflight(frame_bytes)
+            return await self._serve_preflight(frame_bytes, reader=reader)
         if operation == APPLY_OPERATION:
             if CHANGESET_V1 not in self._capabilities:
                 request_id = obj.get("request_id")
@@ -779,7 +783,7 @@ class BridgeServer:
                     category="capability",
                     message_for_user="The bridge does not support changeset apply.",
                 )
-            return await self._serve_apply(frame_bytes)
+            return await self._serve_apply(frame_bytes, reader=reader)
         if operation == RECEIPT_OPERATION:
             if CHANGESET_V1 not in self._capabilities:
                 request_id = obj.get("request_id")
@@ -791,7 +795,7 @@ class BridgeServer:
                     category="capability",
                     message_for_user="The bridge does not support changeset receipt queries.",
                 )
-            return await self._serve_receipt(frame_bytes)
+            return await self._serve_receipt(frame_bytes, reader=reader)
         if operation == SAMPLE_OPERATION:
             # Admission: a server that does not advertise sensitivity.v1 must
             # fail closed BEFORE any HOM access or payload parsing.
@@ -805,7 +809,7 @@ class BridgeServer:
                     category="capability",
                     message_for_user="The bridge does not support sensitivity sampling.",
                 )
-            return await self._serve_sample_sensitivity(frame_bytes)
+            return await self._serve_sample_sensitivity(frame_bytes, reader=reader)
         if operation == CAPTURE_OPERATION:
             # Admission: a server that does not advertise capture.v1 must
             # fail closed BEFORE any HOM access or payload parsing.
@@ -819,7 +823,7 @@ class BridgeServer:
                     category="capability",
                     message_for_user="The bridge does not support artifact capture.",
                 )
-            return await self._serve_capture(frame_bytes)
+            return await self._serve_capture(frame_bytes, reader=reader)
         request_id = obj.get("request_id")
         request_id = obj.get("request_id")
         if type(request_id) is not str:
@@ -831,7 +835,9 @@ class BridgeServer:
             message_for_user="The bridge operation is not supported.",
         )
 
-    async def _serve_scene_query(self, frame_bytes: bytes) -> bytes:
+    async def _serve_scene_query(
+        self, frame_bytes: bytes, *, reader: object | None = None
+    ) -> bytes:
         """Parse + queue a scene.query request; return the response envelope bytes."""
         try:
             request = parse_request(frame_bytes)
@@ -857,7 +863,9 @@ class BridgeServer:
                 expected_scene_epoch=expected_scene_epoch,
             )
 
-        result = await self._run_on_queue(request_id, request.deadline_ms, operation)
+        result = await self._run_on_queue(
+            request_id, request.deadline_ms, operation, reader=reader
+        )
         if isinstance(result, _QueuedError):
             return self._error_envelope(
                 request_id,
@@ -869,7 +877,9 @@ class BridgeServer:
         response = BridgeResponse(request_id=request_id, result=result, error=None)
         return response.to_json().encode("utf-8")
 
-    async def _serve_workspace_inspect(self, frame_bytes: bytes) -> bytes:
+    async def _serve_workspace_inspect(
+        self, frame_bytes: bytes, *, reader: object | None = None
+    ) -> bytes:
         """Parse and serialize one read-only workspace inspection on the FIFO."""
         try:
             request = parse_workspace_inspect_request(frame_bytes)
@@ -886,7 +896,7 @@ class BridgeServer:
             return self._workspace_inspector.inspect(request)  # type: ignore[union-attr]
 
         result = await self._run_on_queue(
-            request_id, request.deadline_ms, operation
+            request_id, request.deadline_ms, operation, reader=reader
         )
         if isinstance(result, _QueuedError):
             return self._error_envelope(
@@ -903,7 +913,9 @@ class BridgeServer:
         )
         return response.to_json().encode("utf-8")
 
-    async def _serve_preflight(self, frame_bytes: bytes) -> bytes:
+    async def _serve_preflight(
+        self, frame_bytes: bytes, *, reader: object | None = None
+    ) -> bytes:
         """Parse + queue a changeset.preflight request; return the response bytes.
 
         Parsing validates the full canonical ChangeSet, its digest, manifest
@@ -926,7 +938,9 @@ class BridgeServer:
         def operation() -> object:
             return self._preflight.preflight(preflight_request)  # type: ignore[union-attr]
 
-        result = await self._run_on_queue(request_id, request.deadline_ms, operation)
+        result = await self._run_on_queue(
+            request_id, request.deadline_ms, operation, reader=reader
+        )
         if isinstance(result, _QueuedError):
             return self._error_envelope(
                 request_id,
@@ -938,7 +952,9 @@ class BridgeServer:
         response = PreflightResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
         return response.to_json().encode("utf-8")
 
-    async def _serve_apply(self, frame_bytes: bytes) -> bytes:
+    async def _serve_apply(
+        self, frame_bytes: bytes, *, reader: object | None = None
+    ) -> bytes:
         """Parse + queue a ``changeset.apply`` request; return the receipt bytes.
 
         Admission checks the advertised capability and the write-freeze state
@@ -973,7 +989,9 @@ class BridgeServer:
         def operation() -> object:
             return self._executor.apply(apply_request)  # type: ignore[union-attr]
 
-        result = await self._run_on_queue(request_id, request.deadline_ms, operation)
+        result = await self._run_on_queue(
+            request_id, request.deadline_ms, operation, reader=reader
+        )
         if isinstance(result, _QueuedError):
             return self._error_envelope(
                 request_id,
@@ -985,7 +1003,9 @@ class BridgeServer:
         response = ApplyResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
         return response.to_json().encode("utf-8")
 
-    async def _serve_receipt(self, frame_bytes: bytes) -> bytes:
+    async def _serve_receipt(
+        self, frame_bytes: bytes, *, reader: object | None = None
+    ) -> bytes:
         """Parse + queue a ``changeset.receipt`` request; return the receipt bytes.
 
         A receipt query only reads the process-local receipt cache; it never
@@ -1012,7 +1032,9 @@ class BridgeServer:
                 scene_epoch=receipt_request.scene_epoch,
             )
 
-        result = await self._run_on_queue(request_id, request.deadline_ms, operation)
+        result = await self._run_on_queue(
+            request_id, request.deadline_ms, operation, reader=reader
+        )
         if isinstance(result, _QueuedError):
             return self._error_envelope(
                 request_id,
@@ -1032,7 +1054,9 @@ class BridgeServer:
         response = ReceiptResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
         return response.to_json().encode("utf-8")
 
-    async def _serve_sample_sensitivity(self, frame_bytes: bytes) -> bytes:
+    async def _serve_sample_sensitivity(
+        self, frame_bytes: bytes, *, reader: object | None = None
+    ) -> bytes:
         """Parse + queue a ``sensitivity.sample`` request; return evidence bytes.
 
         Admission checks the advertised capability and the write-freeze state
@@ -1069,7 +1093,9 @@ class BridgeServer:
         def operation() -> object:
             return self._executor.sample_sensitivity(sample_request)  # type: ignore[union-attr]
 
-        result = await self._run_on_queue(request_id, request.deadline_ms, operation)
+        result = await self._run_on_queue(
+            request_id, request.deadline_ms, operation, reader=reader
+        )
         if isinstance(result, _QueuedError):
             return self._error_envelope(
                 request_id,
@@ -1081,7 +1107,9 @@ class BridgeServer:
         response = SensitivitySampleResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
         return response.to_json().encode("utf-8")
 
-    async def _serve_capture(self, frame_bytes: bytes) -> bytes:
+    async def _serve_capture(
+        self, frame_bytes: bytes, *, reader: object | None = None
+    ) -> bytes:
         """Parse + queue a ``capture.capture`` request; return reference bytes.
 
         Admission checks the advertised capability BEFORE the main-thread
@@ -1110,7 +1138,9 @@ class BridgeServer:
         def operation() -> object:
             return self._executor.capture(capture_request)  # type: ignore[union-attr]
 
-        result = await self._run_on_queue(request_id, request.deadline_ms, operation)
+        result = await self._run_on_queue(
+            request_id, request.deadline_ms, operation, reader=reader
+        )
         if isinstance(result, _QueuedError):
             return self._error_envelope(
                 request_id,
@@ -1127,6 +1157,7 @@ class BridgeServer:
         request_id: str,
         deadline_ms: int,
         operation: "Callable[[], object]",
+        reader: object | None = None,
     ) -> object:
         """Submit one operation to the shared FIFO and map queue failures.
 
@@ -1138,7 +1169,9 @@ class BridgeServer:
             future = self._queue.submit(
                 request_id, operation, deadline_monotonic=deadline_monotonic
             )
-            return await future  # type: ignore[func-returns-value]
+            return await self._await_queued(  # type: ignore[func-returns-value]
+                reader, future, request_id
+            )
         except HoudiniAdapterError as exc:
             return _QueuedError(
                 exc.code, exc.category, exc.message_for_user, exc.retryable
@@ -1175,6 +1208,33 @@ class BridgeServer:
                 "The bridge encountered an internal failure.",
                 False,
             )
+
+    async def _await_queued(
+        self, reader: object | None, future: object, request_id: str
+    ) -> object:
+        """Await the queued result, cancelling it if the client goes away.
+
+        The wait is polled through :func:`await_with_signal` (no tasks,
+        no threads, no ``asyncio`` import in this module): between short
+        timer slices a proactively delivered transport EOF is visible
+        through ``reader.at_eof()`` and the queued item is cancelled, so
+        main-thread HOM work is never spent on a dead client. A queued
+        item is removed without running; a running item finishes but its
+        result is discarded (the Runtime recovers through the durable
+        receipt path). No inbound byte is ever consumed, so sequential
+        request/response traffic is unaffected. A reader without EOF
+        introspection falls back to the plain await.
+        """
+        at_eof = getattr(reader, "at_eof", None)
+        if reader is None or not callable(at_eof):
+            return await future
+        outcome = await await_with_signal(future, at_eof)
+        if outcome is AwaitSignal.SIGNALLED:
+            # The client is gone; cancel resolves the queue future as
+            # QueueItemCancelled, which the plain await below observes.
+            self._queue.cancel(request_id)
+        return await future
+
 
     # -- framed transport (reader/writer only; no asyncio import) ------------
 

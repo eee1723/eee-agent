@@ -1287,3 +1287,66 @@ def test_all_typed_server_handlers_submit_through_the_same_queue_helper() -> Non
     )
     for handler in handlers:
         assert "_run_on_queue" in inspect.getsource(handler)
+
+
+# ==========================================================================
+# A client disconnect cancels its queued request
+# ==========================================================================
+
+
+@async_test
+async def test_client_disconnect_cancels_queued_request(tmp_path: Path) -> None:
+    node = _geo_node()
+    adapter, _hou = _make_adapter(selected=[node])
+    harness = _Harness()
+    port = await harness.start(tmp_path, adapter=adapter, pump=False)
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        await _send_raw(
+            writer,
+            {"protocol": PROTOCOL, "kind": "hello", "token": harness.identity.token},
+        )
+        await _read_frame(reader)  # ack
+        request = _make_request("req_disconnect_queued", deadline_ms=30_000)
+        writer.write(_frame(request.to_json().encode("utf-8")))
+        await writer.drain()
+        # The request is accepted onto the shared FIFO but never pumped.
+        assert harness.queue is not None
+        for _ in range(200):
+            if harness.queue.pending_count == 1:
+                break
+            await asyncio.sleep(0.005)
+        assert harness.queue.pending_count == 1
+        # The client goes away without waiting for the response.
+        writer.close()
+        await writer.wait_closed()
+        # The socket-disconnect binding cancels the queued request...
+        for _ in range(400):
+            if harness.queue.pending_count == 0:
+                break
+            await asyncio.sleep(0.005)
+        assert harness.queue.pending_count == 0
+        # ...so no main-thread HOM read ever runs for the dead client.
+        assert harness.queue.pump_one() is False
+    finally:
+        await harness.stop()
+
+
+@async_test
+async def test_normal_request_response_survives_disconnect_watch(tmp_path: Path) -> None:
+    # The watchdog must not consume bytes or cancel healthy sequential traffic.
+    node = _geo_node(points=8, prims=6)
+    adapter, _hou = _make_adapter(selected=[node])
+    harness = _Harness()
+    await harness.start(tmp_path, adapter=adapter)
+    try:
+        client = BridgeClient.from_state_dir(tmp_path)
+        await client.open()
+        first = await client.request(_make_request("req_watch_1"))
+        second = await client.request(_make_request("req_watch_2"))
+        assert isinstance(first, SceneQueryResult)
+        assert isinstance(second, SceneQueryResult)
+        assert second.selected_nodes[0].path == "/obj/geo1"
+        await client.close()
+    finally:
+        await harness.stop()

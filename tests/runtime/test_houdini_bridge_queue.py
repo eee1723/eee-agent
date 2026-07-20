@@ -23,6 +23,7 @@ from eee_agent.houdini_bridge.contracts import (
     SelectedNode,
 )
 from eee_agent.houdini_bridge.queue import (
+    AwaitSignal,
     MainThreadReadQueue,
     QueueFull,
     QueueItem,
@@ -30,6 +31,7 @@ from eee_agent.houdini_bridge.queue import (
     QueueItemExpired,
     QueueItemState,
     QueueRejected,
+    await_with_signal,
 )
 from houdini_side.secure_bridge import (
     HoudiniAdapterError,
@@ -1066,3 +1068,38 @@ async def test_single_fifo_serves_mixed_operation_types() -> None:
     assert [await future for future in futures] == list(names)
     # Only one item is ever running at a time on the single pump thread.
     assert queue.pending_count == 0
+
+
+# --- await_with_signal -------------------------------------------------
+
+
+@async_test
+async def test_await_with_signal_completes_with_future() -> None:
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    loop.call_later(0.01, future.set_result, "ok")
+    outcome = await await_with_signal(future, lambda: False, interval=0.05)
+    assert outcome is AwaitSignal.COMPLETED
+    assert future.result() == "ok"
+
+
+@async_test
+async def test_await_with_signal_fires_without_settling_future() -> None:
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    flag = {"set": False}
+    loop.call_later(0.02, lambda: flag.__setitem__("set", True))
+    outcome = await await_with_signal(future, lambda: flag["set"], interval=0.01)
+    assert outcome is AwaitSignal.SIGNALLED
+    assert not future.done()
+    future.cancel()
+
+
+@async_test
+async def test_await_with_signal_validates_inputs() -> None:
+    future = asyncio.get_running_loop().create_future()
+    with pytest.raises(ValueError):
+        await await_with_signal(future, lambda: False, interval=0.0)
+    with pytest.raises(TypeError):
+        await await_with_signal(future, "not-callable", interval=0.05)  # type: ignore[arg-type]
+    future.cancel()

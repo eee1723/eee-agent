@@ -113,6 +113,56 @@ class _Entry:
         self.discard = False
 
 
+class AwaitSignal(StrEnum):
+    """Outcome of :func:`await_with_signal`."""
+
+    COMPLETED = "completed"
+    SIGNALLED = "signalled"
+
+
+async def await_with_signal(
+    future: Awaitable[object],
+    signal: Callable[[], bool],
+    *,
+    interval: float = 0.05,
+) -> AwaitSignal:
+    """Await ``future``, polling ``signal`` between short timer slices.
+
+    Creates no task and no thread: each slice resolves one local future
+    on the running loop, woken either by the watched future's done
+    callback or by a ``call_later`` timer. Returns ``COMPLETED`` once the
+    future is done (the caller reads its result or exception) or
+    ``SIGNALLED`` when ``signal()`` first returns True (the future stays
+    pending for the caller to settle).
+    """
+    if type(interval) is not float or not 0.005 <= interval <= 5.0:
+        raise ValueError("interval is invalid")
+    if not callable(signal):
+        raise TypeError("signal must be callable")
+    loop = asyncio.get_running_loop()
+    while True:
+        if future.done():  # type: ignore[union-attr]
+            return AwaitSignal.COMPLETED
+        race = loop.create_future()
+
+        def _wake(_: object = None) -> None:
+            if not race.done():
+                race.set_result(None)
+
+        timer = loop.call_later(interval, _wake)
+        future.add_done_callback(_wake)  # type: ignore[union-attr]
+        try:
+            await race
+        finally:
+            timer.cancel()
+            future.remove_done_callback(_wake)  # type: ignore[union-attr]
+        if future.done():  # type: ignore[union-attr]
+            return AwaitSignal.COMPLETED
+        if signal():
+            return AwaitSignal.SIGNALLED
+
+
+
 class MainThreadReadQueue:
     """A bounded FIFO queue drained explicitly by the owning (main) thread."""
 

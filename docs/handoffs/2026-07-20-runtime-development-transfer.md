@@ -181,9 +181,14 @@ Still required:
 
 - `VisionStatus.FAILED` is not used; provider execution failures currently use
   `UNAVAILABLE` plus `vision.provider_failed`.
-- Production Secure Bridge disconnect is not yet proven to automatically call
-  `MainThreadReadQueue.cancel(request_id)`; S4 proves the public cancellation
-  seam but not full socket-disconnect binding.
+- ~~Production Secure Bridge disconnect is not yet proven to automatically call
+  `MainThreadReadQueue.cancel(request_id)`~~ Closed 2026-07-20: every queued
+  request now polls the transport EOF through `await_with_signal()` and
+  cancels the queued item on disconnect (queued items never run for a dead
+  client; a running item's result is discarded for the durable receipt path).
+  Proven by `test_client_disconnect_cancels_queued_request` and the healthy
+  sequential-traffic regression test in
+  `tests/runtime/test_houdini_bridge_transport.py`.
 - Artifact panel summaries may show duplicate lifecycle/captured rows; failed
   canonical artifact bytes can remain for later cleanup.
 - The local `pip-audit` command reached its correct exported dependency input
