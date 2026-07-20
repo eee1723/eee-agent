@@ -70,6 +70,13 @@ def test_report_and_unavailable_payloads_are_bounded() -> None:
         NormalizedVisualReport("ok", tuple("x" for _ in range(33)), 0.5, True)
     with pytest.raises(ValueError):
         VisionUnavailable(VisionStatus.COMPLETED, "provider_missing", "missing")
+    with pytest.raises(ValueError):
+        VisionUnavailable("unavailable", "provider_missing", "missing")  # type: ignore[arg-type]
+
+
+def test_request_rejects_oversized_relative_artifact_path() -> None:
+    with pytest.raises(ValueError):
+        VisionRequest("vision-2", _artifact(relative_path="a/" + "x" * 512), "check")
 
 
 def test_advisory_decision_cannot_override_deterministic_failure() -> None:

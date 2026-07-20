@@ -103,6 +103,8 @@ class VisionRequest(_StrictContract):
             raise ValueError("artifact must be an exact ArtifactRef")
         if self.artifact.media_type not in {"image/png", "image/jpeg", "image/webp"}:
             raise ValueError("artifact media type is not visual")
+        if len(self.artifact.relative_path) > 512:
+            raise ValueError("artifact path exceeds the vision budget")
         if not 1 <= self.artifact.size_bytes <= 16_777_216:
             raise ValueError("artifact size is outside the vision budget")
         _text(self.instruction, "instruction", maximum=4096)
@@ -140,7 +142,10 @@ class VisionUnavailable(_StrictContract):
     _FIELDS = frozenset({"status", "reason_code", "message"})
 
     def __post_init__(self) -> None:
-        if self.status not in {VisionStatus.UNAVAILABLE, VisionStatus.WAIVED}:
+        if type(self.status) is not VisionStatus or self.status not in {
+            VisionStatus.UNAVAILABLE,
+            VisionStatus.WAIVED,
+        }:
             raise ValueError("unavailable status is invalid")
         _text(self.reason_code, "reason_code", maximum=64)
         _text(self.message, "message", maximum=512)
