@@ -1,8 +1,8 @@
 # Runtime MVP 安全交付与集成设计
 
-**日期：** 2026-07-17  
-**状态：** 已获用户确认，待拆解为实施计划  
-**基线：** \`feature/runtime @ 69b3fd2\`  
+**日期：** 2026-07-17
+**状态：** 已获用户确认，待拆解为实施计划
+**基线：** \`feature/runtime @ 69b3fd2\`
 **目标：** 依照依赖关系，把 EEE Agent 从当前 Runtime/建模原型推进到可安全交付的 Runtime MVP，并完成 Knowledge Graph 集成、真实 Houdini 边界验证和正式入口收口。
 
 ## 1. 决策与范围
@@ -125,7 +125,7 @@ S0 基线冻结
 
 ### S0：基线冻结
 
-输入：\`feature/runtime @ 69b3fd2\`。  
+输入：\`feature/runtime @ 69b3fd2\`。
 输出：基线 tag、当前测试证据、当前 handoff、分支状态记录。
 
 门禁：
@@ -399,4 +399,3 @@ git diff --check
 - Vision provider 扩展；
 - Knowledge semantic/embedding search；
 - Runtime 模块拆分和性能优化。
-
