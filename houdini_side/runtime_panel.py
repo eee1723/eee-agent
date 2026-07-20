@@ -1873,9 +1873,10 @@ class RuntimePanel(QtWidgets.QWidget):
         )
         for summary in self._artifacts:
             if summary["kind"] == "captured":
+                state = str(summary.get("state", "available")).upper()
                 item = QtWidgets.QTreeWidgetItem(
                     [
-                        summary["artifact_id"],
+                        f"{state}  {summary['artifact_id']}",
                         summary["media_type"],
                         str(summary["size_bytes"]),
                         summary["sha256"][:12],
@@ -1886,6 +1887,12 @@ class RuntimePanel(QtWidgets.QWidget):
                     f"{summary['relative_path']}\nsha256: {summary['sha256']}",
                 )
                 item.setToolTip(3, summary["sha256"])
+            elif summary["kind"] == "lifecycle":
+                state = str(summary["state"]).upper()
+                item = QtWidgets.QTreeWidgetItem(
+                    [f"{state}  {summary['artifact_id']}", "LIFECYCLE", "—", "NOT VIEWABLE"]
+                )
+                item.setToolTip(3, "Artifact lifecycle state; bytes are not available for viewing.")
             else:
                 item = QtWidgets.QTreeWidgetItem(
                     ["CAPTURE FAILED", "—", "—", summary["code"]]

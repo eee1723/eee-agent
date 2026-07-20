@@ -321,12 +321,39 @@ def test_parse_artifact_captured_event_returns_bounded_summary() -> None:
     assert summary["media_type"] == "image/png"
     assert summary["size_bytes"] == 4096
     assert summary["seq"] == 7
+    assert summary["state"] == "available"
+    assert summary["viewable"] is True
+
+
+@pytest.mark.parametrize("state", ["pending", "pending_eviction", "evicted", "missing", "failed"])
+def test_parse_artifact_captured_event_exposes_non_viewable_lifecycle_state(state: str) -> None:
+    message = _artifact_message()
+    message["payload"]["artifact"]["artifact_state"] = state  # type: ignore[index]
+    summary = parse_artifact_event(message)
+    assert summary["state"] == state
+    assert summary["viewable"] is False
+
+
+def test_parse_artifact_lifecycle_event_is_not_a_captured_image() -> None:
+    summary = parse_artifact_event(
+        {
+            "kind": "event",
+            "type": "modeling.artifact_state_changed",
+            "seq": 12,
+            "payload": {"artifact_id": ART, "state": "evicted"},
+        }
+    )
+    assert summary["kind"] == "lifecycle"
+    assert summary["state"] == "evicted"
+    assert summary["viewable"] is False
 
 
 def test_parse_capture_failed_event_returns_bounded_summary() -> None:
     summary = parse_artifact_event(_failed_message())
     assert summary == {
         "kind": "failed",
+        "state": "failed",
+        "viewable": False,
         "code": "capture.framing_failed",
         "change_id": CHG,
         "seq": 9,

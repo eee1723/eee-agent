@@ -71,6 +71,8 @@ _ARTIFACT_REFRESH_EVENTS = frozenset(
     {
         "modeling.artifact_captured",
         "modeling.capture_failed",
+        "modeling.artifact_state_changed",
+        "artifact.reconciled",
     }
 )
 _ARTIFACT_ID_RE = re.compile(r"^art_[0-9a-f]{32}$")
@@ -87,6 +89,9 @@ _ARTIFACT_FIELDS = frozenset(
         "size_bytes",
         "schema_version",
     }
+)
+_ARTIFACT_LIFECYCLE_STATES = frozenset(
+    {"pending", "available", "pending_eviction", "evicted", "missing", "failed"}
 )
 _FRAMING_FIELDS = frozenset(
     {
@@ -574,8 +579,29 @@ def parse_artifact_event(message: Mapping[str, object]) -> Mapping[str, object]:
         return MappingProxyType(
             {
                 "kind": "failed",
+                "state": "failed",
+                "viewable": False,
                 "code": code,
                 "change_id": payload["change_id"],
+                "seq": seq,
+            }
+        )
+    if message["type"] in {"modeling.artifact_state_changed", "artifact.reconciled"}:
+        expected = frozenset({"artifact_id", "state"})
+        recovery_fields = frozenset({"artifact_id", "from_state", "state"})
+        if set(payload) not in (expected, recovery_fields):
+            raise PanelClientError("Runtime artifact lifecycle event is invalid.")
+        _matching(payload["artifact_id"], _ARTIFACT_ID_RE)
+        state = payload["state"]
+        if type(state) is not str or state not in _ARTIFACT_LIFECYCLE_STATES:
+            raise PanelClientError("Runtime artifact lifecycle event is invalid.")
+        return MappingProxyType(
+            {
+                "kind": "lifecycle",
+                "artifact_id": payload["artifact_id"],
+                "state": state,
+                "viewable": state == "available",
+                "recovery": message["type"] == "artifact.reconciled",
                 "seq": seq,
             }
         )
@@ -584,7 +610,7 @@ def parse_artifact_event(message: Mapping[str, object]) -> Mapping[str, object]:
     _matching(payload["change_id"], _CHANGE_ID_RE)
     _matching(payload["changeset_digest"], _DIGEST_RE)
     artifact = payload["artifact"]
-    if type(artifact) is not dict or set(artifact) != _ARTIFACT_FIELDS:
+    if type(artifact) is not dict or set(artifact) not in (_ARTIFACT_FIELDS, _ARTIFACT_FIELDS | {"artifact_state"}):
         raise PanelClientError("Runtime artifact event is invalid.")
     _matching(artifact["artifact_id"], _ARTIFACT_ID_RE)
     relative_path = artifact["relative_path"]
@@ -606,6 +632,9 @@ def parse_artifact_event(message: Mapping[str, object]) -> Mapping[str, object]:
         raise PanelClientError("Runtime artifact event is invalid.")
     if artifact["schema_version"] != 1:
         raise PanelClientError("Runtime artifact event is invalid.")
+    state = artifact.get("artifact_state", "available")
+    if type(state) is not str or state not in _ARTIFACT_LIFECYCLE_STATES:
+        raise PanelClientError("Runtime artifact event is invalid.")
     framing = payload["framing"]
     if type(framing) is not dict or set(framing) != _FRAMING_FIELDS:
         raise PanelClientError("Runtime artifact event is invalid.")
@@ -624,6 +653,8 @@ def parse_artifact_event(message: Mapping[str, object]) -> Mapping[str, object]:
     return MappingProxyType(
         {
             "kind": "captured",
+            "state": state,
+            "viewable": state == "available",
             "artifact_id": artifact["artifact_id"],
             "relative_path": relative_path,
             "sha256": artifact["sha256"],

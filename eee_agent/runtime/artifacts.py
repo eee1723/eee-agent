@@ -152,7 +152,12 @@ class ArtifactStore:
             if isinstance(exc, (AgentException, RuntimeError)):
                 raise
             raise _artifact_missing() from None
-        await self._enforce_retention(session_id, keep_id=artifact_id)
+        if await self._enforce_retention(session_id, keep_id=artifact_id):
+            raise _artifact_error(
+                "runtime.artifact_cleanup_failed",
+                "Artifact retention cleanup is pending and must be retried.",
+                retryable=True,
+            )
         return ref
 
     async def _mark_available(self, artifact_id: str) -> None:
@@ -212,11 +217,12 @@ class ArtifactStore:
         async with self._database.write_transaction() as conn:
             await conn.execute(f"UPDATE artifacts SET cleanup_attempts=cleanup_attempts+1, last_error_code=?, updated_at=? WHERE {where} AND artifact_state='pending_eviction'", (code, _now(), value))
 
-    async def _enforce_retention(self, session_id: str, *, keep_id: str) -> None:
-        await self._evict_over_caps(where="session_id = ?", params=(session_id,), max_count=MAX_ARTIFACTS_PER_SESSION, max_bytes=MAX_SESSION_BYTES, keep_id=keep_id)
-        await self._evict_over_caps(where="1 = 1", params=(), max_count=MAX_ARTIFACTS_GLOBAL, max_bytes=MAX_GLOBAL_BYTES, keep_id=keep_id)
+    async def _enforce_retention(self, session_id: str, *, keep_id: str) -> bool:
+        failed = await self._evict_over_caps(where="session_id = ?", params=(session_id,), max_count=MAX_ARTIFACTS_PER_SESSION, max_bytes=MAX_SESSION_BYTES, keep_id=keep_id)
+        failed = (await self._evict_over_caps(where="1 = 1", params=(), max_count=MAX_ARTIFACTS_GLOBAL, max_bytes=MAX_GLOBAL_BYTES, keep_id=keep_id)) or failed
+        return failed
 
-    async def _evict_over_caps(self, *, where: str, params: tuple[object, ...], max_count: int, max_bytes: int, keep_id: str) -> None:
+    async def _evict_over_caps(self, *, where: str, params: tuple[object, ...], max_count: int, max_bytes: int, keep_id: str) -> bool:
         rows = await self._database.fetchall(f"SELECT artifact_id, relative_path, size_bytes FROM artifacts WHERE {where} AND artifact_state='available' AND artifact_id != ? ORDER BY created_at ASC, artifact_id ASC", (*params, keep_id))
         totals = await self._database.fetchone(f"SELECT COUNT(*) AS c, COALESCE(SUM(size_bytes),0) AS b FROM artifacts WHERE {where} AND artifact_state='available'", params)
         count = int(totals["c"])
@@ -228,23 +234,27 @@ class ArtifactStore:
             candidates.append(row)
             total_bytes -= int(row["size_bytes"])
         if not candidates:
-            return
+            return False
         ids = [row["artifact_id"] for row in candidates]
         async with self._database.write_transaction() as conn:
             for artifact_id in ids:
                 await conn.execute("UPDATE artifacts SET artifact_state='pending_eviction', updated_at=? WHERE artifact_id=? AND artifact_state='available'", (_now(), artifact_id))
+        failed = False
         for row in candidates:
             path = self._canonical(row["relative_path"])
             try:
                 path.unlink(missing_ok=True)
             except OSError:
                 await self._record_cleanup_failure(artifact_id=row["artifact_id"], code="retention_delete_failed")
+                failed = True
                 continue
             async with self._database.write_transaction() as conn:
                 await conn.execute("UPDATE artifacts SET artifact_state='evicted', updated_at=?, last_error_code=NULL WHERE artifact_id=? AND artifact_state='pending_eviction'", (_now(), row["artifact_id"]))
+        return failed
 
-    async def reconcile(self) -> None:
-        rows = await self._database.fetchall("SELECT artifact_id, relative_path, sha256, size_bytes, artifact_state FROM artifacts WHERE artifact_state IN ('pending','pending_eviction','available')")
+    async def reconcile(self) -> tuple[dict[str, str], ...]:
+        recovered: list[dict[str, str]] = []
+        rows = await self._database.fetchall("SELECT artifact_id, session_id, run_id, relative_path, sha256, size_bytes, artifact_state FROM artifacts WHERE artifact_state IN ('pending','pending_eviction','available')")
         for row in rows:
             artifact_id = row["artifact_id"]
             canonical = self._canonical(row["relative_path"])
@@ -256,6 +266,7 @@ class ArtifactStore:
                 else:
                     async with self._database.write_transaction() as conn:
                         await conn.execute("UPDATE artifacts SET artifact_state='evicted', updated_at=?, last_error_code=NULL WHERE artifact_id=?", (_now(), artifact_id))
+                    recovered.append({"artifact_id": artifact_id, "session_id": row["session_id"], "run_id": row["run_id"], "from_state": "pending_eviction", "state": "evicted"})
                 continue
             if row["artifact_state"] == "pending":
                 stages = sorted((self._root / _STAGING_DIR).glob(f"{artifact_id}-*.stage"))
@@ -272,15 +283,19 @@ class ArtifactStore:
                         digest, size = "", -1
                     if digest == row["sha256"] and size == int(row["size_bytes"]):
                         await self._mark_available(artifact_id)
+                        recovered.append({"artifact_id": artifact_id, "session_id": row["session_id"], "run_id": row["run_id"], "from_state": "pending", "state": "available"})
                         continue
                 await self._mark_failed(artifact_id, "pending_recovery_failed", retryable=True)
+                recovered.append({"artifact_id": artifact_id, "session_id": row["session_id"], "run_id": row["run_id"], "from_state": "pending", "state": "failed"})
             elif row["artifact_state"] == "available" and not canonical.is_file():
                 async with self._database.write_transaction() as conn:
                     await conn.execute("UPDATE artifacts SET artifact_state='missing', updated_at=?, last_error_code='missing_file' WHERE artifact_id=?", (_now(), artifact_id))
+                recovered.append({"artifact_id": artifact_id, "session_id": row["session_id"], "run_id": row["run_id"], "from_state": "available", "state": "missing"})
         staging = self._root / _STAGING_DIR
         if staging.is_dir():
             for path in staging.glob("*.stage"):
                 _unlink_quietly(path)
+        return tuple(recovered)
 
 
 def _unlink_quietly(path: Path) -> None:

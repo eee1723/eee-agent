@@ -1516,7 +1516,19 @@ class RuntimeService:
         # Artifact lifecycle recovery is independent from run reconciliation:
         # pending placement/eviction and missing bytes must be made explicit
         # before the service starts exposing runtime state.
-        await self._artifacts.reconcile()
+        artifact_recoveries = await self._artifacts.reconcile()
+        for recovery in artifact_recoveries:
+            await self._emit(
+                recovery["session_id"],
+                recovery["run_id"],
+                "artifact.reconciled",
+                {
+                    "artifact_id": recovery["artifact_id"],
+                    "from_state": recovery["from_state"],
+                    "state": recovery["state"],
+                },
+                RetentionClass.DURABLE,
+            )
         # Capture the genuine pre-recovery status of every non-terminal run so
         # the emitted run.state_changed records the real "from" state rather
         # than the post-reconciliation Failed. reconcile_interrupted then fails

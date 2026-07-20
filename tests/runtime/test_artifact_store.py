@@ -29,6 +29,7 @@ from eee_agent.runtime.artifacts import (
     ArtifactStore,
 )
 from eee_agent.runtime.database import RuntimeDatabase
+from eee_agent.panel.runtime_state import parse_artifact_event
 
 SES = f"ses_{'0' * 32}"
 SES2 = f"ses_{'1' * 32}"
@@ -487,7 +488,16 @@ def test_artifacts_table_shape(db_path: Path) -> None:
 def test_retention_db_rollback_does_not_restore_missing_file(
     db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failed eviction transaction cannot leave an available row for a gone file."""
+    """A post-unlink failure cannot leave an available row for a gone file."""
+    monkeypatch.setattr("eee_agent.runtime.artifacts.MAX_SESSION_BYTES", len(_PNG))
+    original_unlink = Path.unlink
+
+    def unlink_then_fail(path: Path, *args, **kwargs):
+        original_unlink(path, *args, **kwargs)
+        if path.name.endswith(".png"):
+            raise RuntimeError("injected failure after eviction unlink")
+
+    monkeypatch.setattr(Path, "unlink", unlink_then_fail)
     async def scenario() -> None:
         db = await RuntimeDatabase.open(db_path)
         try:
@@ -495,21 +505,15 @@ def test_retention_db_rollback_does_not_restore_missing_file(
             root = tmp_path / "artifacts"
             store = ArtifactStore(db, root)
             first = await _register(store, root)
-            original = store._evict_over_caps
-
-            async def fail_after_select(*args, **kwargs):
-                raise RuntimeError("injected retention failure")
-
-            monkeypatch.setattr(store, "_evict_over_caps", fail_after_select)
             with pytest.raises(RuntimeError):
                 await _register(store, root)
-            monkeypatch.setattr(store, "_evict_over_caps", original)
             row = await db.fetchone(
                 "SELECT artifact_state FROM artifacts WHERE artifact_id = ?",
                 (first.artifact_id,),
             )
             assert row is not None
-            assert row["artifact_state"] != "available" or store.path_for(first).is_file()
+            assert not store.path_for(first).exists()
+            assert row["artifact_state"] == "pending_eviction"
         finally:
             await db.close()
 
@@ -627,6 +631,16 @@ def test_event_replay_distinguishes_evicted_artifact(db_path: Path, tmp_path: Pa
             assert await store.get(ref.artifact_id) is None
             row = await db.fetchone("SELECT artifact_state FROM artifacts WHERE artifact_id=?", (ref.artifact_id,))
             assert row["artifact_state"] == "evicted"
+            summary = parse_artifact_event(
+                {
+                    "kind": "event",
+                    "type": "modeling.artifact_state_changed",
+                    "seq": 1,
+                    "payload": {"artifact_id": ref.artifact_id, "state": "evicted"},
+                }
+            )
+            assert summary["kind"] == "lifecycle"
+            assert summary["viewable"] is False
         finally:
             await db.close()
 
@@ -647,6 +661,23 @@ def test_duplicate_artifact_path_never_overwrites_available_bytes(db_path: Path,
             with pytest.raises(AgentException):
                 await store.register(session_id=SES, run_id=RUN, artifact_id=new_id(IdKind.ARTIFACT), source=source, media_type="image/png", expected_sha256=hashlib.sha256(b"different").hexdigest(), expected_size_bytes=len(b"different"))
             assert store.path_for(first).read_bytes() == _PNG
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_reconcile_removes_orphan_staging_file(db_path: Path, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db = await RuntimeDatabase.open(db_path)
+        try:
+            await _seed_session_run(db)
+            root = tmp_path / "artifacts"
+            orphan = root / ".staging" / "art_deadbeef.stage"
+            orphan.parent.mkdir(parents=True)
+            orphan.write_bytes(_PNG)
+            await ArtifactStore(db, root).reconcile()
+            assert not orphan.exists()
         finally:
             await db.close()
 
