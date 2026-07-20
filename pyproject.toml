@@ -34,3 +34,25 @@ addopts = "-ra --strict-markers"
 markers = [
     "houdini_kb: opt-in tests that require a local Houdini Knowledge cache/build",
 ]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+# Runtime is the security boundary: F catches unused/undefined imports and
+# TID251 makes accidental legacy bridge imports a CI failure. E4 catches
+# syntax/indentation errors without imposing a repository-wide formatter
+# migration on the legacy modules.
+select = ["E4", "F", "TID"]
+ignore = ["E501"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"eee_agent.bridge" = { msg = "Runtime must use the typed Houdini bridge; legacy eee_agent.bridge is removed" }
+
+[dependency-groups]
+dev = [
+    "mypy==1.15.0",
+    "pip-audit==2.9.0",
+    "ruff==0.11.13",
+]

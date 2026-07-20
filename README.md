@@ -152,6 +152,16 @@ uv run --extra eval python -m eee_agent.runtime serve --help   # options
 - **Offline tests** — the full Runtime suite (incl. a real-subprocess restart E2E)
   runs with **no live LLM and no Houdini**. GLM-5.2 and Houdini read-only smokes
   are **manual only** and never block offline acceptance.
+- **CI quality gates** — `.github/workflows/runtime-ci.yml` runs on Windows with
+  the checked-in lockfile: `uv sync --frozen --extra eval`, the full
+  `uv run --frozen --extra eval pytest -q` gate, `uv lock --check`, compileall,
+  and `git diff --check`. A separate job runs frozen `ruff`, focused `mypy`
+  checks for Runtime DTO/tool boundaries, and `pip-audit` against an exported
+  runtime requirements file. The optional Houdini job is enabled only when the
+  repository variable `EEE_HFS_RUNNER=true` and a self-hosted
+  `houdini-21.0.440` runner with `$env:HFS` are available; it never gates the
+  no-Houdini job. When explicitly enabled, its failures are visible in that
+  opt-in job rather than being silently ignored.
 - **Never commit** runtime state — `app.sqlite*`, `checkpoints.sqlite*`,
   `runtime.token`, `runtime.json`, `runtime.lock`, logs, `.env`, `.venv` are all
   `.gitignore`d. Spec: `docs/superpowers/specs/2026-07-14-runtime-design.md`.

@@ -16,8 +16,6 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-import aiosqlite
-
 from eee_agent.core import AgentError, AgentException, ErrorCategory
 from eee_agent.core.artifacts import ArtifactRef
 from eee_agent.core.ids import IdKind, require_id

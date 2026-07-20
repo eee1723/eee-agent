@@ -69,13 +69,35 @@ authority for modeling capabilities.
 - `uv lock --check`, `compileall`, and `git diff --check` passed. No Runtime or
   Knowledge source imports `eee_agent.bridge` or `eee_agent.tools`.
 
+## CI gates
+
+`.github/workflows/runtime-ci.yml` is the canonical Windows gate. Its frozen
+job runs the same commands locally documented in `README.md`:
+
+```powershell
+uv sync --frozen --extra eval
+uv run --frozen --extra eval pytest -q
+uv lock --check
+uv run --frozen --extra eval python -m compileall -q eee_agent houdini_side tests
+git diff --check
+```
+
+The static job installs only the pinned `dev` group (`ruff==0.11.13`,
+`mypy==1.15.0`, `pip-audit==2.9.0`). It lints `eee_agent/runtime` with the
+retired `eee_agent.bridge` API banned, type-checks the Runtime DTO/tool
+boundary modules with imports skipped at unrelated legacy edges, and audits a
+frozen `uv export --no-emit-project` requirements file. The Houdini job is conditional on the
+repository variable `EEE_HFS_RUNNER=true`, uses the `houdini-21.0.440`
+self-hosted label and `$env:HFS`, and is explicitly non-blocking when no HFS
+runner is available.
+
 ## Branch cleanup
 
 Local and remote `feature/foundation` and `feature/houdini-knowledge-graph`
-remain until the combined Runtime + Knowledge test gates and HFS contract
-gate pass. Keep `main`, `wip/pre-migration-main`, and `feature/runtime`.
-Before deletion, copy exact branch SHAs and these tags into the final cleanup
-commit. The approved cleanup targets are exactly:
+were removed after the combined Runtime + Knowledge test gates and HFS
+contract gate passed. Keep `main`, `wip/pre-migration-main`, and
+`feature/runtime`. The exact cleanup targets and pre-cleanup SHAs are retained
+below for audit:
 
 - local worktrees `E:\eee-agent\.worktrees\foundation` and
   `E:\eee-agent\.worktrees\knowledge-graph`;

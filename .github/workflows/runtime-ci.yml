@@ -1,0 +1,100 @@
+name: Runtime quality gates
+
+on:
+  push:
+    branches: [main, feature/runtime]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frozen-runtime:
+    name: Frozen Runtime tests (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.4'
+          enable-cache: true
+      - name: Install frozen dependencies
+        run: uv sync --frozen --extra eval
+      - name: Run the full offline test gate
+        run: uv run --frozen --extra eval pytest -q
+      - name: Verify lockfile
+        run: uv lock --check
+      - name: Compile tracked Python trees
+        run: uv run --frozen --extra eval python -m compileall -q eee_agent houdini_side tests
+      - name: Check patch whitespace
+        run: git diff --check
+
+  static-quality:
+    name: Runtime static and dependency checks
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.4'
+          enable-cache: true
+      - name: Install frozen quality tools
+        run: uv sync --frozen --extra eval --group dev
+      - name: Lint Runtime and reject retired bridge imports
+        run: uv run --frozen --group dev ruff check eee_agent/runtime
+      - name: Type-check DTO and tool boundaries
+        run: >-
+          uv run --frozen --group dev mypy
+          --follow-imports=skip --ignore-missing-imports
+          eee_agent/runtime/agent_context.py
+          eee_agent/runtime/knowledge.py
+          eee_agent/runtime/agent_tools.py
+      - name: Audit the frozen runtime dependency export
+        shell: pwsh
+        run: |
+          $requirements = Join-Path $env:RUNNER_TEMP 'eee-agent-runtime-requirements.txt'
+          uv export --frozen --no-dev --no-emit-project --extra eval --format requirements-txt --output-file $requirements
+          uv run --frozen --group dev pip-audit --requirement $requirements --strict
+
+  houdini-optional:
+    name: Optional Houdini 21.0.440 smoke gates
+    if: ${{ vars.EEE_HFS_RUNNER == 'true' }}
+    runs-on: [self-hosted, Windows, houdini-21.0.440]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.4'
+          enable-cache: true
+      - name: Install frozen evaluation dependencies
+        run: uv sync --frozen --extra eval
+      - name: Run opt-in Knowledge contract
+        shell: pwsh
+        run: |
+          $env:EEE_RUN_HOUDINI_KB_TESTS = 'true'
+          uv run --frozen --extra eval pytest -q tests/knowledge/test_hfs_contract.py
+      - name: Run Houdini capture smoke
+        shell: pwsh
+        run: '& $env:HFS\bin\hython.exe -u tests\runtime\capture_houdini_smoke.py'
+      - name: Run Houdini sensitivity smoke
+        shell: pwsh
+        run: '& $env:HFS\bin\hython.exe -u tests\runtime\sensitivity_houdini_smoke.py'
