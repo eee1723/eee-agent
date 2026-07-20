@@ -138,3 +138,19 @@ def test_delivery_evaluation_is_bounded_and_contains_required_evidence() -> None
             final_decision=record.final_decision,
             recovery_evidence=record.recovery_evidence,
         )
+    with pytest.raises(ValueError):
+        DeliveryEvaluation(
+            brief=record.brief,
+            spec=record.spec,
+            changeset_digest=record.changeset_digest,
+            approval=record.approval,
+            receipt=record.receipt,
+            validation_report=record.validation_report,
+            artifact_refs=(_artifact(relative_path="a/" + "x" * 512),),
+            artifact_status=("available",),
+            knowledge_manifest_sha256=record.knowledge_manifest_sha256,
+            vision_status=record.vision_status,
+            vision_report=record.vision_report,
+            final_decision=record.final_decision,
+            recovery_evidence=record.recovery_evidence,
+        )

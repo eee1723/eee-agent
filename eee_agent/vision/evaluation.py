@@ -58,6 +58,12 @@ class DeliveryEvaluation:
             raise ValueError("artifact_refs must be a bounded tuple")
         if any(type(item) is not ArtifactRef for item in self.artifact_refs):
             raise ValueError("artifact_refs must contain exact ArtifactRef values")
+        if any(
+            len(item.relative_path) > 512
+            or not 1 <= item.size_bytes <= 16_777_216
+            for item in self.artifact_refs
+        ):
+            raise ValueError("artifact refs exceed the delivery budget")
         _evidence(self.artifact_status, "artifact_status", 16)
         if len(self.artifact_status) != len(self.artifact_refs):
             raise ValueError("artifact status must match artifact refs")
