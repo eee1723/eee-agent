@@ -44,6 +44,20 @@ Branch: `feature/runtime`
 - `vision-provider-tested`: not run; tests use an injected deterministic fake.
 - `GUI-accepted`: pending interactive Houdini validation.
 
+## Houdini package deployment
+
+The current worktree package was installed with Houdini 21.0.440 hython:
+
+```text
+package: C:\Users\EEE\Documents\houdini21.0\packages\eee_agent.json
+project root: E:/eee-agent/.worktrees/runtime
+panel: E:/eee-agent/.worktrees/runtime/python_panels/EEEAgentRuntime.pypanel
+```
+
+At deployment time a running Houdini window (`untitled.hip`) predated the
+package update. It was not closed automatically because its save state is not
+known. Restart Houdini before treating any manual GUI result as current.
+
 ## Remaining risks
 
 - A directly constructed `DeliveryEvaluation` can contain an `ArtifactRef`
@@ -56,5 +70,5 @@ Branch: `feature/runtime`
   be selected only if the product needs a distinct UI state.
 - The Houdini panel currently records the durable Vision event in the generic
   event/replay stream but has no dedicated normalized Vision report view.
-- GUI acceptance, real provider evidence, release tag and pushing the
-  35-commit-ahead Runtime branch remain intentionally incomplete.
+- GUI acceptance, real provider evidence, release tag and pushing the Runtime
+  branch remain intentionally incomplete.
