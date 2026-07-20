@@ -61,11 +61,13 @@ authority for modeling capabilities.
 - Runtime agent tools/runner focused suite: `42 passed`.
 - Runtime service/runs focused suite: `167 passed`.
 - Knowledge service focused suite: `48 passed`.
-- Full non-HFS Knowledge suite is rerun after the read-only FTS integrity-check
-  compatibility fix; record the final result in the integration commit.
-- `tests/knowledge/test_hfs_contract.py` remains opt-in and is run separately
-  with `EEE_RUN_HOUDINI_KB_TESTS=true` when the target Houdini installation is
-  available.
+- Full repository gate: **2807 passed, 11 skipped** in 149.03s. The 11 skips
+  are the opt-in HFS contract cases, skipped because
+  `EEE_RUN_HOUDINI_KB_TESTS` was not set for the normal gate.
+- Explicit HFS gate with `EEE_RUN_HOUDINI_KB_TESTS=true`:
+  **11 passed** (`tests/knowledge/test_hfs_contract.py`).
+- `uv lock --check`, `compileall`, and `git diff --check` passed. No Runtime or
+  Knowledge source imports `eee_agent.bridge` or `eee_agent.tools`.
 
 ## Branch cleanup
 
@@ -73,4 +75,21 @@ Local and remote `feature/foundation` and `feature/houdini-knowledge-graph`
 remain until the combined Runtime + Knowledge test gates and HFS contract
 gate pass. Keep `main`, `wip/pre-migration-main`, and `feature/runtime`.
 Before deletion, copy exact branch SHAs and these tags into the final cleanup
-commit; do not delete or push anything from this handoff automatically.
+commit. The approved cleanup targets are exactly:
+
+- local worktrees `E:\eee-agent\.worktrees\foundation` and
+  `E:\eee-agent\.worktrees\knowledge-graph`;
+- local branches `feature/foundation` and
+  `feature/houdini-knowledge-graph`;
+- remote refs `origin/feature/foundation` and
+  `origin/feature/houdini-knowledge-graph`.
+
+The following are explicitly retained: `main`, `wip/pre-migration-main`,
+`feature/runtime`, all three annotated baseline tags above, and the root
+worktree `E:\eee-agent`.
+
+Pre-cleanup remote branch SHAs recorded for audit:
+
+- `origin/feature/foundation` → `b9ef66f07cb001ef97c0191dc7305fabd9921fa4`
+- `origin/feature/houdini-knowledge-graph` →
+  `7004eadd954e1b765c36baab513402c4fe04cc5f`
