@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import shutil
 from pathlib import Path
 
 import pytest
@@ -472,7 +473,180 @@ def test_artifacts_table_shape(db_path: Path) -> None:
                 "redacted",
                 "created_at",
                 "schema_version",
+                "artifact_state",
+                "cleanup_attempts",
+                "last_error_code",
+                "updated_at",
             }
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_retention_db_rollback_does_not_restore_missing_file(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed eviction transaction cannot leave an available row for a gone file."""
+    async def scenario() -> None:
+        db = await RuntimeDatabase.open(db_path)
+        try:
+            await _seed_session_run(db)
+            root = tmp_path / "artifacts"
+            store = ArtifactStore(db, root)
+            first = await _register(store, root)
+            original = store._evict_over_caps
+
+            async def fail_after_select(*args, **kwargs):
+                raise RuntimeError("injected retention failure")
+
+            monkeypatch.setattr(store, "_evict_over_caps", fail_after_select)
+            with pytest.raises(RuntimeError):
+                await _register(store, root)
+            monkeypatch.setattr(store, "_evict_over_caps", original)
+            row = await db.fetchone(
+                "SELECT artifact_state FROM artifacts WHERE artifact_id = ?",
+                (first.artifact_id,),
+            )
+            assert row is not None
+            assert row["artifact_state"] != "available" or store.path_for(first).is_file()
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_register_commit_failure_leaves_recoverable_pending_record(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        db = await RuntimeDatabase.open(db_path)
+        try:
+            await _seed_session_run(db)
+            root = tmp_path / "artifacts"
+            store = ArtifactStore(db, root)
+            original = store._mark_available
+
+            async def fail_commit(*args, **kwargs):
+                raise RuntimeError("injected available commit failure")
+
+            monkeypatch.setattr(store, "_mark_available", fail_commit)
+            with pytest.raises(RuntimeError):
+                await _register(store, root)
+            rows = await db.fetchall(
+                "SELECT artifact_state FROM artifacts ORDER BY created_at"
+            )
+            assert rows and rows[-1]["artifact_state"] in {"pending", "failed"}
+            monkeypatch.setattr(store, "_mark_available", original)
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_restart_reconciles_pending_file_placement(db_path: Path, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db = await RuntimeDatabase.open(db_path)
+        try:
+            await _seed_session_run(db)
+            root = tmp_path / "artifacts"
+            store = ArtifactStore(db, root)
+            payload = _PNG
+            artifact_id = new_id(IdKind.ARTIFACT)
+            staged = root / ".staging" / f"{artifact_id}-restart.stage"
+            staged.parent.mkdir(parents=True)
+            staged.write_bytes(payload)
+            rel = f"{SES}/{RUN}/{artifact_id}.png"
+            async with db.write_transaction() as conn:
+                await conn.execute(
+                    "INSERT INTO artifacts(artifact_id,session_id,run_id,relative_path,sha256,media_type,size_bytes,redacted,created_at,schema_version,artifact_state,cleanup_attempts,last_error_code,updated_at) VALUES (?,?,?,?,?,?,?,0,?,1,'pending',0,NULL,?)",
+                    (artifact_id, SES, RUN, rel, hashlib.sha256(payload).hexdigest(), "image/png", len(payload), NOW, NOW),
+                )
+            await store.reconcile()
+            ref = await store.get(artifact_id)
+            assert ref is not None and store.path_for(ref).read_bytes() == payload
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_restart_marks_missing_available_file_without_success_event(db_path: Path, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db = await RuntimeDatabase.open(db_path)
+        try:
+            await _seed_session_run(db)
+            root = tmp_path / "artifacts"
+            store = ArtifactStore(db, root)
+            ref = await _register(store, root)
+            store.path_for(ref).unlink()
+            await store.reconcile()
+            row = await db.fetchone("SELECT artifact_state FROM artifacts WHERE artifact_id = ?", (ref.artifact_id,))
+            assert row["artifact_state"] == "missing"
+            assert await store.get(ref.artifact_id) is None
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_cleanup_failure_is_retryable_after_session_delete(
+    db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        db = await RuntimeDatabase.open(db_path)
+        try:
+            await _seed_session_run(db)
+            root = tmp_path / "artifacts"
+            store = ArtifactStore(db, root)
+            ref = await _register(store, root)
+            original = shutil.rmtree
+            monkeypatch.setattr("eee_agent.runtime.artifacts.shutil.rmtree", lambda _: (_ for _ in ()).throw(OSError("busy")))
+            with pytest.raises(OSError):
+                await store.delete_session_artifacts(SES)
+            row = await db.fetchone("SELECT artifact_state, cleanup_attempts FROM artifacts WHERE artifact_id = ?", (ref.artifact_id,))
+            assert row["artifact_state"] == "pending_eviction" and row["cleanup_attempts"] >= 1
+            monkeypatch.setattr("eee_agent.runtime.artifacts.shutil.rmtree", original)
+            assert await store.delete_session_artifacts(SES) == 1
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_event_replay_distinguishes_evicted_artifact(db_path: Path, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db = await RuntimeDatabase.open(db_path)
+        try:
+            await _seed_session_run(db)
+            root = tmp_path / "artifacts"
+            store = ArtifactStore(db, root)
+            ref = await _register(store, root)
+            async with db.write_transaction() as conn:
+                await conn.execute("UPDATE artifacts SET artifact_state='evicted' WHERE artifact_id=?", (ref.artifact_id,))
+            assert await store.get(ref.artifact_id) is None
+            row = await db.fetchone("SELECT artifact_state FROM artifacts WHERE artifact_id=?", (ref.artifact_id,))
+            assert row["artifact_state"] == "evicted"
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_duplicate_artifact_path_never_overwrites_available_bytes(db_path: Path, tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db = await RuntimeDatabase.open(db_path)
+        try:
+            await _seed_session_run(db)
+            root = tmp_path / "artifacts"
+            store = ArtifactStore(db, root)
+            first = await _register(store, root, artifact_id=new_id(IdKind.ARTIFACT))
+            source = root / "incoming" / Path(first.relative_path).name
+            source.parent.mkdir(parents=True)
+            source.write_bytes(b"different")
+            with pytest.raises(AgentException):
+                await store.register(session_id=SES, run_id=RUN, artifact_id=new_id(IdKind.ARTIFACT), source=source, media_type="image/png", expected_sha256=hashlib.sha256(b"different").hexdigest(), expected_size_bytes=len(b"different"))
+            assert store.path_for(first).read_bytes() == _PNG
         finally:
             await db.close()
 

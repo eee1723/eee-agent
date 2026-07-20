@@ -560,15 +560,15 @@ class RuntimeService:
         return await self._sessions.get(session_id)
 
     async def delete_session(self, session_id: str) -> None:
-        # The application delete commits first (artifact metadata rows cascade
-        # with it). Only then are the artifact files removed; finally the
-        # checkpoint thread. Each cleanup failure is reported as a structured
-        # error and never recreates the already-deleted session.
-        await self._sessions.delete_application_records(session_id)
+        # Artifact metadata must be transitioned before deleting the session;
+        # otherwise the FK cascade would erase the retryable cleanup state.
+        # Once bytes are evicted, application rows can be deleted and the
+        # checkpoint thread is cleaned independently.
         try:
             await self._artifacts.delete_session_artifacts(session_id)
         except Exception:
             raise _artifact_cleanup_failed() from None
+        await self._sessions.delete_application_records(session_id)
         checkpoints = self._checkpoints
         if checkpoints is None:
             return
@@ -1513,6 +1513,10 @@ class RuntimeService:
         return records
 
     async def _reconcile(self) -> None:
+        # Artifact lifecycle recovery is independent from run reconciliation:
+        # pending placement/eviction and missing bytes must be made explicit
+        # before the service starts exposing runtime state.
+        await self._artifacts.reconcile()
         # Capture the genuine pre-recovery status of every non-terminal run so
         # the emitted run.state_changed records the real "from" state rather
         # than the post-reconciliation Failed. reconcile_interrupted then fails

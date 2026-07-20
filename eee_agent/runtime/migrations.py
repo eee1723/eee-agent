@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Exact schema v1 DDL from the approved design spec section 7.3. No IF NOT
 # EXISTS: a partially-wrong schema must surface, not be silently masked.
@@ -178,6 +178,20 @@ CREATE INDEX artifacts_by_session ON artifacts(session_id, created_at, artifact_
 CREATE INDEX artifacts_by_sha256 ON artifacts(sha256, artifact_id);
 """
 
+# Exact schema v5 DDL (Task 3). Additive lifecycle columns make metadata
+# recovery explicit without rewriting any v1-v4 SQL. Existing rows receive
+# the safe ``available`` state and their original creation timestamp.
+MIGRATION_V5_SQL = """
+ALTER TABLE artifacts ADD COLUMN artifact_state TEXT NOT NULL DEFAULT 'available'
+    CHECK (artifact_state IN ('pending','available','pending_eviction','evicted','missing','failed'));
+ALTER TABLE artifacts ADD COLUMN cleanup_attempts INTEGER NOT NULL DEFAULT 0
+    CHECK (cleanup_attempts >= 0);
+ALTER TABLE artifacts ADD COLUMN last_error_code TEXT NULL;
+ALTER TABLE artifacts ADD COLUMN updated_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00+00:00';
+UPDATE artifacts SET updated_at = created_at WHERE updated_at = '1970-01-01T00:00:00+00:00';
+CREATE INDEX artifacts_by_state_updated ON artifacts(artifact_state, updated_at);
+"""
+
 # Ordered migrations. Each entry is (version, SQL script). The orchestrator
 # splits the script into statements and runs them in one atomic transaction.
 MIGRATIONS: tuple[tuple[int, str], ...] = (
@@ -185,6 +199,7 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     (2, MIGRATION_V2_SQL),
     (3, MIGRATION_V3_SQL),
     (4, MIGRATION_V4_SQL),
+    (5, MIGRATION_V5_SQL),
 )
 
 
