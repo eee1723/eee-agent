@@ -79,6 +79,15 @@ class ProviderCapability(_StrictContract):
             reason_code=data["reason_code"],  # type: ignore[arg-type]
         )
 
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "provider_id": self.provider_id,
+            "available": self.available,
+            "media_types": list(self.media_types),
+            "max_image_bytes": self.max_image_bytes,
+            "reason_code": self.reason_code,
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class VisionRequest(_StrictContract):
@@ -114,6 +123,13 @@ class VisionRequest(_StrictContract):
             instruction=data["instruction"],  # type: ignore[arg-type]
         )
 
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "request_id": self.request_id,
+            "artifact": self.artifact.to_dict(),
+            "instruction": self.instruction,
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class VisionUnavailable(_StrictContract):
@@ -137,6 +153,13 @@ class VisionUnavailable(_StrictContract):
         except (TypeError, ValueError):
             raise ValueError("vision status is invalid") from None
         return cls(status, data["reason_code"], data["message"])  # type: ignore[arg-type]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "status": self.status.value,
+            "reason_code": self.reason_code,
+            "message": self.message,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +192,14 @@ class NormalizedVisualReport(_StrictContract):
             data["summary"], tuple(observations), data["confidence"], data["advisory_passed"]  # type: ignore[arg-type]
         )
 
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "summary": self.summary,
+            "observations": list(self.observations),
+            "confidence": self.confidence,
+            "advisory_passed": self.advisory_passed,
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class RedactedRawResponseRef(_StrictContract):
@@ -180,6 +211,21 @@ class RedactedRawResponseRef(_StrictContract):
     def __post_init__(self) -> None:
         if type(self.artifact) is not ArtifactRef or type(self.redacted) is not bool or not self.redacted:
             raise ValueError("raw response reference must be redacted")
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "RedactedRawResponseRef":
+        data = cls._payload(payload)
+        artifact = data["artifact"]
+        if type(artifact) is not dict:
+            raise ValueError("artifact must be an object")
+        expected = frozenset(
+            {"artifact_id", "relative_path", "sha256", "media_type", "size_bytes", "schema_version"}
+        )
+        _fields(artifact, expected)
+        return cls(ArtifactRef(**artifact), data["redacted"])  # type: ignore[arg-type]
+
+    def to_dict(self) -> dict[str, object]:
+        return {"artifact": self.artifact.to_dict(), "redacted": self.redacted}
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,3 +245,25 @@ class FinalVisionDecision(_StrictContract):
         _text(self.summary, "summary", maximum=1024)
         if not self.deterministic_valid and self.accepted:
             raise ValueError("advisory vision cannot override deterministic failure")
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "FinalVisionDecision":
+        data = cls._payload(payload)
+        try:
+            status = VisionStatus(data["status"])
+        except (TypeError, ValueError):
+            raise ValueError("vision status is invalid") from None
+        return cls(
+            status,
+            data["accepted"],  # type: ignore[arg-type]
+            data["deterministic_valid"],  # type: ignore[arg-type]
+            data["summary"],  # type: ignore[arg-type]
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "status": self.status.value,
+            "accepted": self.accepted,
+            "deterministic_valid": self.deterministic_valid,
+            "summary": self.summary,
+        }

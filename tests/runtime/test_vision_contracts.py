@@ -9,6 +9,7 @@ from eee_agent.vision import (
     FinalVisionDecision,
     NormalizedVisualReport,
     ProviderCapability,
+    RedactedRawResponseRef,
     VisionRequest,
     VisionStatus,
     VisionUnavailable,
@@ -76,3 +77,17 @@ def test_advisory_decision_cannot_override_deterministic_failure() -> None:
         FinalVisionDecision(VisionStatus.COMPLETED, True, False, "looks good")
     decision = FinalVisionDecision(VisionStatus.COMPLETED, False, False, "validator failed")
     assert not decision.accepted
+
+
+def test_every_wire_contract_rejects_unknown_fields() -> None:
+    raw = RedactedRawResponseRef(_artifact())
+    payload = raw.to_dict()
+    payload["local_path"] = "C:/secret.json"
+    with pytest.raises(ValueError):
+        RedactedRawResponseRef.from_dict(payload)
+
+    decision = FinalVisionDecision(VisionStatus.UNAVAILABLE, False, True, "optional")
+    decision_payload = decision.to_dict()
+    decision_payload["provider_raw"] = "unbounded"
+    with pytest.raises(ValueError):
+        FinalVisionDecision.from_dict(decision_payload)
