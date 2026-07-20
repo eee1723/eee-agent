@@ -32,9 +32,12 @@ def _project_dependency_names() -> set[str]:
     }
 
 
-def _locked_package_names() -> set[str]:
+def _locked_package_versions() -> dict[str, str]:
     lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
-    return {package["name"].lower().replace("_", "-") for package in lock["package"]}
+    return {
+        package["name"].lower().replace("_", "-"): package["version"]
+        for package in lock["package"]
+    }
 
 
 def test_uv_lock_is_committed() -> None:
@@ -44,9 +47,17 @@ def test_uv_lock_is_committed() -> None:
 def test_legacy_rpyc_is_not_a_direct_dependency() -> None:
     forbidden = {"rpyc", "plumbum"}
     assert not forbidden & _project_dependency_names()
-    assert not forbidden & _locked_package_names()
+    assert not forbidden & set(_locked_package_versions())
 
 
 @pytest.mark.parametrize(("distribution", "expected"), EXPECTED_DIRECT_VERSIONS.items())
 def test_direct_dependency_version(distribution: str, expected: str) -> None:
     assert metadata.version(distribution) == expected
+
+
+@pytest.mark.parametrize(("distribution", "expected"), EXPECTED_DIRECT_VERSIONS.items())
+def test_direct_dependency_is_locked_at_expected_version(
+    distribution: str, expected: str
+) -> None:
+    locked = _locked_package_versions()
+    assert locked.get(distribution) == expected
