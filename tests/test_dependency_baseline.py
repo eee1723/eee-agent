@@ -1,5 +1,7 @@
 from importlib import metadata
 from pathlib import Path
+import re
+import tomllib
 
 import pytest
 
@@ -18,13 +20,31 @@ EXPECTED_DIRECT_VERSIONS = {
     "websockets": "15.0.1",
 }
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _project_dependency_names() -> set[str]:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = project["project"]["dependencies"]
+    return {
+        re.split(r"[<>=!~\[]", dependency, maxsplit=1)[0].strip().lower().replace("_", "-")
+        for dependency in dependencies
+    }
+
+
+def _locked_package_names() -> set[str]:
+    lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+    return {package["name"].lower().replace("_", "-") for package in lock["package"]}
+
 
 def test_uv_lock_is_committed() -> None:
-    assert Path("uv.lock").is_file()
+    assert (ROOT / "uv.lock").is_file()
 
 
 def test_legacy_rpyc_is_not_a_direct_dependency() -> None:
-    assert "rpyc" not in EXPECTED_DIRECT_VERSIONS
+    forbidden = {"rpyc", "plumbum"}
+    assert not forbidden & _project_dependency_names()
+    assert not forbidden & _locked_package_names()
 
 
 @pytest.mark.parametrize(("distribution", "expected"), EXPECTED_DIRECT_VERSIONS.items())

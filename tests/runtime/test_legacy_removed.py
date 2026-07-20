@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import io
 import os
 import subprocess
 import sys
+import tarfile
+import tempfile
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -14,6 +17,18 @@ from eee_agent.runtime.agent_tools import build_read_only_tools
 from eee_agent.system_prompt import build_system_prompt
 
 ROOT = Path(__file__).resolve().parents[2]
+LEGACY_PACKAGE_PREFIXES = ("eee_agent/bridge/", "eee_agent/tools/")
+
+
+def _tracked_paths(ref: str = "HEAD") -> set[str]:
+    result = subprocess.run(
+        ["git", "ls-tree", "-r", "--name-only", ref],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return {line for line in result.stdout.splitlines() if line}
 
 
 def test_formal_menu_has_no_legacy_raw_write_entries() -> None:
@@ -75,40 +90,49 @@ if eee_agent.workflow_middleware.is_enabled():
     assert result.returncode == 0, result.stderr or result.stdout
 
 
-def test_deleted_legacy_packages_are_not_discoverable() -> None:
+def test_deleted_legacy_packages_are_not_tracked_or_discoverable() -> None:
+    tracked = _tracked_paths()
+    for prefix in LEGACY_PACKAGE_PREFIXES:
+        assert not any(path.startswith(prefix) for path in tracked), (
+            f"legacy package was re-tracked under HEAD: {prefix}"
+        )
+
+    archive = subprocess.run(
+        ["git", "archive", "--format=tar", "HEAD"],
+        cwd=ROOT,
+        capture_output=True,
+        check=True,
+    ).stdout
     script = """
 import importlib
 import importlib.util
-import pathlib
 import sys
-import tempfile
 
-with tempfile.TemporaryDirectory() as root:
-    package = pathlib.Path(root) / 'eee_agent'
-    package.mkdir()
-    (package / '__init__.py').write_text('')
-    for loaded in list(sys.modules):
-        if loaded == 'eee_agent' or loaded.startswith('eee_agent.'):
-            del sys.modules[loaded]
-    sys.path[:] = [root]
-    importlib.invalidate_caches()
-    import eee_agent
-    eee_agent.__path__ = [str(package)]
-    eee_agent.__spec__.submodule_search_locations = [str(package)]
-    assert importlib.util.find_spec('eee_agent.bridge') is None
-    assert importlib.util.find_spec('eee_agent.tools') is None
-    for name in ('eee_agent.bridge', 'eee_agent.tools'):
-        try:
-            importlib.import_module(name)
-        except ModuleNotFoundError:
-            pass
-        else:
-            raise SystemExit(name + ' unexpectedly importable')
+sys.path.insert(0, sys.argv[1])
+importlib.invalidate_caches()
+import eee_agent
+for name in ('eee_agent.bridge', 'eee_agent.tools'):
+    spec = importlib.util.find_spec(name)
+    if spec is not None:
+        raise SystemExit(name + ' unexpectedly discoverable: ' + repr(spec))
+    try:
+        importlib.import_module(name)
+    except ModuleNotFoundError:
+        pass
+    else:
+        raise SystemExit(name + ' unexpectedly importable')
 """
-    result = subprocess.run(
-        [sys.executable, "-S", "-c", script], cwd=ROOT, env=os.environ.copy(),
-        capture_output=True, text=True, check=False,
-    )
+    with tempfile.TemporaryDirectory(prefix="eee-legacy-archive-") as temp_root:
+        archive_root = Path(temp_root)
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as source:
+            source.extractall(archive_root)
+        result = subprocess.run(
+            [sys.executable, "-I", "-S", "-c", script, str(archive_root)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
     assert result.returncode == 0, result.stderr or result.stdout
 
 
