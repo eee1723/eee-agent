@@ -89,11 +89,15 @@ class ConversationView(QtWidgets.QWidget):
         QtCore.QTimer.singleShot(0, lambda: bar.setValue(bar.maximum()))
 
     def set_composer_state(self, state: str) -> None:
-        """state: idle | running | stopping (mirrors Run state machine)."""
+        """state: idle | running | stopping | stopping-forceable."""
         self.send_button.setEnabled(state == "idle")
         self.input.setEnabled(state == "idle")
-        self.stop_button.setEnabled(state == "running")
-        self.stop_button.setText("Stopping…" if state == "stopping" else "Stop")
+        self.stop_button.setEnabled(state in {"running", "stopping-forceable"})
+        if state == "stopping-forceable":
+            self.stop_button.setText("Force stop")
+        else:
+            self.stop_button.setText(
+                "Stopping…" if state == "stopping" else "Stop")
 
     def _send(self) -> None:
         text = self.input.text().strip()

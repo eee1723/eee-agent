@@ -16,7 +16,10 @@ from eee_agent.panel.runtime_state import (
 )
 from houdini_side.runtime_panel import backend_launcher, theme, view_models
 from houdini_side.runtime_panel.approval_drawer import ApprovalDrawer
-from houdini_side.runtime_panel.client import RuntimeObserverClient
+from houdini_side.runtime_panel.client import (
+    RuntimeObserverClient,
+    SelectionQueryWorker,
+)
 from houdini_side.runtime_panel.context_bar import ContextBar
 from houdini_side.runtime_panel.conversation import ConversationView
 from houdini_side.runtime_panel.inspector import InspectorPane
@@ -47,15 +50,24 @@ class RuntimePanel(QtWidgets.QWidget):
         self._session_title = ""
         self._workspace_id: str | None = None
         self._active_run_id: str | None = None
+        self._active_run_status = ""
+        self._current_session_id = ""
+        self._expired_notice_id = None
         self._pending_changeset = None
         self._artifacts: tuple = ()
         self._visions: tuple = ()
         # Launch worker state: a one-slot result box plus a done event,
         # polled by a QTimer so the blocking launcher never touches the
-        # Houdini UI thread.
+        # Houdini UI thread. _closing lets the worker reap a backend it
+        # spawned after the panel has already closed.
         self._launch_done = threading.Event()
         self._launch_result: list = []
         self._launch_timer: QtCore.QTimer | None = None
+        self._closing = threading.Event()
+        self._selection_worker = SelectionQueryWorker(self)
+        self._selection_worker.queryStarted.connect(self._selection_started)
+        self._selection_worker.querySucceeded.connect(self._selection_succeeded)
+        self._selection_worker.queryFailed.connect(self._selection_failed)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -85,6 +97,7 @@ class RuntimePanel(QtWidgets.QWidget):
 
         self._wire()
         self._start_backend_and_connect()
+        QtCore.QTimer.singleShot(250, self._selection_worker.refresh)
 
     # -- wiring ---------------------------------------------------------
 
@@ -97,12 +110,15 @@ class RuntimePanel(QtWidgets.QWidget):
         c.changesetsChanged.connect(self._on_changesets)
         c.artifactObserved.connect(self._on_artifact)
         c.visionObserved.connect(self._on_vision)
+        c.commandSucceeded.connect(self._on_command_succeeded)
         c.commandFailed.connect(self._on_command_failed)
 
         self.session_sidebar.sessionChosen.connect(c.select_session)
         self.session_sidebar.newSessionRequested.connect(self._new_session)
         self.conversation.sendRequested.connect(self._send_run)
         self.conversation.stopRequested.connect(self._stop_run)
+        self.inspector.createWorkspaceRequested.connect(self._create_workspace)
+        self.inspector.inspectWorkspaceRequested.connect(self._inspect_workspace)
         self.approval_drawer.approved.connect(
             lambda: self._decide_changeset(True))
         self.approval_drawer.rejected.connect(
@@ -139,6 +155,12 @@ class RuntimePanel(QtWidgets.QWidget):
 
     def _launch_worker(self, repo_root: Path, state_dir: Path) -> None:
         result = backend_launcher.ensure_runtime(repo_root, state_dir)
+        if self._closing.is_set():
+            # Panel closed mid-launch: reap a spawned backend here; the UI
+            # thread will never poll the result box.
+            if result.process is not None:
+                backend_launcher.terminate(result.process)
+            return
         self._launch_result.append(result)
         self._launch_done.set()
 
@@ -170,12 +192,26 @@ class RuntimePanel(QtWidgets.QWidget):
 
     def _on_connection(self, state: str, message: str) -> None:
         self._connection = state
+        if state == "online":
+            self._selection_worker.refresh()
         self._refresh_context_bar()
 
     def _on_sessions(self, sessions, selected_id: str) -> None:
         self.session_sidebar.set_sessions(sessions, selected_id)
 
     def _on_session(self, session_id: str, title: str, cursor: int) -> None:
+        if session_id and session_id != self._current_session_id:
+            if self._current_session_id:
+                # A different Session's artifacts/visions must never mix
+                # into the inspector; reset and say so in the flow.
+                self._artifacts = ()
+                self._visions = ()
+                self.inspector.render_artifacts(())
+                self.inspector.render_visions(())
+                self.conversation.append_item(view_models.notice_card(
+                    f"Switched to session {title or session_id}.",
+                    tone="normal"))
+            self._current_session_id = session_id
         self._session_title = title
         self._refresh_context_bar()
 
@@ -186,6 +222,7 @@ class RuntimePanel(QtWidgets.QWidget):
             return
         if not snapshot:
             self._active_run_id = None
+            self._active_run_status = ""
             self._run_state = "idle"
             self.conversation.set_composer_state("idle")
             self.inspector.set_run_snapshot(None)
@@ -195,20 +232,20 @@ class RuntimePanel(QtWidgets.QWidget):
         self._active_run_id = (
             active.get("run_id") if type(active) is dict else None)
         shown = active if type(active) is dict else snapshot.get("selected_run")
-        if type(active) is dict:
-            status = active.get("status")
-            if status in _STOPPING_RUN_STATES:
-                self.conversation.set_composer_state("stopping")
-            elif status not in _TERMINAL_RUN_STATES:
-                self.conversation.set_composer_state("running")
-            else:
-                self.conversation.set_composer_state("idle")
+        status = active.get("status") if type(active) is dict else None
+        self._active_run_status = status if type(status) is str else ""
+        if self._active_run_status in _STOPPING_RUN_STATES:
+            # Stop was already requested; the remaining action is force stop.
+            self.conversation.set_composer_state("stopping-forceable")
+        elif type(active) is dict and (
+                self._active_run_status not in _TERMINAL_RUN_STATES):
+            self.conversation.set_composer_state("running")
         else:
             self.conversation.set_composer_state("idle")
         if type(shown) is dict:
-            status = shown.get("status")
-            if type(status) is str:
-                self._run_state = status
+            shown_status = shown.get("status")
+            if type(shown_status) is str:
+                self._run_state = shown_status
         else:
             self._run_state = "idle"
         self.inspector.set_run_snapshot(
@@ -217,13 +254,22 @@ class RuntimePanel(QtWidgets.QWidget):
 
     def _on_changesets(self, changesets) -> None:
         for summary in changesets:
-            if summary.get("state") == "AwaitingApproval":
-                # Store the exact summary so the decision forwards the same
-                # change_id / changeset_digest the gate rendered.
-                self._pending_changeset = summary
-                self.approval_drawer.show_changeset(summary)
-                self._position_drawer()
-                return
+            if summary.get("state") != "AwaitingApproval":
+                continue
+            if not approval_is_actionable(summary):
+                # Expired gate: the drawer would be dead, so say so once
+                # per change_id in the flow instead.
+                if summary.get("change_id") != self._expired_notice_id:
+                    self._expired_notice_id = summary.get("change_id")
+                    self.conversation.append_item(
+                        view_models.approval_result_card(False, expired=True))
+                continue
+            # Store the exact summary so the decision forwards the same
+            # change_id / changeset_digest the gate rendered.
+            self._pending_changeset = summary
+            self.approval_drawer.show_changeset(summary)
+            self._position_drawer()
+            return
         self._pending_changeset = None
         self.approval_drawer.hide_drawer()
 
@@ -237,6 +283,17 @@ class RuntimePanel(QtWidgets.QWidget):
         self._visions = append_vision_summary(self._visions, summary)
         self.inspector.render_visions(self._visions)
 
+    def _on_command_succeeded(self, purpose: str, result) -> None:
+        if not purpose.startswith("workspace.") or type(result) is not dict:
+            return
+        workspace = result.get("workspace")
+        if type(workspace) is dict:
+            workspace_id = workspace.get("workspace_id")
+            if type(workspace_id) is str:
+                self._workspace_id = workspace_id
+        self.inspector.set_workspace_facts(result)
+        self._refresh_context_bar()
+
     def _on_command_failed(self, purpose, code, message, retryable, fatal):
         if purpose == "run.start":
             # The Run never started; release the optimistic composer lock.
@@ -245,18 +302,48 @@ class RuntimePanel(QtWidgets.QWidget):
             view_models.notice_card(f"{purpose} failed: {message}",
                                     tone="error"))
 
+    # -- bridge state (SelectionQueryWorker, mirrors legacy) -----------------
+
+    def _selection_started(self) -> None:
+        self._bridge = "connecting"
+        self._refresh_context_bar()
+
+    def _selection_succeeded(self, result) -> None:
+        self._bridge = "ready"
+        self._refresh_context_bar()
+
+    def _selection_failed(self, code, message, retryable) -> None:
+        self._bridge = "unavailable"
+        self._refresh_context_bar()
+
     # -- user intents -------------------------------------------------------
 
     def _send_run(self, text: str) -> None:
+        if self._connection != "online":
+            # The client silently drops commands while offline; never let
+            # the composer wedge in "running" for a Run that was not sent.
+            self.conversation.append_item(view_models.notice_card(
+                "Runtime is offline; the Run was not sent.", tone="error"))
+            self.conversation.set_composer_state("idle")
+            return
         self.conversation.append_item(view_models.user_message(text))
         self._client.start_run(text)
         self.conversation.set_composer_state("running")
 
     def _stop_run(self) -> None:
+        if self._connection != "online":
+            self.conversation.append_item(view_models.notice_card(
+                "Runtime is offline; the stop request was not sent.",
+                tone="error"))
+            self.conversation.set_composer_state("idle")
+            return
         if not self._active_run_id:
             return
+        # Legacy shows a separate Force stop button once stopping; the
+        # composer reuses its one Stop button for both.
+        force = self._active_run_status in _STOPPING_RUN_STATES
         self.conversation.set_composer_state("stopping")
-        self._client.stop_run(self._active_run_id, force=False)
+        self._client.stop_run(self._active_run_id, force=force)
 
     def _decide_changeset(self, approve: bool) -> None:
         summary = self._pending_changeset
@@ -277,6 +364,12 @@ class RuntimePanel(QtWidgets.QWidget):
         # exec_(): the source boundary forbids the plain builtin-named call.
         if dialog.exec_() == QtWidgets.QDialog.DialogCode.Accepted:
             self._client.create_session(dialog.title())
+
+    def _create_workspace(self) -> None:
+        self._client.create_workspace()
+
+    def _inspect_workspace(self) -> None:
+        self._client.inspect_workspace(self._workspace_id)
 
     # -- responsive layout ---------------------------------------------------
 
@@ -325,10 +418,17 @@ class RuntimePanel(QtWidgets.QWidget):
     # -- teardown -------------------------------------------------------------
 
     def closeEvent(self, event) -> None:
+        self._closing.set()
         if self._launch_timer is not None and self._launch_timer.isActive():
             self._launch_timer.stop()
+        if (self._spawned_process is None and self._launch_result
+                and self._launch_result[0].process is not None):
+            # The worker finished between its closing check and the timer
+            # stop; the unpolled spawned backend is still ours to reap.
+            backend_launcher.terminate(self._launch_result[0].process)
         if self._spawned_process is not None:
             backend_launcher.terminate(self._spawned_process)
             self._spawned_process = None
+        self._selection_worker.detach()
         self._client.stop()
         super().closeEvent(event)

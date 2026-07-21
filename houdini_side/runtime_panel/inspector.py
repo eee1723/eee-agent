@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6 import QtGui, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 from houdini_side.runtime_panel import theme
 
@@ -19,6 +19,9 @@ def _text_view(parent: QtWidgets.QWidget) -> QtWidgets.QPlainTextEdit:
 class InspectorPane(QtWidgets.QWidget):
     """Right pane: structured read-only views of runtime state."""
 
+    createWorkspaceRequested = QtCore.Signal()
+    inspectWorkspaceRequested = QtCore.Signal()
+
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("InspectorPane")
@@ -30,7 +33,24 @@ class InspectorPane(QtWidgets.QWidget):
         self.run_view = _text_view(self)
         self.tabs.addTab(self.run_view, "RUN")
         self.workspace_view = _text_view(self)
-        self.tabs.addTab(self.workspace_view, "WORKSPACE")
+        workspace_tab = QtWidgets.QWidget()
+        workspace_layout = QtWidgets.QVBoxLayout(workspace_tab)
+        workspace_layout.setContentsMargins(0, 0, 0, 0)
+        actions = QtWidgets.QHBoxLayout()
+        self.create_workspace_button = QtWidgets.QPushButton("Create workspace")
+        self.create_workspace_button.setAutoDefault(False)
+        self.create_workspace_button.clicked.connect(
+            self.createWorkspaceRequested)
+        self.inspect_workspace_button = QtWidgets.QPushButton("Inspect")
+        self.inspect_workspace_button.setAutoDefault(False)
+        self.inspect_workspace_button.clicked.connect(
+            self.inspectWorkspaceRequested)
+        actions.addWidget(self.create_workspace_button)
+        actions.addWidget(self.inspect_workspace_button)
+        actions.addStretch(1)
+        workspace_layout.addLayout(actions)
+        workspace_layout.addWidget(self.workspace_view, 1)
+        self.tabs.addTab(workspace_tab, "WORKSPACE")
         self.validation_view = _text_view(self)
         self.tabs.addTab(self.validation_view, "VALIDATION")
         self.artifacts_view = _text_view(self)

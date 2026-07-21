@@ -122,6 +122,10 @@ def test_main_window_contract() -> None:
     assert "context_bar.set_status" in source
     assert "conversation.append_item" in source
     assert "approval_drawer.show_changeset" in source
+    assert "_closing" in source                 # mid-launch close reaps backend
+    assert "SelectionQueryWorker" in source     # bridge state wiring
+    assert "commandSucceeded" in source         # workspace flows
+    assert "stopping-forceable" in source       # force stop reachable
     assert 'def create_panel()' not in source  # factory stays in __init__
 
 

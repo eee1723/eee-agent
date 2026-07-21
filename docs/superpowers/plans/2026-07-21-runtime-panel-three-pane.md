@@ -1913,6 +1913,36 @@ git commit -m "feat: assemble three-pane runtime panel with backend auto-start"
    - A failed `run.start` command resets the composer to `idle` so the
      optimistic `running` state cannot wedge when no Session is active.
 
+8. **Review follow-up fixes (commit "fix: close offline composer wedge, …"):**
+   - Offline send gate: `_send_run` / `_stop_run` require
+     `self._connection == "online"` because `client._send` silently drops
+     commands while offline; otherwise an error notice card is appended
+     and the composer returns to `idle` (no more `running`/`stopping`
+     wedge).
+   - Mid-launch close reap: `self._closing` (`threading.Event`) is set
+     first in `closeEvent`; `_launch_worker` terminates a spawned process
+     itself when the panel closed before the poll, and `closeEvent` reaps
+     an unpolled result-box process to close the remaining race.
+   - Session switch reset: `_current_session_id` is tracked; a genuinely
+     different session id clears the artifact/vision tuples, re-renders
+     the inspector, and appends a "Switched to session …" notice card.
+   - Bridge state: `SelectionQueryWorker` is wired like legacy
+     (`queryStarted`→connecting, `querySucceeded`→ready,
+     `queryFailed`→unavailable), refreshed on connect and once at startup
+     via `QTimer.singleShot`; selection rows stay out of scope.
+   - Workspace flows: `commandSucceeded` handles `workspace.*` purposes —
+     `_workspace_id` from `result["workspace"]["workspace_id"]`, facts to
+     `inspector.set_workspace_facts`; the WORKSPACE tab gained
+     "Create workspace" / "Inspect" buttons (signals on `InspectorPane`,
+     client calls in the panel, mirroring legacy affordances).
+   - Expired changesets: `_on_changesets` only opens the drawer for
+     `approval_is_actionable` summaries; an expired `AwaitingApproval`
+     gets one `approval_result_card(expired=True)` per change_id.
+   - Force stop reachable: composer state `stopping-forceable` (button
+     stays enabled, text "Force stop") when the active run is
+     `StopRequested`/`Stopping`; `_stop_run` then calls
+     `stop_run(run_id, force=True)` (legacy `_update_run_controls`).
+
 ---
 
 ### Task 11: Remove legacy panel, final gates, GUI checklist handoff
