@@ -223,6 +223,20 @@ Still required:
   items are unchanged. Backend startup is automatic (panel spawns
   `python -m eee_agent.runtime serve` when discovery is missing) — verify
   the auto-start path as part of the checklist's reconnect/restart item.
+- 2026-07-21 (conversation UX): the panel now streams assistant replies
+  token-by-token (`model.text_delta`, already pushed by the backend) and
+  renders a collapsible thinking block from `model.reasoning_delta` (new
+  panel-side accumulator in `RuntimePanelState._thinking`; OPERATIONAL, not
+  replayed from history). Cards branch on `kind` (user accent bubble vs
+  assistant surface card). The composer is multi-line with Ctrl+Enter submit
+  (bare Enter inserts a newline so IME confirmation stays safe). Sending the
+  first prompt with no active Session auto-creates one (placeholder
+  "New session"); once its first run completes the backend renames it via a
+  best-effort LLM call (`eee_agent/runtime/titles.py` +
+  `RuntimeService._maybe_autotitle_session`), and the panel refreshes the
+  sidebar in place on the `session.renamed` event. The previous "no reply"
+  bug (terminal-only output render) is superseded by live streaming. Full
+  offline gate: ~2960 passed, 11 skipped.
 
 ## Residual P2 risks
 
