@@ -43,8 +43,6 @@ BUTTON_HOVER = "#26383c"       # cyan-tinted hover wash
 PRESSED = "#1d2a2e"
 PRESSED_FG = "#e7e9ec"
 PRIMARY = "#63c7c9"            # cyan: the one accent hue
-PRIMARY_HOVER = "#7fd4d6"
-PRIMARY_PRESSED = "#4fafb1"
 CHECKED_SURFACE = "#29353a"
 CHECKED_FG = "#e7e9ec"
 
@@ -106,28 +104,21 @@ QToolButton#ThinkingToggle {{ background: transparent; border: none;
 QToolButton#ThinkingToggle:checked {{ color: {primary}; }}
 QPushButton {{ background: transparent; color: {primary};
     border: 1px solid {primary}; border-radius: 3px;
-    padding: 3px 14px; min-height: 17px; font-weight: 600; }}
+    padding: 6px 12px; font-weight: 600; }}
 QPushButton:hover {{ background: {button_hover}; }}
-QPushButton:pressed {{ background: {pressed}; color: {pressed_fg}; }}
+QPushButton:pressed {{ background: {pressed}; }}
 QPushButton:disabled {{ color: {fg_dimmer}; border-color: {divider};
     background: transparent; }}
-QPushButton#PrimaryButton {{ background: {primary}; color: {bg};
-    border: 1px solid {primary}; }}
-QPushButton#PrimaryButton:hover {{ background: {primary_hover};
-    border-color: {primary_hover}; }}
-QPushButton#PrimaryButton:pressed {{ background: {primary_pressed};
-    border-color: {primary_pressed}; }}
-QPushButton#PrimaryButton:disabled {{ background: {surface4};
-    color: {fg_dimmer}; border-color: {divider}; }}
 QPushButton#DangerButton {{ color: {status_error};
     border-color: {status_error}; }}
 QPushButton#DangerButton:hover {{ background: #3b2526; }}
 QPushButton#DangerButton:disabled {{ color: {fg_dimmer};
     border-color: {divider}; background: transparent; }}
-QPushButton#GateApprove {{ background: {highlight}; color: {highlight_fg};
+QPushButton#GateApprove {{ color: {highlight};
     border-color: {highlight}; }}
-QPushButton#GateApprove:hover {{ background: {highlight_surface};
-    color: {fg_prominent}; }}
+QPushButton#GateApprove:hover {{ background: {highlight_surface}; }}
+QPushButton#GateApprove:disabled {{ color: {fg_dimmer};
+    border-color: {divider}; background: transparent; }}
 QLineEdit, QPlainTextEdit, QComboBox, QSpinBox {{
     background: {field}; color: {field_fg}; border: 1px solid {divider};
     border-radius: 3px; padding: 2px 6px; min-height: 17px;
@@ -192,7 +183,6 @@ def build_qss() -> str:
         divider=DIVIDER, pane_divider=PANE_DIVIDER,
         button=BUTTON, button_hover=BUTTON_HOVER, pressed=PRESSED,
         pressed_fg=PRESSED_FG, primary=PRIMARY,
-        primary_hover=PRIMARY_HOVER, primary_pressed=PRIMARY_PRESSED,
         accent=ACCENT, accent_fg=ACCENT_FG, accent_surface=ACCENT_SURFACE,
         thinking_surface=THINKING_SURFACE,
         checked_surface=CHECKED_SURFACE, checked_fg=CHECKED_FG,

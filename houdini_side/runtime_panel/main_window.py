@@ -57,6 +57,12 @@ class RuntimePanel(QtWidgets.QWidget):
         # Run output is append-only in the card flow (unlike legacy's single
         # text box), so render each run's final output exactly once.
         self._shown_output_run_id: str | None = None
+        # C: history replay flag. _on_session sets this when the active
+        # session changes (including the first activation after connect);
+        # _on_snapshot consumes it once and rebuilds the conversation flow
+        # from snapshot["runs"] so past turns are visible instead of being
+        # truncated to only the latest reply.
+        self._history_needs_replay = False
         self._current_session_id = ""
         self._expired_notice_id = None
         self._pending_changeset = None
@@ -233,7 +239,16 @@ class RuntimePanel(QtWidgets.QWidget):
                 self.conversation.append_item(view_models.notice_card(
                     f"Switched to session {title or session_id}.",
                     tone="normal"))
+            else:
+                # First activation after connect: clear any boot notice and
+                # reset the shown-output marker so replay re-emits every run.
+                self._shown_output_run_id = None
+                self.conversation.clear_items()
             self._current_session_id = session_id
+            # C: ask the next snapshot to rebuild the conversation flow from
+            # snapshot["runs"]. The snapshot arrives moments after this signal
+            # and carries the full per-session run list (up to 100 runs).
+            self._history_needs_replay = True
         self._session_title = title
         self._refresh_context_bar()
 
@@ -251,6 +266,13 @@ class RuntimePanel(QtWidgets.QWidget):
             self.inspector.set_run_snapshot(None, ())
             self._refresh_context_bar()
             return
+        # C: when the active session changed (or the panel just connected),
+        # rebuild the conversation flow from snapshot["runs"] so past turns
+        # are visible. Done once per session activation; subsequent snapshots
+        # only update the active run's streaming/final card.
+        if self._history_needs_replay:
+            self._replay_history(snapshot)
+            self._history_needs_replay = False
         active = snapshot.get("active_run")
         self._active_run_id = (
             active.get("run_id") if type(active) is dict else None)
@@ -280,6 +302,65 @@ class RuntimePanel(QtWidgets.QWidget):
         )
         self._maybe_render_output(snapshot, shown)
         self._refresh_context_bar()
+
+    def _replay_history(self, snapshot) -> None:
+        """C: rebuild the conversation card flow from snapshot["runs"].
+
+        Called once per session activation. For each past run in chronological
+        order, append the user prompt as a user card and the assistant reply
+        as an assistant card (or a streaming card if the run is still active
+        and non-terminal, so the live streaming path can take over). Runs
+        without a final_response still get a user card so the timeline shows
+        the prompt even if the reply never landed.
+        """
+        runs = snapshot.get("runs") if hasattr(snapshot, "get") else None
+        if type(runs) is not list and not (
+            hasattr(runs, "__iter__") and not isinstance(runs, (str, bytes))
+        ):
+            return
+        active_run_id = self._active_run_id
+        # snapshot["runs"] is already chronological (oldest first); iterate
+        # in that order so the card flow reads top-to-bottom.
+        for run in runs:
+            if type(run) is not dict:
+                continue
+            run_id = run.get("run_id")
+            user_input = run.get("user_input")
+            if type(user_input) is str and user_input:
+                self.conversation.append_item(view_models.user_message(user_input))
+            status = run.get("status")
+            status_text = status if type(status) is str else ""
+            final = run.get("final_response")
+            final_text = final if type(final) is str else ""
+            is_terminal = status_text in _TERMINAL_RUN_STATES
+            if type(run_id) is str and run_id == active_run_id and not is_terminal:
+                # The active run is streamed live by _maybe_render_output;
+                # seed an empty streaming card here so that path can update
+                # it in place instead of appending a duplicate.
+                self.conversation.update_streaming("", thinking="")
+                continue
+            if final_text or is_terminal:
+                # Terminal run: emit its final reply. Empty replies still
+                # produce a card so the user sees the run completed.
+                self.conversation.append_item(
+                    view_models.assistant_message(final_text))
+        # After replay, mark the active run (if any) as the shown output so
+        # _maybe_render_output does not double-emit it on the same snapshot.
+        if type(active_run_id) is str:
+            # The streaming path will replace the streaming card with a
+            # final assistant_message on termination; until then it owns
+            # this run's card. Leave _shown_output_run_id alone for active
+            # non-terminal runs (only set when terminal below).
+            active_run = None
+            for run in runs:
+                if type(run) is dict and run.get("run_id") == active_run_id:
+                    active_run = run
+                    break
+            if type(active_run) is dict:
+                active_status = active_run.get("status")
+                if (type(active_status) is str
+                        and active_status in _TERMINAL_RUN_STATES):
+                    self._shown_output_run_id = active_run_id
 
     def _maybe_render_output(self, snapshot, shown) -> None:
         # Stream the run's text + thinking into the trailing assistant card,
