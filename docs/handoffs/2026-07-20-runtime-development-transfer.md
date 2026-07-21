@@ -213,6 +213,13 @@ Still required:
   MODEL -> REVIEW -> Approve and build -> RESULT journey.
 - Screenshots/checklist evidence must remain machine-local; do not commit
   secrets, prompts or unredacted provider output.
+- 2026-07-21: the panel view layer was rebuilt as the three-pane
+  conversation-centric layout (spec
+  `docs/superpowers/specs/2026-07-21-runtime-panel-three-pane-design.md`).
+  The interactive GUI checklist must now run against this UI; the checklist
+  items are unchanged. Backend startup is automatic (panel spawns
+  `python -m eee_agent.runtime serve` when discovery is missing) — verify
+  the auto-start path as part of the checklist's reconnect/restart item.
 
 ## Residual P2 risks
 

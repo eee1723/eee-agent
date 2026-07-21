@@ -31,7 +31,6 @@ agree with the supplied manifest); these raw values are never exposed in a DTO.
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import os
 from collections import OrderedDict
@@ -40,7 +39,7 @@ from pathlib import Path
 
 from eee_agent.changesets.contracts import (
     ChangeReceipt,
-    CheckpointPlan,
+    ChangeSet,
     ConditionResult,
     ConnectInput,
     CreateNode,

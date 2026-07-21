@@ -7,7 +7,6 @@ and the small dialog/IME helpers used by the legacy RuntimePanel widget.
 from __future__ import annotations
 
 import itertools
-import json
 import sys
 import threading
 from pathlib import Path
@@ -30,9 +29,6 @@ from eee_agent.panel.client_state import (  # noqa: E402
 )
 from eee_agent.panel.runtime_state import (  # noqa: E402
     RuntimePanelState,
-    append_artifact_summary,
-    append_vision_summary,
-    approval_is_actionable,
     artifact_refresh_required,
     changeset_refresh_required,
     parse_artifact_event,

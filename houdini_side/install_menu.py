@@ -69,7 +69,7 @@ def install() -> None:
             "houdini": {"python3.11libs": "$EEE_PATH/houdini_side"},
         }, f, indent=2)
 
-    print(f"EEE Agent package installed.")
+    print("EEE Agent package installed.")
     print(f"  package file: {package_file}")
     print(f"  project root: {root_fwd}")
     print(f"  menu xml:     {root_fwd}/MainMenuCommon.xml")

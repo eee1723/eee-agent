@@ -129,7 +129,7 @@ def register_fonts() -> None:
     (no Qt) can import this module.
     """
     try:
-        import hou  # type: ignore
+        import hou  # type: ignore  # noqa: F401  (availability probe)
         from PySide6 import QtGui
     except ImportError:
         return
