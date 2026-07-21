@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Exact schema v1 DDL from the approved design spec section 7.3. No IF NOT
 # EXISTS: a partially-wrong schema must surface, not be silently masked.
@@ -192,6 +192,13 @@ UPDATE artifacts SET updated_at = created_at WHERE updated_at = '1970-01-01T00:0
 CREATE INDEX artifacts_by_state_updated ON artifacts(artifact_state, updated_at);
 """
 
+# Exact schema v6 DDL (Task D-2). Additive only: a nullable JSON column on
+# runs carries the deepagents TodoListMiddleware state so a run's todos survive
+# a reconnect and can seed the next run. Existing rows receive NULL.
+MIGRATION_V6_SQL = """
+ALTER TABLE runs ADD COLUMN todos_json TEXT NULL;
+"""
+
 # Ordered migrations. Each entry is (version, SQL script). The orchestrator
 # splits the script into statements and runs them in one atomic transaction.
 MIGRATIONS: tuple[tuple[int, str], ...] = (
@@ -200,6 +207,7 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     (3, MIGRATION_V3_SQL),
     (4, MIGRATION_V4_SQL),
     (5, MIGRATION_V5_SQL),
+    (6, MIGRATION_V6_SQL),
 )
 
 
