@@ -38,6 +38,7 @@ def _run(*, status: str = "Planning", final: str | None = None) -> dict:
         "finished_at": None,
         "failure_json": None,
         "model_snapshot_json": {"model": "fake"},
+        "todos": [],
     }
 
 
@@ -848,3 +849,77 @@ def test_b2_recovery_critical_event_also_recorded() -> None:
     assert outcome["receipt_status"] == "CriticalRecovery"
     assert outcome["scene_may_have_changed"] is True
     assert outcome["error_code"] == "apply.unexpected_error"
+
+
+# --------------------------------------------------------------------------
+# D-1/D-2: todos.updated events update run.todos
+# --------------------------------------------------------------------------
+
+
+def test_d1_d2_todos_updated_event_updates_run_todos() -> None:
+    """The D-1 todos.updated event carries the new plan; the panel state must
+    stash it on run['todos'] so the UI's TodoList widget can render it."""
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=10))
+    assert state.apply_event(
+        _event(
+            11,
+            "todos.updated",
+            {"todos": [
+                {"content": "Plan", "status": "completed"},
+                {"content": "Apply", "status": "in_progress"},
+            ]},
+        )
+    )
+    snap = state.snapshot()
+    selected = snap["selected_run"]
+    assert selected["todos"] == [
+        {"content": "Plan", "status": "completed"},
+        {"content": "Apply", "status": "in_progress"},
+    ]
+
+
+def test_d1_d2_todos_updated_empty_list_clears_run_todos() -> None:
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=10))
+    state.apply_event(_event(11, "todos.updated", {"todos": [
+        {"content": "x", "status": "pending"}]}))
+    assert state.snapshot()["selected_run"]["todos"] == [
+        {"content": "x", "status": "pending"}]
+    # Empty list signal clears it.
+    state.apply_event(_event(12, "todos.updated", {"todos": []}))
+    assert state.snapshot()["selected_run"]["todos"] == []
+
+
+def test_d1_d2_todos_updated_rejects_non_list_payload() -> None:
+    """A malformed event must not corrupt the run; reject it loudly so the
+    server-side bug surfaces instead of silently dropping todos."""
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=10))
+    with pytest.raises(PanelClientError):
+        state.apply_event(_event(11, "todos.updated", {"todos": "not a list"}))
+
+
+def test_d2_snapshot_run_carries_todos_field() -> None:
+    """The server-side RunRecord now emits todos via to_dict; the panel must
+    accept a snapshot whose runs include the todos field."""
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=None, seq=5) | {
+        "runs": [_run() | {"todos": [
+            {"content": "from server", "status": "completed"}
+        ]}]
+    })
+    snap = state.snapshot()
+    runs = snap["runs"]
+    assert len(runs) == 1
+    assert runs[0]["todos"] == [{"content": "from server", "status": "completed"}]
+
+
+def test_d2_snapshot_run_rejects_missing_todos_field() -> None:
+    """A snapshot without the todos field is invalid (server is required to
+    emit it post-D-2)."""
+    state = RuntimePanelState()
+    bad_run = _run()
+    del bad_run["todos"]
+    with pytest.raises(PanelClientError):
+        state.load_snapshot(_snapshot(active=None, seq=5) | {"runs": [bad_run]})

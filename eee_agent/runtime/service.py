@@ -1588,6 +1588,9 @@ class RuntimeService:
                 "output_tokens": 0,
                 "total_tokens": 0,
             }
+            # D-2: last-seen todos payload, written to runs.todos_json when the
+            # run terminates. None means no todos.updated event arrived.
+            last_todos: list | None = None
             if isinstance(runner, AgentRunner):
                 stream = runner.stream(
                     session_id=session_id,
@@ -1607,9 +1610,27 @@ class RuntimeService:
                         dict(event.payload),
                         event.retention_class,
                     )
+                    # D-2: track the latest todos payload so it can be persisted
+                    # once when the run terminates. Streaming it on every event
+                    # would flood the writes column; capturing the last value
+                    # and writing it after the stream ends is enough for the UI
+                    # to render the plan that was active at completion.
+                    if event.event_type == "todos.updated":
+                        last_todos = list(event.payload.get("todos") or [])
                 elif isinstance(event, RunnerCompleted):
                     final_response = event.final_response
                     usage = dict(event.usage)
+            # D-2: persist the final todos snapshot for this run before
+            # transitioning to FINALIZING. Best-effort: a persistence failure
+            # must not break the run — the event stream already carried the
+            # todos live to any connected UI.
+            if last_todos is not None:
+                try:
+                    await self._runs.update_todos(run_id, last_todos)
+                except Exception:  # noqa: BLE001 — never block the run on todos I/O
+                    _log.exception(
+                        "todos persistence failed (run=%s)", run_id
+                    )
             await self._transition_and_emit(
                 session_id, run_id, RunStatus.FINALIZING
             )

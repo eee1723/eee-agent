@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 
 from eee_agent.core import (
@@ -41,7 +42,7 @@ _TERMINAL_VALUES = tuple(state.value for state in _TERMINAL_STATES)
 
 _RUN_COLUMNS = (
     "run_id, session_id, status, user_input, final_response, created_at, "
-    "started_at, finished_at, failure_json, model_snapshot_json"
+    "started_at, finished_at, failure_json, model_snapshot_json, todos_json"
 )
 _SELECT_RUN = f"SELECT {_RUN_COLUMNS} FROM runs WHERE run_id = ?"
 _SELECT_RUNS_FOR_SESSION = (
@@ -160,6 +161,14 @@ def _invalid_transition(current: RunStatus, target: RunStatus) -> AgentException
 
 
 def _row_to_run(row) -> RunRecord:
+    # D-2: todos_json is nullable (legacy rows from schema v5 and runs that
+    # never wrote a todo list). Thaw to a tuple of mappings; empty when NULL.
+    todos_text = row["todos_json"] if "todos_json" in row.keys() else None
+    todos: tuple[Mapping[str, object], ...] = ()
+    if todos_text:
+        thawed = canonical_json_loads(todos_text)
+        if isinstance(thawed, list):
+            todos = tuple(item for item in thawed if isinstance(item, Mapping))
     return RunRecord(
         run_id=row["run_id"],
         session_id=row["session_id"],
@@ -177,6 +186,7 @@ def _row_to_run(row) -> RunRecord:
             canonical_json_loads(row["failure_json"]) if row["failure_json"] else None
         ),
         model_snapshot_json=canonical_json_loads(row["model_snapshot_json"]),
+        todos=todos,
     )
 
 
@@ -290,6 +300,32 @@ class RunRepository:
         if value is None:
             return None
         return require_id(value, IdKind.RUN)
+
+    async def update_todos(
+        self,
+        run_id: str,
+        todos: Sequence[Mapping[str, object]],
+    ) -> None:
+        """D-2: persist the latest deepagents TodoList state for a run.
+
+        Idempotent and best-effort at the row level: callers invoke this on
+        every todos.updated event so the latest plan survives a Runtime
+        restart and can seed the next run. Does NOT change run status or
+        timestamps; the run continues to flow through transition() normally.
+        """
+        rid = _require_run_id(run_id)
+        if not isinstance(todos, (list, tuple)):
+            raise TypeError("todos must be a list or tuple")
+        # Canonical-JSON round-trip so the stored text matches the wire shape
+        # and a caller mutating the input after this call cannot affect the
+        # persisted copy.
+        payload = [dict(item) for item in todos if isinstance(item, Mapping)]
+        payload_text = canonical_json_dumps(payload) if payload else None
+        async with self._database.write_transaction() as conn:
+            await conn.execute(
+                "UPDATE runs SET todos_json = ? WHERE run_id = ?",
+                (payload_text, rid),
+            )
 
     async def transition(
         self,

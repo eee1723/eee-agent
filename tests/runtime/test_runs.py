@@ -1307,3 +1307,176 @@ def test_create_captures_model_snapshot_before_first_await(db_path: Path) -> Non
             await db.close()
 
     _run(scenario())
+
+
+# --------------------------------------------------------------------------
+# D-2: deepagents todos persistence on runs.todos_json
+# --------------------------------------------------------------------------
+
+
+def test_d2_run_record_carries_empty_todos_by_default(db_path: Path) -> None:
+    """A freshly created run has no deepagents todos yet; the field exists
+    but is empty so the panel/UI can render an empty TodoList widget."""
+    async def scenario() -> None:
+        db, sessions, runs = await _open(db_path)
+        try:
+            session = await sessions.create("A")
+            run = await runs.create_and_acquire(
+                session.session_id, "inspect", {"model": "fake"}
+            )
+            assert run.todos == ()
+            assert run.to_dict()["todos"] == []
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_d2_update_todos_persists_and_round_trips(db_path: Path) -> None:
+    """update_todos writes runs.todos_json; a subsequent fetch reads it back
+    as RunRecord.todos with the same shape."""
+    async def scenario() -> None:
+        db, sessions, runs = await _open(db_path)
+        try:
+            session = await sessions.create("A")
+            run = await runs.create_and_acquire(
+                session.session_id, "inspect", {"model": "fake"}
+            )
+            todos_payload = [
+                {"content": "Plan proposal", "status": "completed"},
+                {"content": "Apply changes", "status": "in_progress"},
+            ]
+            await runs.update_todos(run.run_id, todos_payload)
+            reloaded = await runs.get(run.run_id)
+            assert reloaded.todos == (
+                {"content": "Plan proposal", "status": "completed"},
+                {"content": "Apply changes", "status": "in_progress"},
+            )
+            to_dict = reloaded.to_dict()
+            assert to_dict["todos"] == todos_payload
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_d2_update_todos_empty_list_clears_column(db_path: Path) -> None:
+    """Writing an empty list stores NULL so the row does not accumulate
+    stale '[]' text."""
+    async def scenario() -> None:
+        db, sessions, runs = await _open(db_path)
+        try:
+            session = await sessions.create("A")
+            run = await runs.create_and_acquire(
+                session.session_id, "inspect", {"model": "fake"}
+            )
+            await runs.update_todos(run.run_id, [
+                {"content": "first", "status": "pending"},
+            ])
+            await runs.update_todos(run.run_id, [])  # cleared
+            reloaded = await runs.get(run.run_id)
+            assert reloaded.todos == ()
+            row = await db.fetchone(
+                "SELECT todos_json FROM runs WHERE run_id = ?",
+                (run.run_id,),
+            )
+            assert row["todos_json"] is None
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_d2_update_todos_rejects_non_list(db_path: Path) -> None:
+    async def scenario() -> None:
+        _, sessions, runs = await _open(db_path)
+        try:
+            session = await sessions.create("A")
+            run = await runs.create_and_acquire(
+                session.session_id, "inspect", {"model": "fake"}
+            )
+            with pytest.raises(TypeError):
+                await runs.update_todos(run.run_id, "not a list")  # type: ignore[arg-type]
+        finally:
+            pass
+
+    _run(scenario())
+
+
+def test_d2_update_todos_filters_non_mapping_items(db_path: Path) -> None:
+    """Non-dict items in the input are silently dropped so a malformed
+    deepagents payload cannot corrupt the column."""
+    async def scenario() -> None:
+        db, sessions, runs = await _open(db_path)
+        try:
+            session = await sessions.create("A")
+            run = await runs.create_and_acquire(
+                session.session_id, "inspect", {"model": "fake"}
+            )
+            await runs.update_todos(run.run_id, [
+                {"content": "ok", "status": "pending"},
+                "junk",
+                None,
+                {"content": "also ok", "status": "completed"},
+            ])
+            reloaded = await runs.get(run.run_id)
+            assert len(reloaded.todos) == 2
+        finally:
+            await db.close()
+
+    _run(scenario())
+
+
+def test_d2_todos_survive_reopen(db_path: Path) -> None:
+    """The persisted todos must survive a Runtime restart (db close + reopen)
+    so the next session activation can render the plan again."""
+    async def scenario() -> None:
+        db, sessions, runs = await _open(db_path)
+        try:
+            session = await sessions.create("A")
+            run = await runs.create_and_acquire(
+                session.session_id, "inspect", {"model": "fake"}
+            )
+            await runs.update_todos(run.run_id, [
+                {"content": "Plan", "status": "completed"},
+                {"content": "Apply", "status": "in_progress"},
+            ])
+        finally:
+            await db.close()
+        # Reopen and confirm the same data round-trips through fetch.
+        db2, sessions2, runs2 = await _open(db_path)
+        try:
+            reloaded = await runs2.get(run.run_id)
+            assert reloaded.todos == (
+                {"content": "Plan", "status": "completed"},
+                {"content": "Apply", "status": "in_progress"},
+            )
+        finally:
+            await db2.close()
+
+    _run(scenario())
+
+
+def test_d2_legacy_null_todos_column_loads_as_empty(db_path: Path) -> None:
+    """A row written before schema v6 has todos_json = NULL. Reading it must
+    surface an empty todos tuple instead of raising."""
+    async def scenario() -> None:
+        db, sessions, runs = await _open(db_path)
+        try:
+            session = await sessions.create("A")
+            run = await runs.create_and_acquire(
+                session.session_id, "inspect", {"model": "fake"}
+            )
+            # Force the column back to NULL to simulate a legacy row.
+            async with db.write_transaction() as conn:
+                await conn.execute(
+                    "UPDATE runs SET todos_json = NULL WHERE run_id = ?",
+                    (run.run_id,),
+                )
+            reloaded = await runs.get(run.run_id)
+            assert reloaded.todos == ()
+            assert reloaded.to_dict()["todos"] == []
+        finally:
+            await db.close()
+
+    _run(scenario())

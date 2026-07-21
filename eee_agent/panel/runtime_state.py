@@ -143,6 +143,9 @@ _RUN_FIELDS = frozenset(
         "finished_at",
         "failure_json",
         "model_snapshot_json",
+        # D-2: deepagents TodoList snapshot captured at run termination.
+        # List of {content, status} dicts (possibly empty).
+        "todos",
     }
 )
 _SESSION_FIELDS = frozenset(
@@ -266,6 +269,11 @@ def _validate_run(value: object) -> dict[str, object]:
     if run["failure_json"] is not None and type(run["failure_json"]) is not dict:
         raise PanelClientError("Runtime Run snapshot is invalid.")
     if type(run["model_snapshot_json"]) is not dict:
+        raise PanelClientError("Runtime Run snapshot is invalid.")
+    # D-2: todos must be a list (possibly empty). Items are validated lazily
+    # by the consumer; here we only enforce the outer shape so a malformed
+    # snapshot cannot crash the panel state machine.
+    if type(run["todos"]) is not list:
         raise PanelClientError("Runtime Run snapshot is invalid.")
     return run
 
@@ -401,6 +409,9 @@ class RuntimePanelState:
                 "finished_at": None,
                 "failure_json": None,
                 "model_snapshot_json": {},
+                # D-2: empty until a todos.updated event arrives or a fresh
+                # snapshot repopulates it from RunRecord.todos.
+                "todos": [],
             }
             self._runs[rid] = run
             if rid not in self._run_order:
@@ -449,6 +460,17 @@ class RuntimePanelState:
                 if type(error) is not dict:
                     raise PanelClientError("Runtime failure event is invalid.")
                 run["failure_json"] = dict(error)
+            elif event_type == "todos.updated":
+                # D-1/D-2: deepagents' write_todos tool produced a new plan.
+                # Stash the latest list on the run so the UI's TodoList widget
+                # and the snapshot can render it. Items are normalized on the
+                # producer side (agent_runner._normalize_todos); here we only
+                # enforce the outer list shape so a malformed event cannot
+                # crash the panel.
+                todos = payload.get("todos")
+                if type(todos) is not list:
+                    raise PanelClientError("Runtime todos event is invalid.")
+                run["todos"] = list(todos)
             elif event_type in (
                 "changeset.applied",
                 "changeset.rolled_back",

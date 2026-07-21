@@ -232,6 +232,11 @@ class RunRecord:
     finished_at: datetime | None
     failure_json: Mapping[str, object] | None
     model_snapshot_json: Mapping[str, object]
+    # D-2: snapshot of the deepagents TodoListMiddleware state captured at
+    # run termination. Empty tuple means the run never wrote a todo list.
+    # Kept optional + default-empty so legacy construction sites that do not
+    # know about todos still work.
+    todos: tuple[Mapping[str, object], ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.run_id) is not str:
@@ -268,6 +273,14 @@ class RunRecord:
         object.__setattr__(
             self, "model_snapshot_json", freeze_json(self.model_snapshot_json)
         )
+        # D-2: todos is a tuple of mappings; freeze each entry defensively.
+        if type(self.todos) is not tuple:
+            raise TypeError("todos must be an exact tuple")
+        frozen_todos = tuple(
+            freeze_json(item) if type(item) is dict else item
+            for item in self.todos
+        )
+        object.__setattr__(self, "todos", frozen_todos)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -287,6 +300,10 @@ class RunRecord:
                 thaw_json(self.failure_json) if self.failure_json is not None else None
             ),
             "model_snapshot_json": thaw_json(self.model_snapshot_json),
+            # D-2: thaw the frozen todo mappings back to plain dicts for the
+            # JSON wire format.
+            "todos": [thaw_json(item) if isinstance(item, Mapping) else dict(item)
+                      for item in self.todos],
         }
 
 
