@@ -97,3 +97,14 @@ def test_approval_drawer_contract() -> None:
     assert "Approve and build" in source
     assert "Reject" in source
     assert "approval_is_actionable" in source       # digest binding enforced
+
+
+def test_inspector_contract() -> None:
+    source = _source("inspector.py")
+    for tab in ('"RUN"', '"WORKSPACE"', '"VALIDATION"', '"ARTIFACTS"'):
+        assert tab in source
+    assert "def set_run_snapshot(self, snapshot)" in source
+    assert "def set_workspace_facts(self, facts)" in source
+    assert "def set_validation_report(self, report)" in source
+    assert "def render_artifacts(self, summaries)" in source
+    assert "def render_visions(self, summaries)" in source
