@@ -1,13 +1,15 @@
-"""Eval orchestrator: run each case (fresh scene -> agent -> evaluate export).
+"""Offline geometry evaluation harness.
 
-Modes:
-  python -m eval.run_eval            run the agent for every case, then assert
-  python -m eval.run_eval --dry      skip the agent; just assert already-exported files
-  python -m eval.run_eval --case 3-storey house with windows   run one case
+``--dry`` is the only executable evaluation path: it checks already-exported
+geometry files against declarative case expectations. Live agent execution is
+intentionally deferred until Runtime MVP S6 provides a bounded, authenticated
+provider. This module must not load removed legacy tools or reset Houdini scenes.
 
-The agent must be able to connect to the Houdini RPC bridge and have a working
-LLM key in .env. ``--dry`` needs neither — it only parses exported .obj files.
+Examples:
+  python -m eval.run_eval --dry
+  python -m eval.run_eval --dry --case "3-storey house with windows"
 """
+
 from __future__ import annotations
 
 import argparse
@@ -18,7 +20,7 @@ from typing import Any, Dict, List
 
 import yaml
 
-from eee_agent.config import recursion_limit, repo_root
+from eee_agent.config import repo_root
 from eval.geometry_assertions import check_file
 
 
@@ -41,41 +43,28 @@ def _abs(path: str) -> str:
     return path if os.path.isabs(path) else os.path.join(repo_root(), path)
 
 
-def run_case_with_agent(case: Dict[str, Any], agent) -> Dict[str, Any]:
-    from eee_agent.tools import scene  # imported lazily (needs bridge)
+_LIVE_DEFERRED = (
+    "Live agent evaluation is deferred until Runtime MVP S6 provides the "
+    "authenticated, bounded provider; use --dry for file assertions."
+)
 
-    export = case.get("export_path", "output/house.obj")
-    prompt = case["prompt"]
-    # Guarantee the export target matches what we evaluate.
-    if "export" not in prompt.lower():
-        prompt = f"{prompt.rstrip('.')} and export to {export}."
 
-    scene.scene_reset.invoke({"scope": "/obj"})  # fresh scene per case
-    invoked_ok = True
-    invoke_err = ""
-    try:
-        agent.invoke(
-            {"messages": [{"role": "user", "content": prompt}]},
-            config={"recursion_limit": recursion_limit()},
-        )
-    except Exception as e:  # noqa: BLE001
-        invoked_ok = False
-        invoke_err = f"{type(e).__name__}: {e}"
-
-    res = check_file(_abs(export), case.get("expect", {}))
-    res["name"] = case["name"]
-    res["invoked_ok"] = invoked_ok
-    if invoke_err:
-        res["issues"].append(f"invoke error: {invoke_err}")
-        res["ok"] = False
-    return res
+def evaluate_live_deferred(case: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a bounded unsupported result without starting an agent or Houdini."""
+    return {
+        "name": case["name"],
+        "ok": False,
+        "invoked_ok": None,
+        "deferred": True,
+        "issues": [_LIVE_DEFERRED],
+    }
 
 
 def evaluate_dry(case: Dict[str, Any]) -> Dict[str, Any]:
     export = case.get("export_path", "output/house.obj")
     res = check_file(_abs(export), case.get("expect", {}))
     res["name"] = case["name"]
-    res["invoked_ok"] = None  # not run
+    res["invoked_ok"] = None
     return res
 
 
@@ -89,29 +78,29 @@ def main() -> int:
     if args.case:
         cases = [c for c in cases if args.case.lower() in c["name"].lower()]
     if not cases:
-        print("no cases selected"); return 1
-
-    agent = None
-    if not args.dry:
-        from eee_agent.app import build_agent
-        agent = build_agent()
+        print("no cases selected")
+        return 1
 
     results = []
     for c in cases:
         print(f"\n--- {c['name']} ---", flush=True)
         try:
-            r = evaluate_dry(c) if args.dry else run_case_with_agent(c, agent)
+            r = evaluate_dry(c) if args.dry else evaluate_live_deferred(c)
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
-            r = {"name": c["name"], "ok": False,
-                 "issues": [f"harness error: {type(e).__name__}: {e}"]}
+            r = {
+                "name": c["name"],
+                "ok": False,
+                "issues": [f"harness error: {type(e).__name__}: {e}"],
+            }
         results.append(r)
         stats = r.get("stats")
-        print(f"  ok={r['ok']}  verts={stats.get('verts') if stats else '-'} "
-              f"faces={stats.get('faces') if stats else '-'}")
-        if r["issues"]:
-            for iss in r["issues"]:
-                print("    -", iss)
+        print(
+            f"  ok={r['ok']}  verts={stats.get('verts') if stats else '-'} "
+            f"faces={stats.get('faces') if stats else '-'}"
+        )
+        for iss in r.get("issues", []):
+            print("    -", iss)
 
     passed = sum(1 for r in results if r["ok"])
     print(f"\n==== {passed}/{len(results)} passed ====")

@@ -1,27 +1,33 @@
-"""Assemble the deepagents Houdini procedural-modeling agent.
+"""Assemble the Deep Agents Runtime agent.
 
-create_deep_agent signature verified 2026-07-11 against the installed package:
-  create_deep_agent(model=str|BaseChatModel, tools=..., *, system_prompt=...,
-                    skills=list[str]|None, memory=list[str]|None, ...)
-We pass model (object), tools, and system_prompt. skills=/memory= are available
-but their loading depends on the deepagents backend path resolution; for v1 the
-skill + AGENTS.md content is embedded into the system prompt (see
-system_prompt.build_system_prompt) for maximum robustness. Migrate to native
-skills=/memory= after empirically verifying backend path behavior.
+Every caller must provide an explicit, capability-scoped tool allowlist.  The
+old Foundation registry is intentionally not a compatibility fallback: it
+contains raw scene-write tools and must never be reachable from production
+Runtime code.
 """
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 
 from deepagents import create_deep_agent
+from langchain_core.tools import BaseTool
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
 
+from eee_agent.harness import configure_deepagents_harness
 from eee_agent.model import build_model
 from eee_agent.system_prompt import build_system_prompt
-from eee_agent.tools.registry import all_tools
 
 
-def build_agent() -> CompiledStateGraph:
+def build_agent(
+    *,
+    tools: Sequence[BaseTool] | None = None,
+    checkpointer: BaseCheckpointSaver | None = None,
+    context_schema: type | None = None,
+) -> CompiledStateGraph:
+    if tools is None:
+        raise TypeError("build_agent requires an explicit secure tools allowlist")
     # Instrument LangChain/LangGraph for Phoenix tracing if EEE_TRACING=phoenix.
     from eee_agent.tracing import setup_tracing
     setup_tracing()
@@ -79,8 +85,15 @@ def build_agent() -> CompiledStateGraph:
         except Exception as e:  # noqa: BLE001
             print(f"[eee] compact_conversation tool disabled: {e}", flush=True)
             backend = None
-    kwargs = dict(model=model, tools=all_tools(),
+    # Copy the caller sequence so later mutation cannot affect this graph.
+    selected_tools = list(tools)
+    kwargs = dict(model=model, tools=selected_tools,
                   system_prompt=build_system_prompt(), middleware=middleware)
     if backend is not None:
         kwargs["backend"] = backend
+    if checkpointer is not None:
+        kwargs["checkpointer"] = checkpointer
+    if context_schema is not None:
+        kwargs["context_schema"] = context_schema
+    configure_deepagents_harness()
     return create_deep_agent(**kwargs)

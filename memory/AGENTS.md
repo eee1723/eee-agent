@@ -1,42 +1,37 @@
 # Project Conventions (always loaded into the agent)
 
-## Scene hygiene
-- Build under `/obj/building_AGENT` (a `geo` container). Call `scene_reset("/obj")`
-  before a fresh build; do not accumulate stale nodes.
-- Name nodes by purpose: `footprint`, `floor_plate`, `walls`, `windows`, `roof`,
-  `out`. End the chain in a node named `out` and export THAT node.
+The authoritative project context is `CLAUDE.md` plus the current handoff
+(`docs/handoffs/2026-07-20-runtime-development-transfer.md`). This file holds
+only the conventions an agent must not violate between sessions.
+
+## Retired tool system (do not use)
+
+The legacy raw-write tool bridge is gone: `eee_agent.tools`, `eee_agent.bridge`,
+rpyc, and `houdini_side/start_rpc.py` / `chat_panel.py` / `launch.py` were
+removed. Tools like `scene_reset`, `export_geometry`, `save_hip`,
+`ensure_work_container`, `make_component`, `wire_anchor`, and `assemble_output`
+no longer exist — never instruct a user or model to call them, and never
+suggest restarting `start_rpc.py`.
+
+## Current production path
+
+- Scene effects go only through the persistent Runtime: typed proposal
+  (`propose_modeling` with a strict Brief/Spec payload) → explicit approval →
+  transactional Apply with receipt. There is no direct write/save/export tool.
+- Scene queries use exactly five read-only tools (`scene_status`,
+  `query_scene`, `inspect_workspace`, `geometry_stats`, `work_status`) over the
+  authenticated loopback Secure Bridge; they return bounded plain dicts, never
+  live HOM objects.
+- Houdini-side code (`houdini_side/`) uses only Houdini's bundled Python and
+  PySide6 — no agent venv deps, no provider SDKs, no credentials.
 
 ## Verification is mandatory
-- After any structural change: `cook_node` then `geometry_stats` then
-  `validate_geometry`. Never stack new work on unvalidated geometry.
-- A box has 8 points / 6 prims; a unit grid (2x2 div) has 9 points / 4 prims. Use
-  these as sanity checks.
 
-## Tool-bridge facts (do not fight these)
-- Tools return plain dicts, never node objects. Compare nodes by path string.
-- Multi-channel parms take lists: `{"size": [w, h, d]}`.
-- rpyc has no auth and the server is bound to localhost — if you see a connection
-  error, the user must restart `houdini_side/start_rpc.py`.
-
-## Modeling preferences
-- Native SOP nodes first, VEX for detail, Python only as glue (the tools enforce
-  this — there is no per-point Python tool).
-- Expose tunables as parms (floors, floor_height, width, window_density) so the
-  user can re-shape without rebuilding.
-
-## Export
-- Final deliverable: `export_geometry("/obj/building_AGENT/out", "<path>.obj")`
-  and `save_hip("<path>.hip")`. Confirm both succeed before finishing.
-
-## Component / parametric conventions (Phase C)
-- When the model must expose adjustable params, work inside a work-container subnet
-  (`ensure_work_container`), not loose nodes under /obj.
-- Root params = spare parms `p_<name>` on the work container (single source of truth).
-  Drive dims with `set_expression(node, parm, root_parm=...)` — never hand-write
-  `ch("../..")` relative paths (the tool computes them).
-- Components are `comp_<name>` subnets with `OUT_geo` + `OUT_anchors`. Anchors are
-  point clouds with `s@anchor_type`. Wire dependencies with `wire_anchor` (DAG;
-  cycles are refused). Repeat units via `copy_to_points` (pack=on), not copy-stamp.
-- After structure changes: `work_status` + `anchor_graph` + `cook_node` to verify
-  wiring and propagation. Change a `p_*` parm and re-cook to confirm it propagates
-  before exporting.
+- Default gate: `uv run --frozen --extra eval pytest -q` (offline; no live LLM
+  or Houdini required) plus `uv lock --check`, compileall, and `git diff
+  --check`.
+- Real-Houdini and real-provider checks are explicit opt-in smokes/acceptance
+  runners, never part of the offline gate.
+- Runtime state (`app.sqlite*`, `checkpoints.sqlite*`, `runtime.token`,
+  `runtime.json`, `runtime.lock`, logs, `.env`, `.venv`) is machine-local and
+  must never be committed.

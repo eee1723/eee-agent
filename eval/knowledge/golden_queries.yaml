@@ -1,0 +1,294 @@
+# Golden retrieval cases for the Houdini documentation knowledge graph.
+#
+# Each case carries ONLY request metadata, an expected outcome and expected
+# entity IDs/symbols -- never official document bodies, signatures prose or raw
+# page text. Expected IDs were grounded against a real 21.0.440 build.
+# expect: match | ambiguous | no_match | invalid
+#   match     -> ok response whose results contain one of expected_any
+#   ambiguous -> AMBIGUOUS_SYMBOL with >=2 candidates
+#   no_match  -> a valid request with no result (NO_MATCH)
+#   invalid   -> INVALID_ARGUMENT (e.g. empty request or bad direction)
+
+# --- exact SOP node --------------------------------------------------------
+- id: sop_boolean
+  category: sop_exact
+  request: {symbol: boolean}
+  expect: match
+  expected_any: ['node_document:sop/boolean.txt@current']
+
+- id: sop_merge
+  category: sop_exact
+  request: {symbol: merge}
+  expect: match
+  expected_any: ['node_document:sop/merge.txt@current']
+
+- id: sop_box
+  category: sop_exact
+  request: {symbol: box}
+  expect: match
+  expected_any: ['node_document:sop/box.txt@current']
+
+- id: sop_grid
+  category: sop_exact
+  request: {symbol: grid}
+  expect: match
+  expected_any: ['node_document:sop/grid.txt@current']
+
+- id: sop_copytopoints
+  category: sop_exact
+  request: {symbol: copytopoints}
+  expect: match
+  expected_any: ['node_document:sop/copytopoints.txt@current']
+
+- id: sop_blast
+  category: sop_exact
+  request: {symbol: blast}
+  expect: match
+  expected_any: ['node_document:sop/blast.txt@current']
+
+- id: sop_group
+  category: sop_exact
+  request: {symbol: group}
+  expect: match
+  expected_any: ['node_document:sop/group.txt@current']
+
+- id: sop_polyextrude
+  category: sop_exact
+  request: {symbol: polyextrude}
+  expect: match
+  expected_any: ['node_document:sop/polyextrude.txt@current']
+
+- id: sop_file
+  category: sop_exact
+  request: {symbol: file}
+  expect: match
+  expected_any: ['node_document:sop/file.txt@current']
+
+- id: sop_fuse
+  category: sop_exact
+  request: {symbol: fuse}
+  expect: match
+  expected_any: ['node_document:sop/fuse.txt@current']
+
+# --- namespace / versioned SOP node ---------------------------------------
+- id: sop_namespace_apex_buildfkgraph
+  category: sop_namespace
+  request: {symbol: 'apex::buildfkgraph'}
+  expect: match
+  expected_any: ['node_document:sop/apex--buildfkgraph.txt@current']
+
+- id: sop_namespace_kinefx_rigpython
+  category: sop_namespace
+  request: {symbol: 'kinefx::rigpython'}
+  expect: match
+  expected_any: ['node_document:sop/kinefx--rigpython.txt@current']
+
+- id: sop_versioned_current_operator
+  category: sop_namespace
+  request: {symbol: 'polyextrude::2.0'}
+  expect: match
+  expected_any: ['node_document:sop/polyextrude.txt@current']
+
+# --- historical node (only with include_historical) ------------------------
+- id: sop_historical_agentlookat_2
+  category: sop_historical
+  request: {symbol: 'agentlookat::2.0', include_historical: true}
+  expect: match
+  expected_any: ['node_document:sop/agentlookat-2.0.txt@2.0']
+
+- id: sop_historical_excluded_by_default
+  category: sop_historical
+  request: {symbol: 'agentlookat::2.0'}
+  expect: no_match
+
+# --- node purpose search (FTS) --------------------------------------------
+- id: node_purpose_boolean
+  category: node_purpose
+  request: {query: 'boolean union subtract', kinds: [node_document]}
+  expect: match
+  expected_any: ['node_document:sop/boolean.txt@current']
+
+# --- VEX name (exact symbol) ----------------------------------------------
+- id: vex_intersect
+  category: vex_name
+  request: {symbol: intersect}
+  expect: match
+  expected_any: ['vex_function:intersect']
+
+- id: vex_distance
+  category: vex_name
+  request: {symbol: distance}
+  expect: match
+  expected_any: ['vex_function:distance']
+
+- id: vex_cross
+  category: vex_name
+  request: {symbol: cross}
+  expect: match
+  expected_any: ['vex_function:cross']
+
+- id: vex_normalize
+  category: vex_name
+  request: {symbol: normalize}
+  expect: match
+  expected_any: ['vex_function:normalize']
+
+- id: vex_length
+  category: vex_name
+  request: {symbol: length}
+  expect: match
+  expected_any: ['vex_function:length']
+
+- id: vex_rand
+  category: vex_name
+  request: {symbol: rand}
+  expect: match
+  expected_any: ['vex_function:rand']
+
+- id: vex_chramp
+  category: vex_name
+  request: {symbol: chramp}
+  expect: match
+  expected_any: ['vex_function:chramp']
+
+# --- VEX purpose / signature search (FTS) ---------------------------------
+- id: vex_purpose_distance
+  category: vex_purpose
+  request: {query: 'compute distance between points', kinds: [vex_function]}
+  expect: match
+  expected_any: ['vex_function:distance']
+
+- id: vex_purpose_intersect
+  category: vex_purpose
+  request: {query: 'intersect rays with geometry', kinds: [vex_function]}
+  expect: match
+  expected_any: ['vex_function:intersect', 'vex_function:intersect_all']
+
+# --- HOM class -------------------------------------------------------------
+- id: hom_class_node
+  category: hom_class
+  request: {symbol: hou.Node}
+  expect: match
+  expected_any: ['hom_class:hou.Node']
+
+- id: hom_class_geometry
+  category: hom_class
+  request: {symbol: hou.Geometry}
+  expect: match
+  expected_any: ['hom_class:hou.Geometry']
+
+- id: hom_class_shelf
+  category: hom_class
+  request: {symbol: hou.shelf}
+  expect: match
+  expected_any: ['hom_class:hou.Shelf']
+
+# --- HOM function ----------------------------------------------------------
+- id: hom_function_node
+  category: hom_function
+  request: {symbol: hou.node}
+  expect: match
+  expected_any: ['hom_function:hou.node']
+
+- id: hom_function_hscript
+  category: hom_function
+  request: {symbol: hou.hscript}
+  expect: match
+  expected_any: ['hom_function:hou.hscript']
+
+- id: hom_function_phm
+  category: hom_function
+  request: {symbol: hou.phm}
+  expect: match
+  expected_any: ['hom_function:hou.phm']
+
+# --- HOM method (first-class entity) --------------------------------------
+- id: hom_method_createNode
+  category: hom_method
+  request: {symbol: 'hou.Node#createNode'}
+  expect: match
+  expected_any: ['hom_method:hou.Node#createNode']
+
+# --- HOM inheritance (one-hop inherits_from) ------------------------------
+- id: hom_inheritance_node_superclass
+  category: hom_inheritance
+  request: {symbol: hou.Node, predicate: inherits_from}
+  expect: match
+  expected_any: ['hom_class:hou.Node']
+
+# --- same-name ambiguity ---------------------------------------------------
+- id: ambiguity_scatter_sop_vs_vex
+  category: ambiguity
+  request: {symbol: scatter}
+  expect: ambiguous
+
+- id: ambiguity_transform_hom_methods
+  category: ambiguity
+  request: {symbol: transform}
+  expect: ambiguous
+
+- id: ambiguity_title_legacy_vs_current
+  category: ambiguity
+  request: {symbol: 'Agent Layer'}
+  expect: ambiguous
+
+- id: ambiguity_title_three_versions
+  category: ambiguity
+  request: {symbol: 'Agent Look At'}
+  expect: ambiguous
+
+# --- no-match --------------------------------------------------------------
+- id: no_match_unknown_symbol
+  category: no_match
+  request: {symbol: zzznopexxx}
+  expect: no_match
+
+# --- invalid argument ------------------------------------------------------
+- id: invalid_empty_request
+  category: invalid
+  request: {}
+  expect: invalid
+
+- id: invalid_bad_direction
+  category: invalid
+  request: {symbol: boolean, direction: sideways}
+  expect: invalid
+
+# --- project skill routing -------------------------------------------------
+- id: skill_vex_patterns
+  category: skill
+  request: {symbol: vex-patterns}
+  expect: match
+  expected_any: ['skill_reference:vex-patterns']
+
+- id: skill_sop_cookbook
+  category: skill
+  request: {symbol: sop-cookbook}
+  expect: match
+  expected_any: ['skill_reference:sop-cookbook']
+
+# --- structural filters ----------------------------------------------------
+- id: filter_boolean_tag_model
+  category: filter
+  request: {symbol: boolean, tag: model}
+  expect: match
+  expected_any: ['node_document:sop/boolean.txt@current']
+
+- id: filter_merge_context_sop
+  category: filter
+  request: {symbol: merge, context: sop}
+  expect: match
+  expected_any: ['node_document:sop/merge.txt@current']
+
+# --- one-hop relations -----------------------------------------------------
+- id: relation_node_declares_method
+  category: relation
+  request: {symbol: hou.Node, predicate: declares_method, direction: outgoing}
+  expect: match
+  expected_any: ['hom_class:hou.Node']
+
+- id: relation_intersect_related
+  category: relation
+  request: {symbol: intersect, predicate: related_to}
+  expect: match
+  expected_any: ['vex_function:intersect']

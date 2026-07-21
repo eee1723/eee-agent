@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<pythonPanelDocument>
+  <interface name="eee_agent_runtime"
+             label="EEE Runtime"
+             icon="MISC_python"
+             help_url="">
+    <script><![CDATA[
+import os
+import sys
+
+root = os.environ.get("EEE_PATH")
+if not root:
+    raise RuntimeError(
+        "EEE_PATH is not set. Run houdini_side/install_menu.py and restart Houdini."
+    )
+if root not in sys.path:
+    sys.path.insert(0, root)
+
+from houdini_side import runtime_panel
+
+thePanel = None
+
+def onCreateInterface():
+    global thePanel
+    thePanel = runtime_panel.create_panel()
+    return thePanel
+
+def onDestroyInterface():
+    global thePanel
+    if thePanel is not None:
+        thePanel.close()
+    thePanel = None
+]]></script>
+    <includeInPaneTabMenu menu_position="210" create_separator="false"/>
+  </interface>
+</pythonPanelDocument>

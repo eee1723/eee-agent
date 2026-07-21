@@ -1,0 +1,2499 @@
+"""Read-only ChangeSet preflight adapter for the secure HoudiniBridge (Task 16-C).
+
+:class:`ChangeSetPreflightAdapter` derives bounded, typed scene facts needed to
+independently verify a :class:`~eee_agent.houdini_bridge.changesets.PreflightRequest`,
+and evaluates the supplied preconditions against those facts. It performs **no
+mutation**: it never creates/destroys nodes, sets parms, connects inputs, writes
+user data, touches undo, loads/saves/clears the HIP, installs HDAs or source,
+runs a shell, or evaluates arbitrary Python/VEX.
+
+The adapter never imports ``hou`` at module import time. ``hou`` is reached
+through the injected :class:`~houdini_side.secure_bridge.HoudiniSceneAdapter`
+(same package), which holds the ``hou`` module bound inside the Houdini process.
+Offline tests inject a ``hou``-free fake scene instead. All HOM access happens
+inside the synchronous :meth:`preflight` callable, which the shared
+:class:`~eee_agent.houdini_bridge.queue.MainThreadReadQueue` pumps on the
+Houdini main thread — there is no second queue, worker, task, or concurrent HOM
+path.
+
+Identity resolution follows the design (sections 7–8): a stable owned node id
+(reported in the mirrored ``eee.node_id`` user-data key) is resolved BEFORE the
+path, and any ambiguity (one stable id mirrored at two distinct paths) fails
+closed. A path is never identity by itself. The bounded scene identity resolver
+performs a single read-only pass over the scene root's sub-tree, indexing every
+node that mirrors an ``eee.node_id``; an owned reference resolves to the unique
+current node with that id (even at a moved path), and more than one such node
+is ``policy.ownership_ambiguous``. For owned manifest references the mirrored
+``eee.schema_version`` and ``eee.created_by_run`` are validated as identity
+facts (schema must be the supported schema-v1 value; the run of origin must
+agree with the supplied manifest); these raw values are never exposed in a DTO.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+from collections import OrderedDict
+from datetime import datetime, timezone
+from pathlib import Path
+
+from eee_agent.changesets.contracts import (
+    ChangeReceipt,
+    ChangeSet,
+    ConditionResult,
+    ConnectInput,
+    CreateNode,
+    NodeAbsent,
+    NodeIdentityEquals,
+    NodeRef,
+    ParmSnapshot,
+    ParmValueEquals,
+    ReceiptStatus,
+    SceneBindingEquals,
+    SetParm,
+    WireInputEquals,
+    WireRef,
+    WireSnapshot,
+    WorkspaceManifest,
+    WorkspaceRevisionEquals,
+    _derive_create_path,
+    _parm_value_json,
+    _validate_parm_value,
+)
+from eee_agent.changesets.policy import evaluate_policy
+from eee_agent.houdini_bridge.capture import (
+    PNG_MEDIA_TYPE,
+    CaptureFramingReport,
+    CaptureRequest,
+    CaptureResult,
+)
+from eee_agent.houdini_bridge.changesets import (
+    ApplyRequest,
+    PreflightNodeFact,
+    PreflightParmFact,
+    PreflightRequest,
+    PreflightResult,
+    PreflightWireFact,
+)
+from eee_agent.houdini_bridge.sensitivity import (
+    SensitivitySampleRequest,
+    SensitivitySampleResult,
+)
+from eee_agent.modeling.framing import (
+    BoundingBox,
+    FramingError,
+    FramingTolerance,
+    camera_basis,
+    compute_framing,
+)
+from eee_agent.runtime.models import canonical_json_dumps
+from houdini_side.secure_bridge import HoudiniAdapterError, HoudiniSceneAdapter
+
+
+# Mirrored ownership keys (design section 4.1): path is a locator, never identity.
+_WS_KEY = "eee.workspace_id"
+_NODE_ID_KEY = "eee.node_id"
+_CAP_KEY = "eee.capability"
+_ROLE_KEY = "eee.role"
+_SCHEMA_KEY = "eee.schema_version"
+_RUN_KEY = "eee.created_by_run"
+# The only supported WorkspaceManifest schema version is 1 (the contracts reject
+# every other value). The mirror carries it as the user-data string "1".
+_SUPPORTED_SCHEMA_VERSION = "1"
+
+
+def _identity(ref: NodeRef) -> str:
+    """Stable identity of a node reference: id when present, else path."""
+    return ref.node_id if ref.node_id is not None else ref.path
+
+
+def _stale(message: str) -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="changeset.stale",
+        category="stale",
+        message_for_user=message,
+        retryable=True,
+    )
+
+
+def _ambiguous() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="policy.ownership_ambiguous",
+        category="ownership",
+        message_for_user=(
+            "A stable node id resolves to more than one scene path; the ChangeSet "
+            "cannot be verified unambiguously."
+        ),
+        retryable=True,
+    )
+
+
+def _invalid(message: str) -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="changeset.invalid",
+        category="invalid",
+        message_for_user=message,
+    )
+
+
+class ChangeSetPreflightAdapter:
+    """Read-only preflight fact gatherer bound to a scene adapter.
+
+    Reuses the scene adapter's tracked epoch/instance via :meth:`binding`, and
+    reads node/parameter/wire facts through the same ``hou`` module. Same-package
+    access to ``scene_adapter._hou`` is intentional and documented.
+    """
+
+    def __init__(self, scene_adapter: HoudiniSceneAdapter) -> None:
+        if not isinstance(scene_adapter, HoudiniSceneAdapter):
+            raise TypeError("scene_adapter must be a HoudiniSceneAdapter")
+        self._scene = scene_adapter
+
+    @property
+    def _hou(self) -> object:
+        return self._scene._hou  # type: ignore[attr-defined]
+
+    def binding(self):  # type: ignore[no-untyped-def]
+        """Delegate the current scene binding (tracked epoch + instance)."""
+        return self._scene.binding()
+
+    # --------------------------------------------------------------- preflight
+
+    def preflight(self, request: PreflightRequest) -> PreflightResult:
+        """Gather bounded read-only facts and evaluate the request's preconditions."""
+        hou = self._hou
+        binding = self.binding()
+        # Scene-epoch drift is checked first (consistent with scene.query).
+        if binding.scene_epoch != request.scene_epoch:
+            raise HoudiniAdapterError(
+                code="bridge.stale_scene",
+                category="stale_scene",
+                message_for_user="The Houdini scene changed; refresh before continuing.",
+                retryable=True,
+            )
+        workspace = request.workspace
+        if workspace is not None and (
+            workspace.instance_id != binding.instance_id
+            or workspace.scene_epoch != binding.scene_epoch
+        ):
+            raise _stale("The workspace manifest no longer matches the current scene.")
+
+        changeset = request.changeset
+        owned_by_id = (
+            {node.node_id: node for node in workspace.nodes}
+            if workspace is not None
+            else {}
+        )
+        create_targets = self._create_target_identities(changeset)
+        refs = self._collect_node_refs(changeset)
+
+        # Single bounded read-only pass: index every scene node that mirrors a
+        # stable owned id. An owned reference resolves through this index BEFORE
+        # its (locator) path; more than one scene node mirroring the same id is
+        # full identity ambiguity and fails closed (design sections 7-8).
+        node_id_index = self._index_scene_by_node_id(hou)
+
+        # Pass 1: resolve every reference. Owned refs resolve by stable id
+        # (raising on ambiguity); external path-only refs stay path-based. The
+        # mirrored schema/run identity facts travel out-of-band, never in a DTO.
+        facts: dict[str, PreflightNodeFact] = {}
+        extras: dict[str, tuple[str | None, str | None]] = {}
+        for ref in refs:
+            fact, schema_version, created_by_run = self._resolve_node_fact(hou, ref, node_id_index)
+            identity = _identity(ref)
+            facts[identity] = fact
+            extras[identity] = (schema_version, created_by_run)
+
+        # Pass 2: verify references against current facts. Existing-required refs
+        # must match; a create target must instead be ABSENT — no existing node may
+        # reuse its stable id and no node may already occupy its derived create
+        # path. A genuinely absent create target is accepted.
+        for ref in refs:
+            identity = _identity(ref)
+            if identity in create_targets:
+                self._verify_create_target(hou, ref, facts[identity])
+            else:
+                self._verify_existing(ref, facts[identity], extras[identity], workspace, owned_by_id)
+
+        parm_facts = self._gather_parm_facts(hou, changeset, facts)
+        wire_facts = self._gather_wire_facts(hou, changeset, facts)
+        condition_results = self._evaluate_conditions(
+            changeset, binding, workspace, facts, parm_facts, wire_facts
+        )
+        all_hold = all(result.passed for result in condition_results)
+
+        node_facts = tuple(sorted(facts.values(), key=lambda f: _identity(f.requested)))
+        parm_facts = tuple(sorted(parm_facts, key=lambda f: (_identity(f.target), f.parm_name)))
+        wire_facts = tuple(sorted(wire_facts, key=lambda f: (_identity(f.target), f.input_index)))
+        try:
+            return PreflightResult(
+                binding=binding,
+                workspace_id=workspace.workspace_id if workspace is not None else None,
+                workspace_revision=workspace.revision if workspace is not None else None,
+                node_facts=node_facts,
+                parm_facts=parm_facts,
+                wire_facts=wire_facts,
+                condition_results=tuple(condition_results),
+                all_preconditions_hold=all_hold,
+                scene_may_have_changed=False,
+            )
+        except ValueError as exc:
+            # An oversized or otherwise unrepresentable fact set must not leak.
+            raise _invalid("The preflight facts could not be represented within bounds.") from exc
+
+    # --------------------------------------------------------------- references
+
+    def _create_target_identities(self, changeset) -> set[str]:  # type: ignore[no-untyped-def]
+        identities: set[str] = set()
+        for op in changeset.operations:
+            if isinstance(op, CreateNode):
+                identities.add(op.node_id)
+        return identities
+
+    def _collect_node_refs(self, changeset) -> list[NodeRef]:  # type: ignore[no-untyped-def]
+        ordered: list[NodeRef] = []
+        seen: set[tuple[str | None, str]] = set()
+
+        def add(ref: NodeRef) -> None:
+            # Dedup by (node_id, path): the same node referenced twice collapses,
+            # but the SAME stable id at two DISTINCT paths is preserved so the
+            # ambiguity check can fail closed on it.
+            key = (ref.node_id, ref.path)
+            if key not in seen:
+                seen.add(key)
+                ordered.append(ref)
+
+        for ref in changeset.affected_nodes:
+            add(ref)
+        for ref in changeset.read_dependencies:
+            add(ref)
+        for op in changeset.operations:
+            if isinstance(op, CreateNode):
+                add(op.parent)
+                add(
+                    NodeRef(
+                        node_id=op.node_id,
+                        path=_derive_create_path(op.parent.path, op.node_name),
+                        expected_type=op.node_type,
+                        expected_workspace_id=op.workspace_id,
+                    )
+                )
+            elif isinstance(op, SetParm):
+                add(op.target)
+            elif isinstance(op, ConnectInput):
+                add(op.target)
+                add(op.source)
+        for cond in changeset.preconditions:
+            ref = _condition_node_ref(cond)
+            if ref is not None:
+                add(ref)
+        return ordered
+
+    # --------------------------------------------------------------- resolution
+
+    def _index_scene_by_node_id(self, hou: object) -> dict[str, list[object]]:
+        """Single bounded read-only pass: map mirrored node id -> scene nodes.
+
+        Enumerates the scene root's sub-tree once and groups every node that
+        mirrors an ``eee.node_id`` user-data key. Nodes without a mirrored id
+        (external/unowned) are ignored. This index is the only scene enumeration
+        in preflight; it is read-only, finite, and confined to this queue
+        callable. An id mapped to more than one node is ambiguity.
+        """
+        root = hou.node("/")  # type: ignore[union-attr]
+        nodes = () if root is None else tuple(root.allSubChildren())  # type: ignore[union-attr]
+        index: dict[str, list[object]] = {}
+        for node in nodes:
+            node_id = _read_user_data(node, _NODE_ID_KEY)
+            if node_id is None:
+                continue
+            index.setdefault(node_id, []).append(node)
+        return index
+
+    def _resolve_node_fact(
+        self, hou: object, ref: NodeRef, node_id_index: dict[str, list[object]]
+    ) -> tuple[PreflightNodeFact, str | None, str | None]:
+        """Resolve a reference to a node fact plus out-of-band identity extras.
+
+        Owned references (``node_id is not None``) resolve by mirrored stable id
+        BEFORE the locator path: the unique current node mirroring that id is the
+        node even if its current path differs from ``ref.path``. Two or more
+        scene nodes mirroring the same id is ``policy.ownership_ambiguous``; zero
+        is a provably-absent owned node (fail closed). External path-only
+        references (``node_id is None``) remain path-based. Returns the fact and
+        the mirrored ``schema_version`` / ``created_by_run`` (``None`` when the
+        node is absent or external); these never enter the result DTO.
+        """
+        if ref.node_id is None:
+            # External scoped node: path is the only locator, no ownership claim.
+            return self._fact_from_node(hou.node(ref.path), ref)  # type: ignore[union-attr]
+        mirrors = node_id_index.get(ref.node_id, ())
+        if len(mirrors) > 1:
+            raise _ambiguous()
+        node = mirrors[0] if mirrors else None
+        return self._fact_from_node(node, ref)
+
+    def _fact_from_node(
+        self, node: object | None, ref: NodeRef
+    ) -> tuple[PreflightNodeFact, str | None, str | None]:
+        """Build a node fact from a resolved HOM node, plus identity extras.
+
+        ``node is None`` yields an absent fact. The mirrored schema/run values
+        are returned alongside (for internal validation) but are not carried on
+        the DTO.
+        """
+        if node is None:
+            return (
+                PreflightNodeFact(
+                    requested=ref,
+                    exists=False,
+                    actual_path=None,
+                    actual_type=None,
+                    parent_path=None,
+                    workspace_id=None,
+                    node_id=None,
+                    capability=None,
+                    role=None,
+                    is_locked=False,
+                ),
+                None,
+                None,
+            )
+        return (
+            PreflightNodeFact(
+                requested=ref,
+                exists=True,
+                actual_path=str(node.path()),  # type: ignore[union-attr]
+                actual_type=str(node.type().name()),  # type: ignore[union-attr]
+                parent_path=str(node.parent().path()),  # type: ignore[union-attr]
+                workspace_id=_read_user_data(node, _WS_KEY),
+                node_id=_read_user_data(node, _NODE_ID_KEY),
+                capability=_read_user_data(node, _CAP_KEY),
+                role=_read_user_data(node, _ROLE_KEY),
+                is_locked=_read_is_locked(node),
+            ),
+            _read_user_data(node, _SCHEMA_KEY),
+            _read_user_data(node, _RUN_KEY),
+        )
+
+    def _verify_existing(
+        self,
+        ref: NodeRef,
+        fact: PreflightNodeFact,
+        identity_extras: tuple[str | None, str | None],
+        workspace: WorkspaceManifest | None,
+        owned_by_id: dict[str, object],
+    ) -> None:
+        if not fact.exists:
+            raise _stale("The referenced node was not found in the scene.")
+        if ref.expected_type != fact.actual_type:
+            raise _stale(
+                f"The node at {fact.actual_path} has type {fact.actual_type!r}, not {ref.expected_type!r}."
+            )
+        if ref.node_id is None:
+            return  # external scoped node: identity is path-only, no ownership claim
+        # Owned node: mirrored stable id must agree with the requested id.
+        if fact.node_id is None or fact.node_id != ref.node_id:
+            raise _stale(
+                "The resolved node does not mirror the expected stable node id."
+            )
+        # Workspace ownership is an identity fact, not an optional hint. When a
+        # WorkspaceManifest is supplied, the resolved node must belong to that
+        # workspace even when the NodeRef omits expected_workspace_id — otherwise
+        # an external node that happens to mirror the same stable id could reuse
+        # a manifest id/path and pass preflight. The request's explicit
+        # expected_workspace_id still governs when present (it may name a
+        # workspace other than the manifest's).
+        expected_workspace_id = (
+            ref.expected_workspace_id
+            if ref.expected_workspace_id is not None
+            else (workspace.workspace_id if workspace is not None else None)
+        )
+        if expected_workspace_id is not None and (
+            fact.workspace_id is None or fact.workspace_id != expected_workspace_id
+        ):
+            raise _stale(
+                "The resolved node does not belong to the expected workspace."
+            )
+        # Mirrored identity facts (design section 4.1): the schema version must
+        # be the supported schema-v1 value, and the run of origin must agree with
+        # the supplied workspace manifest. Missing/mismatched values fail closed.
+        schema_version, created_by_run = identity_extras
+        if schema_version != _SUPPORTED_SCHEMA_VERSION:
+            raise _stale(
+                "The resolved node's mirrored schema version is missing or unsupported."
+            )
+        if workspace is not None and (
+            created_by_run is None or created_by_run != workspace.created_by_run
+        ):
+            raise _stale(
+                "The resolved node's mirrored run of origin does not match the workspace."
+            )
+        if workspace is not None:
+            owned = owned_by_id.get(ref.node_id)
+            if owned is None:
+                raise _stale(
+                    f"The node id {ref.node_id!r} is not present in the workspace manifest."
+                )
+            # Manifest facts are compared against the CURRENT scene facts (the
+            # resolved actual path/type/parent), not the request's locator path.
+            if (
+                owned.path != fact.actual_path  # type: ignore[attr-defined]
+                or owned.node_type != fact.actual_type  # type: ignore[attr-defined]
+                or owned.parent_path != fact.parent_path  # type: ignore[attr-defined]
+                or owned.capability != fact.capability  # type: ignore[attr-defined]
+                or owned.role != fact.role  # type: ignore[attr-defined]
+            ):
+                raise _stale(
+                    "The resolved node no longer matches the workspace manifest facts."
+                )
+
+    def _verify_create_target(
+        self, hou: object, ref: NodeRef, fact: PreflightNodeFact
+    ) -> None:
+        """Fail closed unless a created node targets a genuinely absent slot.
+
+        A CreateNode must not reuse a stable node id already mirrored anywhere
+        in the scene (``fact.exists`` — the create ref resolves by node id) and
+        must not collide with a node already occupying the derived create path
+        (``ref.path``). Both checks hold even without a workspace manifest
+        (ProjectChange): a duplicate stable id and an occupied create path are
+        invalid regardless of ownership. A genuinely absent target is accepted.
+        Reads are confined to this queue callable; nothing is mutated.
+        """
+        if fact.exists:
+            raise _stale(
+                "The node to be created already exists with the given stable id."
+            )
+        if hou.node(ref.path) is not None:  # type: ignore[union-attr]
+            raise _stale(
+                "The node to be created already exists at the target path."
+            )
+
+    # --------------------------------------------------------------- parm facts
+
+    def _gather_parm_facts(
+        self, hou: object, changeset, node_facts: dict[str, PreflightNodeFact]
+    ) -> list[PreflightParmFact]:  # type: ignore[no-untyped-def]
+        targets: list[tuple[NodeRef, str]] = []
+        seen: set[tuple[str, str]] = set()
+        # F3: exclude transaction-created targets (they don't exist at preflight).
+        created_ids = {op.node_id for op in changeset.operations if isinstance(op, CreateNode)}
+
+        def add(target: NodeRef, name: str) -> None:
+            if target.node_id in created_ids:
+                return  # created node — no parm fact at preflight
+            key = (_identity(target), name)
+            if key not in seen:
+                seen.add(key)
+                targets.append((target, name))
+
+        for op in changeset.operations:
+            if isinstance(op, SetParm):
+                add(op.target, op.parm_name)
+        for cond in changeset.preconditions:
+            if isinstance(cond, ParmValueEquals):
+                add(cond.target, cond.parm_name)
+
+        facts: list[PreflightParmFact] = []
+        for target, name in targets:
+            # Resolve through the identity-resolved fact so a moved node's parm
+            # is read from its current path, not a stale locator.
+            node = self._resolved_node(hou, target, node_facts)
+            exists = False
+            value: object | None = None
+            if node is not None:
+                value, exists = self._read_parm_value(node, name)
+            facts.append(PreflightParmFact(target=target, parm_name=name, exists=exists, value=value))
+        return facts
+
+    def _resolved_node(
+        self, hou: object, target: NodeRef, node_facts: dict[str, PreflightNodeFact]
+    ) -> object | None:
+        """Look up a referenced node through its resolved fact's current path."""
+        fact = node_facts.get(_identity(target))
+        if fact is None or not fact.exists or fact.actual_path is None:
+            return None
+        return hou.node(fact.actual_path)  # type: ignore[union-attr]
+
+    def _read_parm_value(self, node: object, name: str) -> tuple[object | None, bool]:
+        parm = node.parm(name)  # type: ignore[union-attr]
+        if parm is not None:
+            raw = parm.eval()  # type: ignore[union-attr]
+            return self._bounded_parm(raw), True
+        pt = node.parmTuple(name)  # type: ignore[union-attr]
+        if pt is not None and pt.size() > 1:  # type: ignore[union-attr]
+            raw = tuple(pt.eval())  # type: ignore[union-attr]
+            return self._bounded_parm(raw), True
+        return None, False
+
+    def _bounded_parm(self, raw: object) -> object:
+        try:
+            return _validate_parm_value(raw, "parm value")
+        except (TypeError, ValueError) as exc:
+            raise _invalid("A referenced parameter has an unsupported or unbounded value.") from exc
+
+    # --------------------------------------------------------------- wire facts
+
+    def _gather_wire_facts(
+        self, hou: object, changeset, node_facts: dict[str, PreflightNodeFact]
+    ) -> list[PreflightWireFact]:  # type: ignore[no-untyped-def]
+        targets: list[tuple[NodeRef, int]] = []
+        seen: set[tuple[str, int]] = set()
+        # F3: exclude transaction-created targets (they don't exist at preflight).
+        created_ids = {op.node_id for op in changeset.operations if isinstance(op, CreateNode)}
+
+        def add(target: NodeRef, index: int) -> None:
+            if target.node_id in created_ids:
+                return  # created node — no wire fact at preflight
+            key = (_identity(target), index)
+            if key not in seen:
+                seen.add(key)
+                targets.append((target, index))
+
+        for op in changeset.operations:
+            if isinstance(op, ConnectInput):
+                add(op.target, op.input_index)
+        for cond in changeset.preconditions:
+            if isinstance(cond, WireInputEquals):
+                add(cond.target, cond.input_index)
+
+        facts: list[PreflightWireFact] = []
+        for target, index in targets:
+            # Resolve through the identity-resolved fact (current path), not the
+            # locator, so a moved node's input is read from where it now is.
+            node = self._resolved_node(hou, target, node_facts)
+            source: WireRef | None = None
+            if node is not None:
+                source = self._read_wire_source(node, index)
+            facts.append(PreflightWireFact(target=target, input_index=index, source=source))
+        return facts
+
+    def _read_wire_source(self, node: object, index: int) -> WireRef | None:
+        """Read the typed source wired into ``node`` input ``index``.
+
+        The source node is read via ``node.inputs()[index]`` (reliable across
+        Houdini node kinds in 21.0.440); ``inputConnections().outputNode()`` can
+        return the node itself for some kinds. The output index is read from
+        ``inputConnections()``.
+        """
+        try:
+            all_inputs = node.inputs()  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001 — a node with no inputs reports nothing
+            all_inputs = ()
+        src_node: object | None = None
+        if isinstance(all_inputs, (tuple, list)) and 0 <= index < len(all_inputs):
+            src_node = all_inputs[index]
+        if src_node is None:
+            return None
+        output_index = 0
+        try:
+            for conn in node.inputConnections():  # type: ignore[union-attr]
+                if int(conn.inputIndex()) == index:
+                    output_index = int(conn.outputIndex())  # type: ignore[union-attr]
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+        source = NodeRef(
+            node_id=_read_user_data(src_node, _NODE_ID_KEY),
+            path=str(src_node.path()),  # type: ignore[union-attr]
+            expected_type=str(src_node.type().name()),  # type: ignore[union-attr]
+            expected_workspace_id=_read_user_data(src_node, _WS_KEY),
+        )
+        return WireRef(source=source, source_output_index=output_index)
+
+    # --------------------------------------------------------------- conditions
+
+    def _evaluate_conditions(
+        self,
+        changeset,
+        binding,  # SceneBinding
+        workspace: WorkspaceManifest | None,
+        node_facts: dict[str, PreflightNodeFact],
+        parm_facts: list[PreflightParmFact],
+        wire_facts: list[PreflightWireFact],
+    ) -> list[ConditionResult]:
+        parm_by_key = {(_identity(f.target), f.parm_name): f for f in parm_facts}
+        wire_by_key = {(_identity(f.target), f.input_index): f for f in wire_facts}
+        results: list[ConditionResult] = []
+        for cond in changeset.preconditions:
+            kind = cond.kind
+            if isinstance(cond, SceneBindingEquals):
+                passed = (
+                    binding.instance_id == cond.instance_id
+                    and binding.scene_epoch == cond.scene_epoch
+                )
+            elif isinstance(cond, WorkspaceRevisionEquals):
+                passed = (
+                    workspace is not None
+                    and workspace.workspace_id == cond.workspace_id
+                    and workspace.revision == cond.revision
+                )
+            elif isinstance(cond, NodeIdentityEquals):
+                passed = self._node_identity_holds(node_facts.get(_identity(cond.node)), cond.node)
+            elif isinstance(cond, ParmValueEquals):
+                fact = parm_by_key.get((_identity(cond.target), cond.parm_name))
+                passed = fact is not None and fact.exists and _parm_equal(fact.value, cond.value)
+            elif isinstance(cond, WireInputEquals):
+                fact = wire_by_key.get((_identity(cond.target), cond.input_index))
+                actual = fact.source if fact is not None else None
+                passed = _wire_equal(actual, cond.source)
+            elif isinstance(cond, NodeAbsent):
+                passed = self._hou.node(cond.path) is None  # type: ignore[union-attr]
+            else:  # pragma: no cover - the union is closed
+                raise _invalid(f"Unsupported precondition kind: {kind!r}")
+            results.append(ConditionResult(kind=kind, passed=passed, detail=None))
+        return results
+
+    def _node_identity_holds(self, fact: PreflightNodeFact | None, ref: NodeRef) -> bool:
+        if fact is None or not fact.exists:
+            return False
+        if fact.actual_path != ref.path:
+            return False
+        if fact.actual_type != ref.expected_type:
+            return False
+        if ref.node_id is not None and fact.node_id != ref.node_id:
+            return False
+        if ref.expected_workspace_id is not None and (
+            fact.workspace_id is None or fact.workspace_id != ref.expected_workspace_id
+        ):
+            return False
+        return True
+
+
+# --------------------------------------------------------------------------
+# module-level read helpers (hou is always injected; never imported here)
+# --------------------------------------------------------------------------
+
+
+def _read_user_data(node: object, key: str) -> str | None:
+    try:
+        value = node.userData(key)  # type: ignore[union-attr]
+    except Exception:  # noqa: BLE001 — a node without the key reports nothing
+        return None
+    if value is None:
+        return None
+    return str(value)
+
+
+def _read_is_locked(node: object) -> bool:
+    try:
+        return bool(node.isHardLocked() or node.isSoftLocked())  # type: ignore[union-attr]
+    except Exception:  # noqa: BLE001 — non-SOP nodes are simply not locked
+        return False
+
+
+def _condition_node_ref(cond: object) -> NodeRef | None:
+    if isinstance(cond, NodeIdentityEquals):
+        return cond.node
+    if isinstance(cond, ParmValueEquals):
+        return cond.target
+    if isinstance(cond, WireInputEquals):
+        return cond.target
+    return None
+
+
+def _parm_equal(actual: object | None, expected: object) -> bool:
+    if actual is None:
+        return False
+    return canonical_json_dumps(_parm_value_json(actual)) == canonical_json_dumps(
+        _parm_value_json(expected)
+    )
+
+
+def _wire_equal(actual: WireRef | None, expected: WireRef | None) -> bool:
+    """Compare wire sources. path/type/output are always required; node_id and
+    workspace match only when the expected ref DECLARES them (non-None)."""
+    if expected is None:
+        return actual is None
+    if actual is None:
+        return False
+    if actual.source.path != expected.source.path:
+        return False
+    if actual.source.expected_type != expected.source.expected_type:
+        return False
+    if actual.source_output_index != expected.source_output_index:
+        return False
+    if expected.source.node_id is not None and actual.source.node_id != expected.source.node_id:
+        return False
+    if (
+        expected.source.expected_workspace_id is not None
+        and actual.source.expected_workspace_id != expected.source.expected_workspace_id
+    ):
+        return False
+    return True
+
+
+# ==========================================================================
+# Task 16-D: transactional ChangeSet executor (apply / rollback / receipt)
+#
+# The executor reuses the accepted read-only preflight adapter to re-validate
+# every binding/identity/precondition/create-target-absence fact from the
+# CURRENT scene immediately before the first write (zero writes on any
+# pre-transaction failure). It then captures a bounded before snapshot, derives
+# inverse actions internally (no inverse/delete is ever accepted from the wire),
+# executes the ordered create/set/connect effects inside exactly one
+# ``hou.undos.group``, mirrors the ownership keys on created nodes, re-reads the
+# expected postconditions, and returns an :class:`Applied` receipt only after
+# reconciliation succeeds. On execution or reconciliation failure it runs the
+# derived inverses in strict reverse order and classifies the result as
+# ``RolledBack``/``Partial``/``CriticalRecovery``; ``Partial``/``CriticalRecovery``
+# freeze further writes until an explicit process restart.
+#
+# All HOM access happens inside the single synchronous ``apply`` callable that
+# the shared :class:`~eee_agent.houdini_bridge.queue.MainThreadReadQueue` pumps
+# on the Houdini main thread. There is no second queue, worker, or task, and no
+# HOM access on the socket loop.
+# ==========================================================================
+
+
+_RECEIPT_CACHE_MAX = 256
+_UNDO_LABEL_PREFIX = "EEE Agent - "
+
+
+def _frozen() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="bridge.write_frozen",
+        category="write_frozen",
+        message_for_user=(
+            "The bridge is frozen for writes after an uncertain recovery; "
+            "restart the bridge before applying further changes."
+        ),
+        retryable=False,
+    )
+
+
+def _conflict() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="changeset.receipt_conflict",
+        category="conflict",
+        message_for_user=(
+            "A different ChangeSet digest was already applied for this change id."
+        ),
+        retryable=False,
+    )
+
+
+def _precondition_failed() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="changeset.stale",
+        category="stale",
+        message_for_user="A ChangeSet precondition does not hold against the current scene.",
+        retryable=True,
+    )
+
+
+def _backup_unavailable() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="bridge.backup_unavailable",
+        category="backup",
+        message_for_user=(
+            "The ChangeSet requires a backup, but no backup capability is available."
+        ),
+        retryable=False,
+    )
+
+
+def _apply_failed(message: str) -> HoudiniAdapterError:
+    # Raised only when a write cannot even start; transaction-internal write
+    # failures are classified into receipts, not raised.
+    return HoudiniAdapterError(
+        code="changeset.apply_failed",
+        category="apply_failed",
+        message_for_user=message,
+    )
+
+
+def _policy_denied(denial_codes: tuple[str, ...]) -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="policy.denied",
+        category="policy",
+        message_for_user=(
+            "The ChangeSet is denied by policy against the current scene facts."
+        ),
+        retryable=False,
+        technical_detail_ref=",".join(denial_codes) if denial_codes else None,
+    )
+
+
+def _mandatory_omitted(message: str) -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="changeset.stale",
+        category="stale",
+        message_for_user=message,
+        retryable=True,
+    )
+
+
+def _stale_scene() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="bridge.stale_scene",
+        category="stale_scene",
+        message_for_user="The Houdini scene changed; refresh before continuing.",
+        retryable=True,
+    )
+
+
+def _sample_invalid(message: str) -> HoudiniAdapterError:
+    # Raised only before the first sample write: an unresolvable target or a
+    # missing parameter means the request does not match the current scene.
+    return HoudiniAdapterError(
+        code="sensitivity.invalid",
+        category="invalid",
+        message_for_user=message,
+        retryable=False,
+    )
+
+
+def _cook_failed() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="sensitivity.cook_failed",
+        category="cook",
+        message_for_user="A sampled parameter did not cook cleanly.",
+        retryable=True,
+    )
+
+
+def _sample_restore_failed() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="sensitivity.restore_failed",
+        category="restore",
+        message_for_user=(
+            "A sampled parameter could not be restored exactly; the bridge is "
+            "frozen for writes until restart."
+        ),
+        retryable=False,
+    )
+
+
+def _sample_aborted() -> HoudiniAdapterError:
+    # Any non-structured failure during the write/capture phase, raised only
+    # after the scene was verifiably restored: classified, never guessed.
+    return HoudiniAdapterError(
+        code="sensitivity.sample_failed",
+        category="sample",
+        message_for_user="The sensitivity sample could not be completed.",
+        retryable=True,
+    )
+
+
+def _capture_invalid(message: str) -> HoudiniAdapterError:
+    # Raised only before the temp scope is created: an unresolvable evidence
+    # node means the request does not match the current scene (zero changes).
+    return HoudiniAdapterError(
+        code="capture.invalid",
+        category="invalid",
+        message_for_user=message,
+        retryable=False,
+    )
+
+
+def _capture_target_unavailable() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="capture.target_unavailable",
+        category="filesystem",
+        message_for_user="The Runtime-owned artifacts target directory is unavailable.",
+        retryable=False,
+    )
+
+
+def _capture_cook_failed() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="capture.cook_failed",
+        category="cook",
+        message_for_user="A capture evidence node did not cook cleanly.",
+        retryable=True,
+    )
+
+
+def _capture_no_geometry() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="capture.no_geometry",
+        category="geometry",
+        message_for_user="The capture evidence nodes contain no frameable geometry.",
+        retryable=False,
+    )
+
+
+def _capture_framing_failed() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="capture.framing_failed",
+        category="framing",
+        message_for_user=(
+            "No acceptable capture framing was reachable within two adjustments."
+        ),
+        retryable=False,
+    )
+
+
+def _capture_render_unavailable() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="capture.render_unavailable",
+        category="render",
+        message_for_user="The deterministic capture render surface is unavailable.",
+        retryable=False,
+    )
+
+
+def _capture_render_failed() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="capture.render_failed",
+        category="render",
+        message_for_user="The capture render did not produce a verified PNG.",
+        retryable=True,
+    )
+
+
+def _capture_cleanup_failed() -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="capture.cleanup_failed",
+        category="cleanup",
+        message_for_user=(
+            "The capture temp scope could not be removed; the scene may retain "
+            "temporary nodes and the capture was discarded."
+        ),
+        retryable=False,
+    )
+
+
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+_HASH_CHUNK_BYTES = 1024 * 1024
+
+
+def _verify_capture_file(path: Path) -> tuple[str, int]:
+    """Verify the rendered PNG magic and stream its SHA-256 + exact size."""
+    try:
+        with path.open("rb") as handle:
+            magic = handle.read(len(_PNG_MAGIC))
+            if magic != _PNG_MAGIC:
+                raise _capture_render_failed()
+            digest = hashlib.sha256(magic)
+            size = len(magic)
+            while True:
+                chunk = handle.read(_HASH_CHUNK_BYTES)
+                if not chunk:
+                    break
+                size += len(chunk)
+                digest.update(chunk)
+    except HoudiniAdapterError:
+        raise
+    except OSError as exc:
+        raise _capture_render_failed() from exc
+    if size <= len(_PNG_MAGIC):
+        raise _capture_render_failed()
+    return digest.hexdigest(), size
+
+
+def _unlink_quietly(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _rmdir_quietly(path: Path) -> None:
+    try:
+        path.rmdir()
+    except OSError:
+        pass
+
+
+def _transform_bbox_world(
+    values: tuple[float, float, float, float, float, float],
+    m: tuple[float, ...],
+) -> "BoundingBox":
+    """World-space AABB of a local bbox under a row-major 4x4 matrix.
+
+    The matrix follows ``hou.Matrix4.asTuple()`` ordering (translation at
+    indices 12..14); points multiply as row vectors. All eight corners are
+    transformed and re-bounded, which is exact for affine transforms.
+    """
+    mn_x, mn_y, mn_z, mx_x, mx_y, mx_z = values
+    xs: list[float] = []
+    ys: list[float] = []
+    zs: list[float] = []
+    for cx in (mn_x, mx_x):
+        for cy in (mn_y, mx_y):
+            for cz in (mn_z, mx_z):
+                w = cx * m[3] + cy * m[7] + cz * m[11] + m[15]
+                if w == 0.0:
+                    continue
+                xs.append((cx * m[0] + cy * m[4] + cz * m[8] + m[12]) / w)
+                ys.append((cx * m[1] + cy * m[5] + cz * m[9] + m[13]) / w)
+                zs.append((cx * m[2] + cy * m[6] + cz * m[10] + m[14]) / w)
+    if not xs:
+        return BoundingBox(*values)
+    return BoundingBox(min(xs), min(ys), min(zs), max(xs), max(ys), max(zs))
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _inverse_condition_kind(tag: str) -> str:
+    """The ConditionResult kind that matches an inverse tag (F10)."""
+    if tag == "parm":
+        return "parm.value_equals"
+    if tag == "wire":
+        return "wire.input_equals"
+    return "node.absent"
+
+
+# --------------------------------------------------------------------------
+# mandatory derived preconditions / postconditions / checkpoint coverage
+# (design sections 4.3 and 8). The executor derives these from every operation
+# and rejects a ChangeSet that omits or contradicts them before any write.
+# --------------------------------------------------------------------------
+
+
+def _created_ref(op: CreateNode) -> NodeRef:
+    return NodeRef(
+        node_id=op.node_id,
+        path=_derive_create_path(op.parent.path, op.node_name),
+        expected_type=op.node_type,
+        expected_workspace_id=op.workspace_id,
+    )
+
+
+def derive_mandatory_preconditions(
+    operations, binding, workspace: WorkspaceManifest | None
+) -> list[object]:
+    """Mandatory preconditions the executor derives from the operations.
+
+    A ChangeSet must include every one of these (and may add more). Omission or
+    contradiction (a supplied condition with the same identity but different
+    facts) fails closed before writes, because the exact mandatory fact is then
+    absent from the supplied set.
+    """
+    pre: list[object] = [
+        SceneBindingEquals(
+            instance_id=binding.instance_id,
+            scene_epoch=binding.scene_epoch,
+        )
+    ]
+    if workspace is not None:
+        pre.append(
+            WorkspaceRevisionEquals(
+                workspace_id=workspace.workspace_id, revision=workspace.revision
+            )
+        )
+    # Nodes created earlier in this transaction do not exist at preflight time, so
+    # they get no node.identity_equals precondition (they are proven absent and are
+    # brought into being by the create); only pre-existing references do.
+    created_ids = {op.node_id for op in operations if isinstance(op, CreateNode)}
+    # Track previously mutated slots in operation order: only the FIRST write to a
+    # pre-existing slot gets a preflight old-value precondition; later expected-old
+    # state is JIT-only (F2).
+    seen_parm_slots: set[tuple[str, str]] = set()
+    seen_wire_slots: set[tuple[str, int]] = set()
+    for op in operations:
+        if isinstance(op, CreateNode):
+            pre.append(NodeAbsent(path=_derive_create_path(op.parent.path, op.node_name), node_id=op.node_id))
+            if op.parent.node_id not in created_ids:
+                pre.append(NodeIdentityEquals(node=op.parent))
+        elif isinstance(op, SetParm):
+            target_created = op.target.node_id in created_ids
+            parm_key = (_identity(op.target), op.parm_name)
+            first_write = parm_key not in seen_parm_slots
+            seen_parm_slots.add(parm_key)
+            if not target_created and first_write:
+                pre.append(NodeIdentityEquals(node=op.target))
+                pre.append(ParmValueEquals(target=op.target, parm_name=op.parm_name, value=op.expected_old_value))
+            # Later writes or created targets: identity/old-value are JIT-checked.
+        elif isinstance(op, ConnectInput):
+            target_created = op.target.node_id in created_ids
+            wire_key = (_identity(op.target), op.input_index)
+            first_write = wire_key not in seen_wire_slots
+            seen_wire_slots.add(wire_key)
+            if not target_created and first_write:
+                pre.append(NodeIdentityEquals(node=op.target))
+                pre.append(WireInputEquals(target=op.target, input_index=op.input_index, source=op.expected_old_source))
+            if op.source.node_id not in created_ids:
+                pre.append(NodeIdentityEquals(node=op.source))
+            # Later writes or created targets: wire old-value is JIT-checked.
+    return pre
+
+
+def derive_mandatory_postconditions(operations) -> list[object]:
+    """Mandatory post-write postconditions derived from the operations.
+
+    F2: for repeated writes to the same slot, only the LAST value is emitted
+    (intermediate postconditions would be contradictory at construction).
+    """
+    post: list[object] = []
+    # Track the last postcondition per slot; overwrite on repeat.
+    parm_posts: dict[tuple[str, str], int] = {}  # key -> index in post
+    wire_posts: dict[tuple[str, int], int] = {}
+    for op in operations:
+        if isinstance(op, CreateNode):
+            post.append(NodeIdentityEquals(node=_created_ref(op)))
+        elif isinstance(op, SetParm):
+            key = (_identity(op.target), op.parm_name)
+            cond = ParmValueEquals(target=op.target, parm_name=op.parm_name, value=op.value)
+            if key in parm_posts:
+                post[parm_posts[key]] = cond
+            else:
+                parm_posts[key] = len(post)
+                post.append(cond)
+        elif isinstance(op, ConnectInput):
+            key = (_identity(op.target), op.input_index)
+            cond = WireInputEquals(
+                target=op.target,
+                input_index=op.input_index,
+                source=WireRef(source=op.source, source_output_index=op.source_output_index),
+            )
+            if key in wire_posts:
+                post[wire_posts[key]] = cond
+            else:
+                wire_posts[key] = len(post)
+                post.append(cond)
+    return post
+
+
+def derive_mandatory_checkpoint(operations) -> tuple[list[NodeRef], list[ParmSnapshot], list[WireSnapshot]]:
+    """Exact before-snapshot coverage derived from the operations (design 4.4).
+
+    D1: excludes nonexistent created-node state (it cannot be snapshotted before
+    the transaction) while retaining before-state coverage for pre-existing nodes.
+    """
+    created_ids = {op.node_id for op in operations if isinstance(op, CreateNode)}
+    nodes: list[NodeRef] = []
+    parms: list[ParmSnapshot] = []
+    wires: list[WireSnapshot] = []
+    for op in operations:
+        if isinstance(op, CreateNode):
+            if op.parent.node_id not in created_ids:
+                nodes.append(op.parent)
+        elif isinstance(op, SetParm):
+            if op.target.node_id not in created_ids:
+                nodes.append(op.target)
+                parms.append(ParmSnapshot(target=op.target, parm_name=op.parm_name))
+        elif isinstance(op, ConnectInput):
+            if op.target.node_id not in created_ids:
+                nodes.append(op.target)
+                wires.append(WireSnapshot(target=op.target, input_index=op.input_index))
+            if op.source.node_id not in created_ids:
+                nodes.append(op.source)
+    return nodes, parms, wires
+
+
+def _canonical(item: object) -> str:
+    return canonical_json_dumps(item.to_dict())  # type: ignore[attr-defined]
+
+
+def _dedup(items: list[object]) -> list[object]:
+    """Dedup by canonical form, preserving first occurrence.
+
+    Multiple operations referencing the same node yield the same derived fact
+    (e.g. two ``NodeIdentityEquals(child)``); the ChangeSet constructor rejects
+    duplicate identities, so the derived set must be deduped.
+    """
+    seen: set[str] = set()
+    out: list[object] = []
+    for item in items:
+        key = _canonical(item)
+        if key not in seen:
+            seen.add(key)
+            out.append(item)
+    return out
+
+
+def _verify_superset(supplied: list[object], mandatory: list[object], label: str) -> None:
+    supplied_keys = {_canonical(item) for item in supplied}
+    for required in mandatory:
+        if _canonical(required) not in supplied_keys:
+            raise _mandatory_omitted(
+                f"The ChangeSet {label} omits a mandatory derived fact."
+            )
+
+
+def verify_mandatory_coverage(changeset: ChangeSet, workspace: WorkspaceManifest | None) -> None:
+    """Reject (zero writes) unless the ChangeSet carries every derived fact."""
+    _verify_superset(
+        list(changeset.preconditions),
+        _dedup(derive_mandatory_preconditions(changeset.operations, changeset.scene_binding, workspace)),
+        "preconditions",
+    )
+    _verify_superset(
+        list(changeset.expected_postconditions),
+        _dedup(derive_mandatory_postconditions(changeset.operations)),
+        "expected_postconditions",
+    )
+    m_nodes, m_parms, m_wires = derive_mandatory_checkpoint(changeset.operations)
+    plan = changeset.checkpoint_plan
+    _verify_superset(list(plan.nodes), _dedup(list(m_nodes)), "checkpoint_plan.nodes")
+    _verify_superset(list(plan.parameters), _dedup(list(m_parms)), "checkpoint_plan.parameters")
+    _verify_superset(list(plan.wires), _dedup(list(m_wires)), "checkpoint_plan.wires")
+
+
+class _Snapshot:
+    """Bounded before/after fact set: node existence + parm values + wire sources.
+
+    Values are stored in JSON-able form (parm scalars/lists, wire dicts) so the
+    deterministic revision hash and postcondition evaluation share one read.
+    """
+
+    __slots__ = ("nodes", "parms", "wires")
+
+    def __init__(self) -> None:
+        self.nodes: dict[str, dict[str, object]] = {}
+        self.parms: dict[tuple[str, str], dict[str, object]] = {}
+        self.wires: dict[tuple[str, int], dict[str, object] | None] = {}
+
+
+class ChangeSetExecutor:
+    """Transactional ChangeSet executor bound to a scene adapter.
+
+    Reuses :class:`ChangeSetPreflightAdapter` for zero-write re-validation and
+    stable-id-first reference collection, then performs the short write
+    transaction. Same-package access to ``scene_adapter._hou`` is intentional.
+    """
+
+    def __init__(
+        self,
+        scene_adapter: HoudiniSceneAdapter,
+        *,
+        receipt_cache_max: int = _RECEIPT_CACHE_MAX,
+    ) -> None:
+        if not isinstance(scene_adapter, HoudiniSceneAdapter):
+            raise TypeError("scene_adapter must be a HoudiniSceneAdapter")
+        if type(receipt_cache_max) is not int or receipt_cache_max <= 0:
+            raise ValueError("receipt_cache_max must be a positive integer")
+        self._scene = scene_adapter
+        self._preflight = ChangeSetPreflightAdapter(scene_adapter)
+        self._receipts: "OrderedDict[tuple[str, str], ChangeReceipt]" = OrderedDict()
+        self._receipt_cache_max = receipt_cache_max
+        self._write_frozen = False
+        self._current_run_id: str = ""
+        self._created_identity: dict[str, tuple[str, str]] = {}
+
+    @property
+    def _hou(self) -> object:
+        return self._scene._hou  # type: ignore[attr-defined]
+
+    @property
+    def write_frozen(self) -> bool:
+        """True once a Partial/CriticalRecovery receipt froze writes."""
+        return self._write_frozen
+
+    @property
+    def _tracked_epoch(self) -> int:
+        # In-memory scene epoch (no HOM access) — safe to read from a receipt query.
+        return self._scene._scene_epoch  # type: ignore[attr-defined]
+
+    def binding(self):  # type: ignore[no-untyped-def]
+        """Delegate the current scene binding (tracked epoch + instance)."""
+        return self._scene.binding()
+
+    # --------------------------------------------------------------- receipt query
+
+    def receipt(
+        self,
+        change_id: str,
+        changeset_digest: str,
+        *,
+        scene_epoch: int | None = None,
+    ) -> ChangeReceipt | None:
+        """Return the cached terminal receipt for ``(change_id, digest)`` or None.
+
+        Never touches or mutates the scene. A supplied ``scene_epoch`` is checked
+        against the in-memory tracked epoch BEFORE any cache access (a stale
+        receipt request fails closed). A cached terminal result for the same
+        change id under a DIFFERENT digest is a ``changeset.receipt_conflict``.
+        Cache bounds and deterministic eviction are tested; the cache is
+        process-local and not persisted.
+        """
+        if scene_epoch is not None and scene_epoch != self._tracked_epoch:
+            raise _stale_scene()
+        for (cached_id, cached_digest), _r in self._receipts.items():
+            if cached_id == change_id and cached_digest != changeset_digest:
+                raise _conflict()
+        return self._receipts.get((change_id, changeset_digest))
+
+    # --------------------------------------------------------------- apply
+
+    def apply(self, request: ApplyRequest) -> ChangeReceipt:
+        """Execute one admitted ChangeSet transactionally; return its receipt.
+
+        Pre-transaction failures (write freeze, digest conflict, backup
+        required, stale scene/manifest/identity, locked target, a precondition
+        that does not hold, missing/contradictory derived facts, or any policy
+        denial) raise :class:`HoudiniAdapterError` and perform zero writes.
+        Execution or reconciliation failures return a ``RolledBack``/``Partial``/
+        ``CriticalRecovery`` receipt and never claim success; the transaction
+        phase never raises out of this method.
+        """
+        if self._write_frozen:
+            raise _frozen()
+
+        hou = self._hou
+        changeset = request.changeset
+        digest = request.changeset_digest
+        change_id = changeset.change_id
+        key = (change_id, digest)
+
+        # Idempotency: a prior SUCCESS for the exact (change_id, digest) replays
+        # as AlreadyApplied (zero writes). A prior non-success is returned verbatim
+        # (do not re-run the transaction). Same id + different digest is a conflict.
+        cached = self._receipts.get(key)
+        if cached is not None:
+            if cached.status in (ReceiptStatus.APPLIED, ReceiptStatus.ALREADY_APPLIED):
+                return self._already_applied(cached)
+            return cached
+        self._reject_conflicting_digest(change_id, digest)
+
+        if changeset.risk_summary.requires_backup:
+            raise _backup_unavailable()
+
+        # ---- Zero-write re-validation ----------------------------------------
+        # Preflight re-derives binding/identity/create-absence and evaluates the
+        # supplied preconditions from the current scene (raises on stale/identity).
+        preflight_result = self._preflight.preflight(request)
+        if not preflight_result.all_preconditions_hold:
+            raise _precondition_failed()
+        self._reject_locked_changes(preflight_result, changeset)
+        # F2: the ChangeSet must carry every derived pre/postcondition and the
+        # exact before-snapshot coverage; omission/contradiction fails closed.
+        verify_mandatory_coverage(changeset, request.workspace)
+        # F1: re-run the accepted pure policy engine against the current workspace
+        # and current lock facts; any denial fails closed before writes.
+        decision = evaluate_policy(
+            changeset,
+            workspace=request.workspace,
+            locked_node_paths=self._locked_paths(preflight_result),
+        )
+        if not decision.allowed:
+            raise _policy_denied(decision.denial_codes)
+
+        binding = self.binding()
+        self._current_run_id = changeset.run_id
+        # D1: map created node_id -> (capability, role) for JIT identity verification
+        self._created_identity = {
+            op.node_id: (op.capability, op.role)
+            for op in changeset.operations if isinstance(op, CreateNode)
+        }
+        index = self._index_scene_by_node_id(hou)
+        before = self._snapshot(hou, changeset, index)
+        before_revision = self._revision(before)
+
+        # ---- TRANSACTION: from the first write on, never raise; always receipt --
+        applied_op_ids: list[str] = []
+        inverses: list[tuple] = []
+        write_error: BaseException | None = None
+        try:
+            with hou.undos.group(_UNDO_LABEL_PREFIX + change_id):  # type: ignore[union-attr]
+                for op in changeset.operations:
+                    self._execute_op(hou, op, index, inverses, applied_op_ids)
+        except Exception as exc:  # noqa: BLE001 — any execution failure -> rollback
+            write_error = exc
+
+        post_results: tuple[ConditionResult, ...] = ()
+        reconciled = False
+        if write_error is None:
+            try:
+                after_index = self._index_scene_by_node_id(hou)
+                after = self._snapshot(hou, changeset, after_index)
+                post_results = self._evaluate_postconditions(changeset, after, binding)
+                reconciled = all(result.passed for result in post_results)
+            except Exception:  # noqa: BLE001 — reconciliation crash -> uncertain
+                reconciled = False
+            if reconciled:
+                after_revision = self._revision(after)
+                receipt = ChangeReceipt(
+                    change_id=change_id,
+                    status=ReceiptStatus.APPLIED,
+                    instance_id=binding.instance_id,
+                    scene_epoch=binding.scene_epoch,
+                    before_revision=before_revision,
+                    after_revision=after_revision,
+                    applied_op_ids=tuple(applied_op_ids),
+                    postcondition_results=post_results,
+                    rollback_results=(),
+                    scene_may_have_changed=False,
+                    completed_at=_now(),
+                )
+                self._cache(key, receipt)
+                return receipt
+
+        # Failure (write error, postcondition failure, or reconciliation crash):
+        # attempt rollback, classify truthfully, and freeze on uncertainty.
+        rollback_results, rollback_ok = self._safe_rollback(hou, inverses)
+        after_revision = self._safe_after_revision(hou, changeset, before_revision)
+        status, scene_may_have_changed = self._classify_failure(
+            rollback_results, rollback_ok
+        )
+        if status != ReceiptStatus.ROLLED_BACK:
+            # An uncertain recovery freezes further writes until process restart.
+            self._write_frozen = True
+        receipt = ChangeReceipt(
+            change_id=change_id,
+            status=status,
+            instance_id=binding.instance_id,
+            scene_epoch=binding.scene_epoch,
+            before_revision=before_revision,
+            after_revision=after_revision,
+            applied_op_ids=tuple(applied_op_ids),
+            postcondition_results=post_results,
+            rollback_results=rollback_results,
+            scene_may_have_changed=scene_may_have_changed,
+            completed_at=_now(),
+        )
+        self._cache(key, receipt)
+        return receipt
+
+    # --------------------------------------------------------------- idempotency
+
+    def _already_applied(self, cached: ChangeReceipt) -> ChangeReceipt:
+        return ChangeReceipt(
+            change_id=cached.change_id,
+            status=ReceiptStatus.ALREADY_APPLIED,
+            instance_id=cached.instance_id,
+            scene_epoch=cached.scene_epoch,
+            before_revision=cached.before_revision,
+            after_revision=cached.after_revision,
+            applied_op_ids=(),
+            postcondition_results=cached.postcondition_results,
+            rollback_results=(),
+            scene_may_have_changed=False,
+            completed_at=_now(),
+        )
+
+    def _reject_conflicting_digest(self, change_id: str, digest: str) -> None:
+        for (cached_id, cached_digest), _receipt in self._receipts.items():
+            if cached_id == change_id and cached_digest != digest:
+                raise _conflict()
+
+    def _reject_locked_changes(self, preflight_result: PreflightResult, changeset) -> None:
+        """Reject a ChangeSet that writes to a locked node (zero writes).
+
+        The accepted 16-C preflight reports ``is_locked`` as a fact but does not
+        gate on it (preflight is read-only). The transaction must not mutate a
+        locked target, so this re-derivation fails closed before any write.
+        """
+        locked = self._locked_paths(preflight_result)
+        if not locked:
+            return
+        for ref in self._changed_targets(changeset):
+            if ref.path in locked:
+                raise _stale("A changed target is locked in the current scene.")
+
+    @staticmethod
+    def _locked_paths(preflight_result: PreflightResult) -> frozenset[str]:
+        return frozenset(
+            fact.requested.path for fact in preflight_result.node_facts if fact.is_locked
+        )
+
+    def _changed_targets(self, changeset) -> list[NodeRef]:  # type: ignore[no-untyped-def]
+        targets: list[NodeRef] = []
+        for op in changeset.operations:
+            if isinstance(op, SetParm):
+                targets.append(op.target)
+            elif isinstance(op, ConnectInput):
+                targets.append(op.target)
+                targets.append(op.source)
+        return targets
+
+    def _cache(self, key: tuple[str, str], receipt: ChangeReceipt) -> None:
+        self._receipts[key] = receipt
+        while len(self._receipts) > self._receipt_cache_max:
+            self._receipts.popitem(last=False)
+
+    # --------------------------------------------------------------- sensitivity sampling
+
+    def sample_sensitivity(
+        self, request: SensitivitySampleRequest
+    ) -> SensitivitySampleResult:
+        """Run one bounded sample-and-restore cycle; return typed evidence.
+
+        Pre-write failures (write freeze, stale scene epoch, an unresolvable
+        sample target, or a missing parameter) raise
+        :class:`HoudiniAdapterError` and perform zero writes. From the first
+        write on, this method never raises out of the write phase: every
+        written parameter is restored to its exact original value with
+        read-back verification (mirroring the apply rollback discipline), a
+        cook failure or aborted capture is classified into a structured error,
+        and an unverifiable restore freezes writes and fails closed. A result
+        is returned only after restoration is proven; it is never a guessed
+        success. All HOM access happens inside the single synchronous callable
+        the shared main-thread FIFO pumps, exactly like :meth:`apply`.
+        """
+        if self._write_frozen:
+            raise _frozen()
+
+        hou = self._hou
+        binding = self.binding()
+        # Scene-epoch drift is checked first (consistent with scene.query/apply).
+        if binding.scene_epoch != request.scene_epoch:
+            raise _stale_scene()
+
+        # ---- Zero-write resolution -----------------------------------------
+        # Every target must resolve (stable id first, then path) and expose the
+        # exact parameter BEFORE the first write.
+        index = self._index_scene_by_node_id(hou)
+        resolved: list[tuple[object, str, object, object]] = []
+        for target in request.samples:
+            node = self._resolve_sample_node(hou, target, index)
+            if node is None:
+                raise _sample_invalid(
+                    "A sensitivity sample target was not found in the scene."
+                )
+            original, existed = self._read_parm_value(node, target.parm_name)
+            if not existed:
+                raise _sample_invalid(
+                    "A sensitivity sample parameter was not found on its node."
+                )
+            resolved.append((node, target.parm_name, target.value, original))
+
+        # Bounded read-only baseline (may raise a structured stale/read error).
+        baseline = self._capture_sample_scene(request)
+
+        # ---- WRITE PHASE: from the first write on, never raise; restore and
+        # classify (mirrors the apply transaction discipline).
+        samples: list = []
+        written: list[tuple[object, str, object]] = []
+        failure: BaseException | None = None
+        try:
+            with hou.undos.group(_UNDO_LABEL_PREFIX + "sensitivity.sample"):  # type: ignore[union-attr]
+                for node, parm_name, sample_value, original in resolved:
+                    self._write_parm_value(node, parm_name, sample_value)
+                    written.append((node, parm_name, original))
+                    self._cook_sample_node(node)
+                    samples.append(self._capture_sample_scene(request))
+        except Exception as exc:  # noqa: BLE001 — any write/capture failure -> restore
+            failure = exc
+
+        # Exact restore in reverse write order, each write-back verified by a
+        # read-back comparison (the _rollback_parm primitive, inlined so one
+        # bad restore marks the whole cycle unrestored).
+        restore_ok = True
+        for node, parm_name, original in reversed(written):
+            try:
+                self._write_parm_value(node, parm_name, original)
+                current, existed = self._read_parm_value(node, parm_name)
+            except Exception:  # noqa: BLE001 — restore failure => not restored
+                restore_ok = False
+                break
+            if not existed or not _parm_equal(current, original):
+                restore_ok = False
+                break
+        if not restore_ok:
+            # The scene may be left mutated: freeze writes until process restart
+            # (same uncertainty rule as a Partial/CriticalRecovery receipt).
+            self._write_frozen = True
+            raise _sample_restore_failed()
+        if failure is not None:
+            if isinstance(failure, HoudiniAdapterError):
+                raise failure
+            raise _sample_aborted() from failure
+
+        restored = self._capture_sample_scene(request)
+        return SensitivitySampleResult(
+            baseline=baseline,
+            samples=tuple(samples),
+            restored=restored,
+        )
+
+    def _resolve_sample_node(
+        self, hou: object, target: object, index: dict[str, list[object]]
+    ) -> object | None:
+        """Resolve a sample target stable-id-first (mirrors _resolve_existing)."""
+        node_id = target.node_id  # type: ignore[attr-defined]
+        if node_id is None:
+            return hou.node(target.path)  # type: ignore[union-attr,attr-defined]
+        mirrors = index.get(node_id, ())
+        if len(mirrors) > 1:
+            raise _ambiguous()
+        if mirrors:
+            return mirrors[-1]
+        return hou.node(target.path)  # type: ignore[union-attr,attr-defined]
+
+    def _capture_sample_scene(self, request: SensitivitySampleRequest):  # type: ignore[no-untyped-def]
+        """Bounded read-only evidence capture over the exact requested paths."""
+        return self._scene.scene_query(
+            include_selection=False,
+            node_paths=request.node_paths,
+            include_geometry_stats=True,
+            expected_scene_epoch=request.scene_epoch,
+        )
+
+    @staticmethod
+    def _cook_sample_node(node: object) -> None:
+        """Force-cook one sampled node and fail closed on any cook error."""
+        try:
+            node.cook(force=True)  # type: ignore[attr-defined]
+            errors = node.errors()  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 — a failed cook is not a sample
+            raise _cook_failed() from exc
+        if errors:
+            raise _cook_failed()
+
+    # --------------------------------------------------------------- artifact capture
+
+    def capture(self, request: CaptureRequest) -> CaptureResult:
+        """Run one deterministic screenshot capture; return its typed reference.
+
+        Pre-scope failures (stale scene epoch, an unavailable target directory,
+        an unresolvable evidence node, a cook failure, empty geometry, or an
+        unreachable framing) raise :class:`HoudiniAdapterError` and perform
+        zero scene changes. From the temp camera/ROP scope creation on, the
+        op never raises out of the scope phase: the scope is destroyed first
+        (always, including on render failure), partial files are removed, and
+        every failure is classified into a structured error — a cleanup
+        failure is explicit and discards the capture, never a guessed visual
+        success. A result is returned only after the PNG was verified,
+        hashed, and atomically renamed and the owned temp scope is gone; the
+        result carries content-addressed reference fields only, never image
+        bytes. All HOM access happens inside the single synchronous callable
+        the shared main-thread FIFO pumps, exactly like :meth:`apply`.
+        """
+        hou = self._hou
+        binding = self.binding()
+        # Scene-epoch drift is checked first (consistent with scene.query/apply).
+        if binding.scene_epoch != request.scene_epoch:
+            raise _stale_scene()
+
+        # ---- Zero-scene-change prechecks -----------------------------------
+        target_dir = Path(request.target_dir)
+        if not target_dir.is_dir():
+            raise _capture_target_unavailable()
+        # The in-progress render lives in a sibling temp directory so the
+        # picture path keeps its .png extension: the flipbook picks the image
+        # format from the extension and an unrecognized one silently renders
+        # a non-PNG file. Renaming the verified file into place stays atomic.
+        tmp_dir = target_dir / (".tmp_" + request.artifact_id)
+        try:
+            tmp_dir.mkdir(exist_ok=True)
+        except OSError:
+            raise _capture_target_unavailable() from None
+        nodes: list[object] = []
+        for path in request.node_paths:
+            node = hou.node(path)  # type: ignore[union-attr]
+            if node is None:
+                raise _capture_invalid(
+                    "A capture evidence node was not found in the scene."
+                )
+            nodes.append(node)
+        for node in nodes:
+            self._cook_capture_node(node)
+        union = self._union_capture_bbox(nodes)
+        if union.bounding_radius <= 0.0:
+            raise _capture_no_geometry()
+        settings = request.settings
+        try:
+            plan = compute_framing(
+                union,
+                frame_width=settings.preflight_width,
+                frame_height=settings.preflight_height,
+                tolerance=FramingTolerance(
+                    margin_min=settings.margin_min,
+                    longest_axis_min=settings.longest_axis_min,
+                    longest_axis_max=settings.longest_axis_max,
+                    center_offset_max=settings.center_offset_max,
+                ),
+                max_adjustments=settings.max_adjustments,
+            )
+        except FramingError:
+            raise _capture_framing_failed() from None
+
+        # ---- Temp scope + render: from the first node creation on, classify
+        # and always clean up (mirrors the apply transaction discipline).
+        file_name = request.file_name
+        tmp_path = tmp_dir / file_name
+        final_path = target_dir / file_name
+        scope: list[object] = []
+        failure: BaseException | None = None
+        try:
+            with hou.undos.group(_UNDO_LABEL_PREFIX + "capture.capture"):  # type: ignore[union-attr]
+                cam = self._create_capture_camera(hou, request, plan, scope)
+                rop = self._create_capture_rop(hou, request, cam, tmp_path, scope)
+                self._render_capture(rop)
+        except Exception as exc:  # noqa: BLE001 — any scope/render failure -> cleanup
+            failure = exc
+        cleanup_failure = self._destroy_capture_scope(scope)
+        if cleanup_failure is not None:
+            # The scene may retain temp nodes: the capture is discarded and
+            # the failure is explicit, never a masqueraded success.
+            _unlink_quietly(tmp_path)
+            _rmdir_quietly(tmp_dir)
+            _unlink_quietly(final_path)
+            raise _capture_cleanup_failed() from cleanup_failure
+        if failure is not None:
+            _unlink_quietly(tmp_path)
+            _rmdir_quietly(tmp_dir)
+            _unlink_quietly(final_path)
+            if isinstance(failure, HoudiniAdapterError):
+                raise failure
+            raise _capture_render_failed() from failure
+
+        # Bytes verified only after the temp scope is gone; the Houdini side
+        # hashes the exact delivered file once and renames it atomically.
+        try:
+            sha256, size = _verify_capture_file(tmp_path)
+            os.replace(tmp_path, final_path)
+        except HoudiniAdapterError:
+            _unlink_quietly(tmp_path)
+            _rmdir_quietly(tmp_dir)
+            raise
+        except OSError as exc:
+            _unlink_quietly(tmp_path)
+            _rmdir_quietly(tmp_dir)
+            raise _capture_render_failed() from exc
+        _rmdir_quietly(tmp_dir)
+        evaluation = plan.evaluation
+        return CaptureResult(
+            artifact_id=request.artifact_id,
+            relative_path=file_name,
+            sha256=sha256,
+            media_type=PNG_MEDIA_TYPE,
+            size_bytes=size,
+            framing=CaptureFramingReport(
+                adjustments_used=plan.adjustments_used,
+                margin_left=evaluation.margin_left,
+                margin_right=evaluation.margin_right,
+                margin_bottom=evaluation.margin_bottom,
+                margin_top=evaluation.margin_top,
+                longest_axis_ratio=evaluation.longest_axis_ratio,
+                center_offset=evaluation.center_offset,
+            ),
+        )
+
+    @staticmethod
+    def _cook_capture_node(node: object) -> None:
+        """Force-cook one evidence node and fail closed on any cook error."""
+        try:
+            node.cook(force=True)  # type: ignore[attr-defined]
+            errors = node.errors()  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 — a failed cook is not a capture
+            raise _capture_cook_failed() from exc
+        if errors:
+            raise _capture_cook_failed()
+
+    @staticmethod
+    def _union_capture_bbox(nodes: list[object]) -> BoundingBox:
+        """Union the cooked world-space bounding boxes of the evidence nodes.
+
+        SOP nodes expose ``geometry()`` directly; object-level nodes do not
+        (``ObjNode`` has no ``geometry()``), so their display SOP geometry is
+        read instead and lifted to world space by the object world transform.
+        A SOP bbox is likewise lifted by its parent object transform when one
+        is readable. Nodes with no readable geometry contribute nothing.
+        """
+        boxes: list[BoundingBox] = []
+        for node in nodes:
+            box = ChangeSetExecutor._world_capture_bbox(node)
+            if box is not None:
+                boxes.append(box)
+        if not boxes:
+            raise _capture_no_geometry()
+        return BoundingBox.union(boxes)
+
+    @staticmethod
+    def _world_capture_bbox(node: object) -> BoundingBox | None:
+        """World-space bbox of one evidence node; None when nothing is readable."""
+        try:
+            geometry = node.geometry()  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 — object-level nodes have no geometry()
+            geometry = None
+        if geometry is not None:
+            # SOP node: its geometry is local; lift it by the parent object
+            # world transform when one is readable.
+            try:
+                parent = node.parent()  # type: ignore[attr-defined]
+                xform = parent.worldTransform() if parent is not None else None
+            except Exception:  # noqa: BLE001 — no transform contributes local space
+                xform = None
+        else:
+            # Object-level node: frame its display SOP geometry transformed
+            # by the object's own world transform.
+            try:
+                display = node.displayNode()  # type: ignore[attr-defined]
+                if display is None:
+                    return None
+                geometry = display.geometry()
+                xform = node.worldTransform()  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001 — no readable geometry contributes nothing
+                return None
+        try:
+            bbox = geometry.boundingBox()
+            mn = bbox.minvec()
+            mx = bbox.maxvec()
+        except Exception:  # noqa: BLE001 — no readable geometry contributes nothing
+            return None
+        values = (mn.x(), mn.y(), mn.z(), mx.x(), mx.y(), mx.z())
+        matrix: tuple[float, ...] | None = None
+        if xform is not None:
+            try:
+                candidate = tuple(xform.asTuple())
+            except Exception:  # noqa: BLE001 — untransformed is better than nothing
+                candidate = ()
+            if len(candidate) == 16:
+                matrix = candidate
+        if matrix is None:
+            return BoundingBox(*values)
+        return _transform_bbox_world(values, matrix)
+
+    def _create_capture_camera(
+        self, hou: object, request: CaptureRequest, plan: object, scope: list[object]
+    ) -> object:
+        """Create the owned temp camera at the deterministic plan placement."""
+        obj = hou.node("/obj")  # type: ignore[union-attr]
+        if obj is None:
+            raise _capture_render_unavailable()
+        camera = plan.camera  # type: ignore[attr-defined]
+        right, up, forward = camera_basis(camera.position, camera.look_at)
+        # Houdini cameras look down -Z with +Y up: the world-from-camera rows
+        # are (right, up, -forward, position); setParmTransform applies t/r.
+        rows = (
+            (right[0], up[0], -forward[0], camera.position[0]),
+            (right[1], up[1], -forward[1], camera.position[1]),
+            (right[2], up[2], -forward[2], camera.position[2]),
+            (0.0, 0.0, 0.0, 1.0),
+        )
+        try:
+            cam = obj.createNode("cam", "eee_capture_" + request.artifact_id[4:])  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 — no camera, no capture
+            raise _capture_render_unavailable() from exc
+        # Journal the created node immediately: it now exists, so any failure
+        # in the mirror steps must clean it up (mirrors _execute_create).
+        scope.append(cam)
+        try:
+            cam.setParmTransform(hou.Matrix4(rows))  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 — an unusable camera is unavailable
+            raise _capture_render_unavailable() from exc
+        self._set_capture_parm(cam, "focal", camera.focal_length_mm)
+        self._set_capture_parm(cam, "aperture", camera.sensor_width_mm)
+        return cam
+
+    def _create_capture_rop(
+        self,
+        hou: object,
+        request: CaptureRequest,
+        cam: object,
+        tmp_path: Path,
+        scope: list[object],
+    ) -> object:
+        """Create the owned temp Vulkan Flipbook ROP with neutral settings."""
+        out = hou.node("/out")  # type: ignore[union-attr]
+        if out is None:
+            raise _capture_render_unavailable()
+        try:
+            rop = out.createNode("flipbook", "eee_capture_" + request.artifact_id[4:])  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 — no flipbook ROP, no capture
+            raise _capture_render_unavailable() from exc
+        # Journal the created node immediately: it now exists, so any failure
+        # in the settings steps must clean it up (mirrors _execute_create).
+        scope.append(rop)
+        settings = request.settings
+        self._set_capture_parm(rop, "trange", "off")
+        self._set_capture_parm(rop, "camera", cam.path())  # type: ignore[attr-defined]
+        self._set_capture_parm(rop, "picture", tmp_path.as_posix())
+        self._set_capture_parm(rop, "tres", 1)
+        resolution = rop.parmTuple("res")  # type: ignore[attr-defined]
+        if resolution is None:
+            raise _capture_render_unavailable()
+        resolution.set((settings.width, settings.height))
+        # Deterministic neutral look: 8x AA, smooth shaded, fixed headlight,
+        # no materials/textures/transparency/motion blur.
+        self._set_capture_parm(rop, "aamode", "aa8")
+        self._set_capture_parm(rop, "shadingmode", "smooth")
+        self._set_capture_parm(rop, "lighting", "headlight")
+        self._set_capture_parm(rop, "worklighttype", "headlight")
+        self._set_capture_parm(rop, "usematerials", 0)
+        self._set_capture_parm(rop, "usetextures", 0)
+        self._set_capture_parm(rop, "transparency", "off")
+        self._set_capture_parm(rop, "motionblur", 0)
+        return rop
+
+    @staticmethod
+    def _set_capture_parm(node: object, name: str, value: object) -> None:
+        """Set one render parameter; a missing surface fails closed."""
+        parm = node.parm(name)  # type: ignore[attr-defined]
+        if parm is None:
+            raise _capture_render_unavailable()
+        try:
+            parm.set(value)
+        except Exception as exc:  # noqa: BLE001 — an unsettable parm is unavailable
+            raise _capture_render_unavailable() from exc
+
+    @staticmethod
+    def _render_capture(rop: object) -> None:
+        """Render the single current frame and fail closed on any error."""
+        try:
+            rop.render()  # type: ignore[attr-defined]
+            errors = rop.errors()  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001 — a failed render is not a capture
+            raise _capture_render_failed() from exc
+        if errors:
+            raise _capture_render_failed()
+
+    @staticmethod
+    def _destroy_capture_scope(scope: list[object]) -> BaseException | None:
+        """Destroy the owned temp nodes in reverse order; return first failure."""
+        failure: BaseException | None = None
+        for node in reversed(scope):
+            try:
+                node.destroy()  # type: ignore[attr-defined]
+            except Exception as exc:  # noqa: BLE001 — keep destroying the rest
+                if failure is None:
+                    failure = exc
+        return failure
+
+    # --------------------------------------------------------------- writes
+
+    def _execute_op(
+        self,
+        hou: object,
+        op: object,
+        index: dict[str, list[object]],
+        inverses: list[tuple],
+        applied_op_ids: list[str],
+    ) -> None:
+        """Execute one typed effect, mirroring ownership and journaling inverses.
+
+        Each inverse is journaled as soon as its restoration facts/object exist
+        and BEFORE the (next) mutating HOM call, so a mirror/mutate failure can
+        never strand an applied effect without a rollback entry. ``index`` is
+        mutated in place when a node is created so later ops can resolve it.
+        """
+        if isinstance(op, CreateNode):
+            self._execute_create(hou, op, index, inverses, applied_op_ids)
+        elif isinstance(op, SetParm):
+            self._execute_set_parm(hou, op, index, inverses, applied_op_ids)
+        elif isinstance(op, ConnectInput):
+            self._execute_connect(hou, op, index, inverses, applied_op_ids)
+        else:
+            raise _apply_failed("Unsupported operation kind.")  # pragma: no cover - closed union
+
+    def _execute_create(
+        self,
+        hou: object,
+        op: CreateNode,
+        index: dict[str, list[object]],
+        inverses: list[tuple],
+        applied_op_ids: list[str],
+    ) -> None:
+        parent = self._resolve_existing(hou, op.parent, index)
+        if parent is None:
+            raise _apply_failed("The create parent was not found in the scene.")
+        # D1: if the parent is a created node, verify its full identity before use.
+        if op.parent.node_id in self._created_identity:
+            self._verify_created_identity(parent, op.parent)
+        created = parent.createNode(op.node_type, op.node_name)  # type: ignore[attr-defined]
+        derived_path = _derive_create_path(op.parent.path, op.node_name)
+        # Journal the create-inverse immediately: the node now exists, so any
+        # failure in the mirror steps (or a later op) must roll it back.
+        inverses.append(
+            ("create", created, derived_path, op.node_id, op.workspace_id,
+             op.capability, op.role, self._current_run_id)
+        )
+        applied_op_ids.append(op.op_id)
+        index.setdefault(op.node_id, []).append(created)
+        # Mirror the six ownership keys (design 4.1); node_id first so the node
+        # is identifiable even if a later mirror step fails. Each step may fail;
+        # the create is already journaled for rollback.
+        created.setUserData(_NODE_ID_KEY, op.node_id)  # type: ignore[attr-defined]
+        created.setUserData(_WS_KEY, op.workspace_id)  # type: ignore[attr-defined]
+        created.setUserData(_CAP_KEY, op.capability)  # type: ignore[attr-defined]
+        created.setUserData(_ROLE_KEY, op.role)  # type: ignore[attr-defined]
+        created.setUserData(_SCHEMA_KEY, _SUPPORTED_SCHEMA_VERSION)  # type: ignore[attr-defined]
+        created.setUserData(_RUN_KEY, self._current_run_id)  # type: ignore[attr-defined]
+
+    def _execute_set_parm(
+        self,
+        hou: object,
+        op: SetParm,
+        index: dict[str, list[object]],
+        inverses: list[tuple],
+        applied_op_ids: list[str],
+    ) -> None:
+        node = self._resolve_existing(hou, op.target, index)
+        if node is None:
+            raise _apply_failed("The parameter target was not found in the scene.")
+        # D1: if target is a created node, verify its full identity before use.
+        if op.target.node_id in self._created_identity:
+            self._verify_created_identity(node, op.target)
+        old_value, _existed = self._read_parm_value(node, op.parm_name)
+        # D1 JIT: compare current value to expected_old_value immediately before write.
+        if not _parm_equal(old_value, op.expected_old_value):
+            raise _stale("The current parameter value does not match expected_old_value.")
+        # Journal the inverse (captured before-state) BEFORE the mutating call,
+        # so a mutate-then-raise still has an exact restoration entry.
+        inverses.append(("parm", op.target, op.parm_name, old_value))
+        self._write_parm_value(node, op.parm_name, op.value)
+        applied_op_ids.append(op.op_id)
+
+    def _execute_connect(
+        self,
+        hou: object,
+        op: ConnectInput,
+        index: dict[str, list[object]],
+        inverses: list[tuple],
+        applied_op_ids: list[str],
+    ) -> None:
+        target = self._resolve_existing(hou, op.target, index)
+        source = self._resolve_existing(hou, op.source, index)
+        if target is None:
+            raise _apply_failed("The wire target was not found in the scene.")
+        if source is None:
+            raise _apply_failed("The wire source was not found in the scene.")
+        # D1: verify created endpoint identities before use.
+        if op.target.node_id in self._created_identity:
+            self._verify_created_identity(target, op.target)
+        if op.source.node_id in self._created_identity:
+            self._verify_created_identity(source, op.source)
+        old_source = self._read_wire_source(target, op.input_index)
+        # D1 JIT: compare current source to expected_old_source immediately before write.
+        if not _wire_equal(old_source, op.expected_old_source):
+            raise _stale("The current wire source does not match expected_old_source.")
+        # D1 JIT: if the expected_old_source is a created node, verify its actual
+        # six-mirror identity too (path/type/workspace/node_id are checked by
+        # _wire_equal, but capability/role/schema/run are not visible there).
+        if (
+            op.expected_old_source is not None
+            and op.expected_old_source.source.node_id in self._created_identity
+        ):
+            actual_old_node = self._resolve_existing(hou, op.expected_old_source.source, index)
+            if actual_old_node is None:
+                raise _stale("The expected old created wire source was not found in the scene.")
+            self._verify_created_identity(actual_old_node, op.expected_old_source.source)
+        inverses.append(("wire", op.target, op.input_index, old_source))
+        target.setInput(op.input_index, source, op.source_output_index)  # type: ignore[attr-defined]
+        applied_op_ids.append(op.op_id)
+
+    def _verify_created_identity(self, node: object, ref: NodeRef) -> None:
+        """D1: verify a created node's current full identity (path, type, and all
+        six mirrored ownership keys) before any transactional use.
+
+        A mismatch or unreadable key raises ``changeset.stale`` (zero current
+        write). If prior ops wrote, the accepted reverse rollback applies.
+        """
+        expected_cap, expected_role = self._created_identity.get(ref.node_id, ("", ""))
+        expected: dict[str, str] = {
+            _NODE_ID_KEY: ref.node_id,
+            _WS_KEY: ref.expected_workspace_id if ref.expected_workspace_id else "",
+            _CAP_KEY: expected_cap,
+            _ROLE_KEY: expected_role,
+            _SCHEMA_KEY: _SUPPORTED_SCHEMA_VERSION,
+            _RUN_KEY: self._current_run_id,
+        }
+        for key, intended in expected.items():
+            value, ok = self._read_user_data_strict(node, key)
+            if not ok or value != intended:
+                raise _stale(f"The created node identity mismatch at {key!r}.")
+        try:
+            if str(node.path()) != ref.path:  # type: ignore[attr-defined]
+                raise _stale("The created node path has changed.")
+            if str(node.type().name()) != ref.expected_type:  # type: ignore[attr-defined]
+                raise _stale("The created node type has changed.")
+        except HoudiniAdapterError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise _stale("The created node identity could not be verified.") from exc
+
+    # --------------------------------------------------------------- rollback
+
+    def _safe_rollback(
+        self, hou: object, inverses: list[tuple]
+    ) -> tuple[tuple[ConditionResult, ...], bool]:
+        """Run derived inverses in strict reverse order; never raise.
+
+        Returns the per-inverse results and an ``ok`` flag that is False if the
+        rollback pass itself could not complete (index rebuild or iteration
+        crash). Individual inverse failures are captured as failing results, not
+        raised.
+        """
+        try:
+            index = self._index_scene_by_node_id(hou)
+        except Exception:  # noqa: BLE001 — cannot even index -> uncertain
+            return (), False
+        results: list[ConditionResult] = []
+        for inverse in reversed(inverses):
+            try:
+                results.append(self._rollback_one(hou, inverse, index))
+            except Exception:  # noqa: BLE001 — a single inverse must not abort the rest
+                results.append(
+                    ConditionResult(kind=_inverse_condition_kind(inverse[0]), passed=False, detail=None)
+                )
+        return tuple(results), True
+
+    def _rollback_one(
+        self, hou: object, inverse: tuple, index: dict[str, list[object]]
+    ) -> ConditionResult:
+        kind = inverse[0]
+        if kind == "create":
+            return self._rollback_create(hou, inverse)
+        if kind == "parm":
+            _tag, ref, name, old_value = inverse  # type: ignore[misc]
+            return self._rollback_parm(hou, ref, name, old_value, index)
+        if kind == "wire":
+            _tag, ref, idx, old_source = inverse  # type: ignore[misc]
+            return self._rollback_wire(hou, ref, idx, old_source, index)
+        return ConditionResult(kind="node.absent", passed=False, detail=None)
+
+    def _rollback_create(self, hou: object, inverse: tuple) -> ConditionResult:
+        """Destroy a node created by THIS transaction after full identity proof.
+
+        The inverse carries the actual created node object and the exact mirrored
+        identity this transaction intended. Rollback destroys it only if the
+        object is still at the derived path and every mirrored key can be READ
+        (a read exception refuses destroy — uncertain recovery) and is either
+        unset (a mirror step failed mid-way) or matches the intended value.
+        """
+        _tag, created, path, node_id, ws_id, cap, role, run_id = inverse  # type: ignore[misc]
+        alive_path = self._safe_path(created)
+        if alive_path is None:
+            # Already gone: the rollback goal (absence) is met.
+            return ConditionResult(kind="node.absent", passed=self._node_gone(hou, path), detail=None)
+        if alive_path != path:
+            return ConditionResult(kind="node.absent", passed=False, detail=None)
+        intended = {
+            _NODE_ID_KEY: node_id,
+            _WS_KEY: ws_id,
+            _CAP_KEY: cap,
+            _ROLE_KEY: role,
+            _SCHEMA_KEY: _SUPPORTED_SCHEMA_VERSION,
+            _RUN_KEY: run_id,
+        }
+        # F10: read each mirrored key STRICTLY. A read that raises (not merely
+        # returns None) must refuse destroy → uncertain recovery + freeze. A key
+        # that is unset (None) is allowed (mirror step may have failed mid-way).
+        verified = True
+        for key, intended_value in intended.items():
+            value, ok = self._read_user_data_strict(created, key)
+            if not ok:
+                verified = False
+                break
+            if value is not None and value != intended_value:
+                verified = False
+                break
+        if verified:
+            try:
+                created.destroy()  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001 — destroy failure => not restored
+                verified = False
+        return ConditionResult(
+            kind="node.absent", passed=bool(verified and self._node_gone(hou, path)), detail=None
+        )
+
+    def _rollback_parm(
+        self,
+        hou: object,
+        ref: NodeRef,
+        name: str,
+        old_value: object,
+        index: dict[str, list[object]],
+    ) -> ConditionResult:
+        node = self._resolve_existing(hou, ref, index)
+        if node is None:
+            return ConditionResult(kind="parm.value_equals", passed=False, detail=None)
+        try:
+            self._write_parm_value(node, name, old_value)
+        except Exception:  # noqa: BLE001
+            return ConditionResult(kind="parm.value_equals", passed=False, detail=None)
+        current, _existed = self._read_parm_value(node, name)
+        return ConditionResult(
+            kind="parm.value_equals", passed=_parm_equal(current, old_value), detail=None
+        )
+
+    def _rollback_wire(
+        self,
+        hou: object,
+        ref: NodeRef,
+        idx: int,
+        old_source: WireRef | None,
+        index: dict[str, list[object]],
+    ) -> ConditionResult:
+        node = self._resolve_existing(hou, ref, index)
+        if node is None:
+            return ConditionResult(kind="wire.input_equals", passed=False, detail=None)
+        try:
+            if old_source is None:
+                node.setInput(idx, None)  # type: ignore[attr-defined]
+            else:
+                src = self._resolve_existing(hou, old_source.source, index)
+                if src is None:
+                    return ConditionResult(kind="wire.input_equals", passed=False, detail=None)
+                node.setInput(idx, src, old_source.source_output_index)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            return ConditionResult(kind="wire.input_equals", passed=False, detail=None)
+        current = self._read_wire_source(node, idx)
+        return ConditionResult(
+            kind="wire.input_equals", passed=_wire_equal(current, old_source), detail=None
+        )
+
+    def _classify_failure(
+        self, rollback_results: tuple[ConditionResult, ...], rollback_ok: bool
+    ) -> tuple[ReceiptStatus, bool]:
+        """Classify a failed transaction truthfully (F4).
+
+        ``rollback_ok False`` (rollback itself crashed) is always uncertain ->
+        ``CriticalRecovery``. Otherwise the per-inverse results decide: a full
+        clean restore is ``RolledBack`` (scene restored); a mixed restore is
+        ``Partial``; a total restore failure is ``CriticalRecovery``.
+        """
+        if not rollback_ok:
+            return ReceiptStatus.CRITICAL_RECOVERY, True
+        if not rollback_results:
+            # Nothing was applied before the failure -> nothing to undo -> clean.
+            return ReceiptStatus.ROLLED_BACK, False
+        passed = sum(1 for r in rollback_results if r.passed)
+        if passed == len(rollback_results):
+            return ReceiptStatus.ROLLED_BACK, False
+        if passed == 0:
+            return ReceiptStatus.CRITICAL_RECOVERY, True
+        return ReceiptStatus.PARTIAL, True
+
+    def _safe_after_revision(
+        self, hou: object, changeset: ChangeSet, before_revision: str
+    ) -> str:
+        """Best-effort post-failure revision; falls back to before on read error."""
+        try:
+            post_index = self._index_scene_by_node_id(hou)
+            return self._revision(self._snapshot(hou, changeset, post_index))
+        except Exception:  # noqa: BLE001 — never let revision computation escape
+            return before_revision
+
+    @staticmethod
+    def _safe_path(node: object) -> str | None:
+        try:
+            return str(node.path())  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 — deleted/inaccessible node
+            return None
+
+    @staticmethod
+    def _read_user_data_strict(node: object, key: str) -> tuple[str | None, bool]:
+        """Read a mirrored key with an explicit success flag (F10).
+
+        Returns ``(value, ok)``. ``ok`` is False on ANY read exception (the
+        identity could not be proven → destroy must be refused). A successful
+        read returning None means the key is genuinely unset (allowed).
+        """
+        try:
+            value = node.userData(key)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            return None, False
+        if value is None:
+            return None, True
+        return str(value), True
+
+    @staticmethod
+    def _node_gone(hou: object, path: str) -> bool:
+        try:
+            return hou.node(path) is None  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            return False
+
+    # --------------------------------------------------------------- postconditions
+
+    def _evaluate_postconditions(
+        self, changeset, after: _Snapshot, binding  # type: ignore[no-untyped-def]
+    ) -> tuple[ConditionResult, ...]:
+        results: list[ConditionResult] = []
+        for cond in changeset.expected_postconditions:
+            kind = cond.kind
+            if isinstance(cond, NodeIdentityEquals):
+                fact = after.nodes.get(_identity(cond.node))
+                passed = fact is not None and bool(fact.get("exists")) and self._node_identity_holds(fact, cond.node)
+            elif isinstance(cond, ParmValueEquals):
+                slot = after.parms.get((_identity(cond.target), cond.parm_name))
+                passed = slot is not None and bool(slot.get("exists")) and _parm_equal(slot.get("value"), cond.value)
+            elif isinstance(cond, WireInputEquals):
+                current = after.wires.get((_identity(cond.target), cond.input_index))
+                passed = _wire_equal(current, cond.source)
+            else:  # pragma: no cover - postcondition union is closed
+                raise _apply_failed(f"Unsupported postcondition kind: {kind!r}")
+            results.append(ConditionResult(kind=kind, passed=passed, detail=None))
+        return tuple(results)
+
+    @staticmethod
+    def _node_identity_holds(fact: dict[str, object], ref: NodeRef) -> bool:
+        if not bool(fact.get("exists")):
+            return False
+        if fact.get("path") != ref.path:
+            return False
+        if fact.get("type") != ref.expected_type:
+            return False
+        if ref.node_id is not None and fact.get("node_id") != ref.node_id:
+            return False
+        if ref.expected_workspace_id is not None and (
+            fact.get("workspace_id") is None or fact.get("workspace_id") != ref.expected_workspace_id
+        ):
+            return False
+        return True
+
+    # --------------------------------------------------------------- snapshot
+
+    def _snapshot(
+        self, hou: object, changeset, index: dict[str, list[object]]
+    ) -> _Snapshot:
+        snap = _Snapshot()
+        for ref in self._preflight._collect_node_refs(changeset):
+            node = self._resolve_existing(hou, ref, index)
+            snap.nodes[_identity(ref)] = self._node_fact_dict(node)
+        for ref, name in self._parm_targets(changeset):
+            node = self._resolve_existing(hou, ref, index)
+            value, existed = self._read_parm_value(node, name) if node is not None else (None, False)
+            snap.parms[(_identity(ref), name)] = {
+                "exists": existed,
+                "value": _parm_value_json(value) if value is not None else None,
+            }
+        for ref, idx in self._wire_targets(changeset):
+            node = self._resolve_existing(hou, ref, index)
+            source = self._read_wire_source(node, idx) if node is not None else None
+            snap.wires[(_identity(ref), idx)] = source
+        return snap
+
+    def _parm_targets(self, changeset) -> list[tuple[NodeRef, str]]:  # type: ignore[no-untyped-def]
+        targets: list[tuple[NodeRef, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def add(target: NodeRef, name: str) -> None:
+            key = (_identity(target), name)
+            if key not in seen:
+                seen.add(key)
+                targets.append((target, name))
+
+        for op in changeset.operations:
+            if isinstance(op, SetParm):
+                add(op.target, op.parm_name)
+        for cond in changeset.expected_postconditions:
+            if isinstance(cond, ParmValueEquals):
+                add(cond.target, cond.parm_name)
+        return targets
+
+    def _wire_targets(self, changeset) -> list[tuple[NodeRef, int]]:  # type: ignore[no-untyped-def]
+        targets: list[tuple[NodeRef, int]] = []
+        seen: set[tuple[str, int]] = set()
+
+        def add(target: NodeRef, index: int) -> None:
+            key = (_identity(target), index)
+            if key not in seen:
+                seen.add(key)
+                targets.append((target, index))
+
+        for op in changeset.operations:
+            if isinstance(op, ConnectInput):
+                add(op.target, op.input_index)
+        for cond in changeset.expected_postconditions:
+            if isinstance(cond, WireInputEquals):
+                add(cond.target, cond.input_index)
+        return targets
+
+    @staticmethod
+    def _node_fact_dict(node: object | None) -> dict[str, object]:
+        if node is None:
+            return {
+                "exists": False,
+                "path": None,
+                "type": None,
+                "parent": None,
+                "node_id": None,
+                "workspace_id": None,
+            }
+        parent = node.parent()  # type: ignore[attr-defined]
+        return {
+            "exists": True,
+            "path": str(node.path()),  # type: ignore[attr-defined]
+            "type": str(node.type().name()),  # type: ignore[attr-defined]
+            "parent": str(parent.path()) if parent is not None else "/",  # type: ignore[attr-defined]
+            "node_id": _read_user_data(node, _NODE_ID_KEY),
+            "workspace_id": _read_user_data(node, _WS_KEY),
+        }
+
+    def _revision(self, snap: _Snapshot) -> str:
+        payload = {
+            "nodes": [[k, v] for k, v in sorted(snap.nodes.items())],
+            "parms": [[list(k), v] for k, v in sorted(snap.parms.items())],
+            "wires": [
+                [list(k), (v.to_dict() if v is not None else None)]
+                for k, v in sorted(snap.wires.items())
+            ],
+        }
+        return hashlib.sha256(canonical_json_dumps(payload).encode("utf-8")).hexdigest()
+
+    # --------------------------------------------------------------- resolution + reads
+
+    def _index_scene_by_node_id(self, hou: object) -> dict[str, list[object]]:
+        root = hou.node("/")  # type: ignore[union-attr]
+        nodes = () if root is None else tuple(root.allSubChildren())  # type: ignore[attr-defined]
+        index: dict[str, list[object]] = {}
+        for node in nodes:
+            node_id = _read_user_data(node, _NODE_ID_KEY)
+            if node_id is None:
+                continue
+            index.setdefault(node_id, []).append(node)
+        return index
+
+    def _resolve_existing(
+        self, hou: object, ref: NodeRef, index: dict[str, list[object]]
+    ) -> object | None:
+        """Resolve a reference to its current HOM node (stable id first)."""
+        if ref.node_id is None:
+            return hou.node(ref.path)  # type: ignore[union-attr]
+        mirrors = index.get(ref.node_id, ())
+        if len(mirrors) > 1:
+            raise _ambiguous()
+        if mirrors:
+            return mirrors[-1]
+        return hou.node(ref.path)  # type: ignore[union-attr]
+
+    def _read_parm_value(self, node: object, name: str) -> tuple[object | None, bool]:
+        parm = node.parm(name)  # type: ignore[attr-defined]
+        if parm is not None:
+            return self._bounded_parm(parm.eval()), True  # type: ignore[attr-defined]
+        pt = node.parmTuple(name)  # type: ignore[attr-defined]
+        if pt is not None and pt.size() > 1:  # type: ignore[attr-defined]
+            return self._bounded_parm(tuple(pt.eval())), True  # type: ignore[attr-defined]
+        return None, False
+
+    def _write_parm_value(self, node: object, name: str, value: object) -> None:
+        if isinstance(value, tuple):
+            pt = node.parmTuple(name)  # type: ignore[attr-defined]
+            if pt is None:
+                raise _apply_failed("The parameter tuple was not found on the node.")
+            pt.set(tuple(value))  # type: ignore[attr-defined]
+            return
+        parm = node.parm(name)  # type: ignore[attr-defined]
+        if parm is None:
+            raise _apply_failed("The parameter was not found on the node.")
+        parm.set(value)  # type: ignore[attr-defined]
+
+    @staticmethod
+    def _bounded_parm(raw: object) -> object:
+        try:
+            return _validate_parm_value(raw, "parm value")
+        except (TypeError, ValueError) as exc:
+            raise _apply_failed("A parameter has an unsupported or unbounded value.") from exc
+
+    def _read_wire_source(self, node: object, index: int) -> WireRef | None:
+        """Read the typed source wired into ``node`` input ``index``.
+
+        The source node is read via ``node.inputs()[index]``, which is reliable
+        across Houdini node kinds; ``inputConnections().outputNode()`` is not
+        (it can return the node itself for some node kinds in 21.0.440). The
+        source output index is read from ``inputConnections()``.
+        """
+        try:
+            all_inputs = node.inputs()  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            all_inputs = ()
+        src_node: object | None = None
+        if isinstance(all_inputs, (tuple, list)) and 0 <= index < len(all_inputs):
+            src_node = all_inputs[index]
+        if src_node is None:
+            return None
+        output_index = 0
+        try:
+            for conn in node.inputConnections():  # type: ignore[attr-defined]
+                if int(conn.inputIndex()) == index:  # type: ignore[attr-defined]
+                    output_index = int(conn.outputIndex())  # type: ignore[attr-defined]
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+        source = NodeRef(
+            node_id=_read_user_data(src_node, _NODE_ID_KEY),
+            path=str(src_node.path()),  # type: ignore[attr-defined]
+            expected_type=str(src_node.type().name()),  # type: ignore[attr-defined]
+            expected_workspace_id=_read_user_data(src_node, _WS_KEY),
+        )
+        return WireRef(source=source, source_output_index=output_index)

@@ -1,6 +1,6 @@
-# Each case = one agent run + assertions on the exported geometry.
-# Run with:  python -m eval.run_eval            (runs the agent per case)
-#       or:  python -m eval.run_eval --dry      (evaluate already-exported files)
+# Declarative geometry expectations for the offline evaluator.
+# Supported command: python -m eval.run_eval --dry
+# Live provider execution is deferred to Runtime MVP S6.
 
 - name: 3-storey house with windows
   prompt: "Build a 3-storey house with windows on each floor and a flat roof, then export to output/house.obj"

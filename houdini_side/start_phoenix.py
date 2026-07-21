@@ -4,8 +4,10 @@ One-click via the EEE Agent menu. Idempotent: if Phoenix is already up on :6006,
 just reports it. Spawns the venv python in a new console window so you can see its
 logs and close the window to stop it.
 
-Requires: Phoenix installed in .venv (it is, via pyproject), and EEE_TRACING=phoenix
-in .env for the agent to actually emit traces.
+Requires: ``arize-phoenix`` installed in ``.venv`` (it is **not** in the frozen
+runtime lockfile — install it separately with
+``uv pip install arize-phoenix openinference-instrumentation-langchain``) and
+``EEE_TRACING=phoenix`` in ``.env`` for the agent to actually emit traces.
 """
 from __future__ import annotations
 
@@ -42,6 +44,19 @@ def start() -> None:
         raise RuntimeError(
             "EEE_PATH not set or .venv/Scripts/python.exe not found. "
             "Run houdini_side/install_menu.py + build the venv per SETUP.md.")
+    # Probe the dependency before spawning so the user gets a clear message
+    # instead of a ModuleNotFoundError inside the console window. Phoenix is
+    # an optional extra, not part of the frozen runtime lockfile.
+    probe = subprocess.run(
+        [py, "-c", "import phoenix.server.main"],
+        capture_output=True)
+    if probe.returncode != 0:
+        raise RuntimeError(
+            "Phoenix is not installed in the agent venv. Install it with:\n"
+            "  uv pip install arize-phoenix "
+            "openinference-instrumentation-langchain\n"
+            "Phoenix is an optional observability extra, not part of the "
+            "frozen runtime lockfile.")
     # New console window: user sees Phoenix logs and can close it to stop the server.
     flags = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
     subprocess.Popen([py, "-m", "phoenix.server.main", "serve"], creationflags=flags)

@@ -1,0 +1,99 @@
+"""Package boundary contract for the three-pane Runtime panel."""
+
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+from xml.etree import ElementTree
+
+ROOT = Path(__file__).resolve().parents[2]
+PKG = ROOT / "houdini_side" / "runtime_panel"
+
+FORBIDDEN_IMPORTS = {
+    "sqlite3", "aiosqlite", "rpyc", "hrpyc",
+    "eee_agent.app", "eee_agent.runtime.database",
+    "eee_agent.runtime.checkpoints", "eee_agent.changesets.service",
+    "eee_agent.houdini_bridge.changeset_provider",
+}
+FORBIDDEN_TEXT = ("changeset.apply", "hou.selectedNodes", "asyncio.run",
+                  "eval(", "exec(")
+
+
+def test_pypanel_declares_one_menu_visible_runtime_interface() -> None:
+    path = ROOT / "python_panels" / "EEEAgentRuntime.pypanel"
+    root = ElementTree.parse(path).getroot()
+    interfaces = root.findall("interface")
+    assert len(interfaces) == 1
+    interface = interfaces[0]
+    assert interface.attrib["name"] == "eee_agent_runtime"
+    assert interface.attrib["label"] == "EEE Runtime"
+    assert interface.find("includeInPaneTabMenu") is not None
+    script = interface.findtext("script") or ""
+    assert "runtime_panel.create_panel()" in script
+    assert "onDestroyInterface" in script
+
+
+def test_package_has_no_legacy_module() -> None:
+    assert not (PKG / "legacy.py").exists()
+
+
+def test_all_modules_keep_import_boundary() -> None:
+    for path in PKG.glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        imported: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module)
+        assert imported.isdisjoint(FORBIDDEN_IMPORTS), path.name
+        text = path.read_text(encoding="utf-8")
+        for forbidden in FORBIDDEN_TEXT:
+            assert forbidden not in text, f"{path.name}: {forbidden}"
+
+
+def test_client_keeps_ime_and_security_wiring() -> None:
+    source = (PKG / "client.py").read_text(encoding="utf-8")
+    assert "WA_InputMethodEnabled" in source
+    assert "SessionTitleDialog" in source
+    assert "RunRequestEdit" in source
+    assert "QInputDialog.getText" not in source
+    assert "textMessageReceived.connect(self._on_text_message)" in source
+    assert "binaryMessageReceived.connect(self._on_binary_message)" in source
+
+
+def test_composer_is_multiline_with_ctrl_enter_submit() -> None:
+    source = (PKG / "client.py").read_text(encoding="utf-8")
+    # The composer is a QPlainTextEdit (multi-line) with IME multiline mode,
+    # and Ctrl+Enter is the explicit submit gesture (bare Enter inserts a
+    # newline so IME candidate confirmation never fires a Run).
+    assert "class RunRequestEdit(QtWidgets.QPlainTextEdit)" in source
+    assert "_configure_ime(self, multiline=True)" in source
+    assert "submitRequested = QtCore.Signal()" in source
+    assert "ControlModifier" in source
+    assert "returnPressed" not in source  # never wired on the composer
+
+
+def test_client_auto_creates_session_when_none_active() -> None:
+    # Sending a prompt with no active Session auto-creates one (placeholder
+    # title) and stashes the prompt to fire run.start once it activates.
+    source = (PKG / "client.py").read_text(encoding="utf-8")
+    assert "_pending_run_input" in source
+    assert '"New session"' in source
+    assert "self._pending_run_input = user_input" in source
+    # The stashed prompt fires when the new Session activates post-reconnect.
+    assert "self._pending_run_input is not None" in source
+    # A failed auto-create clears the stash so it isn't silently swallowed.
+    assert 'purpose == "session.create"' in source
+    assert "self._pending_run_input = None" in source
+
+
+def test_client_refreshes_sidebar_on_session_renamed() -> None:
+    # An auto-titled Session emits session.renamed; the client must update the
+    # cached title and re-emit sessionsChanged so the sidebar refreshes in
+    # place (no extra session.list round-trip).
+    source = (PKG / "client.py").read_text(encoding="utf-8")
+    assert '"session.renamed"' in source
+    assert "def _apply_renamed_session" in source
+    assert 'cached["title"] = title' in source
+    assert "self.sessionsChanged.emit" in source
