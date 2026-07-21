@@ -88,6 +88,13 @@ class ConversationView(QtWidgets.QWidget):
         # maximum() is stale here; scroll after it via a zero-delay timer.
         QtCore.QTimer.singleShot(0, lambda: bar.setValue(bar.maximum()))
 
+    def clear_items(self) -> None:
+        """Drop every card so a different Session's history doesn't mix in."""
+        for card in self._cards:
+            self.flow.removeWidget(card)
+            card.deleteLater()
+        self._cards.clear()
+
     def set_composer_state(self, state: str) -> None:
         """state: idle | running | stopping | stopping-forceable."""
         self.send_button.setEnabled(state == "idle")

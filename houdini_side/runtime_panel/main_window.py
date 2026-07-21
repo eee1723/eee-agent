@@ -202,6 +202,14 @@ class RuntimePanel(QtWidgets.QWidget):
         self._connection = state
         if state == "online":
             self._selection_worker.refresh()
+        elif state in {"offline", "unavailable", "error"}:
+            # A dropped connection must not wedge the composer: client._send
+            # silently drops commands while offline, so an optimistic "running"
+            # state could leave Send/Input disabled with no running run. Return
+            # to idle unless a Run is actually still executing server-side —
+            # the next snapshot will re-assert the correct state.
+            if self._active_run_id is None:
+                self.conversation.set_composer_state("idle")
         self._refresh_context_bar()
 
     def _on_sessions(self, sessions, selected_id: str) -> None:
@@ -210,13 +218,14 @@ class RuntimePanel(QtWidgets.QWidget):
     def _on_session(self, session_id: str, title: str, cursor: int) -> None:
         if session_id and session_id != self._current_session_id:
             if self._current_session_id:
-                # A different Session's artifacts/visions must never mix
-                # into the inspector; reset and say so in the flow.
+                # A different Session's history must never mix into this view:
+                # reset the conversation flow and inspector caches together.
                 self._artifacts = ()
                 self._visions = ()
                 self._shown_output_run_id = None
                 self.inspector.render_artifacts(())
                 self.inspector.render_visions(())
+                self.conversation.clear_items()
                 self.conversation.append_item(view_models.notice_card(
                     f"Switched to session {title or session_id}.",
                     tone="normal"))
@@ -315,6 +324,16 @@ class RuntimePanel(QtWidgets.QWidget):
         self.inspector.render_visions(self._visions)
 
     def _on_command_succeeded(self, purpose: str, result) -> None:
+        # An approval decision (approve/reject) is acknowledged with a card so
+        # the user sees the outcome in the flow, not just a vanishing drawer.
+        if purpose == "changeset.approve":
+            self.conversation.append_item(
+                view_models.approval_result_card(True))
+            return
+        if purpose == "changeset.reject":
+            self.conversation.append_item(
+                view_models.approval_result_card(False))
+            return
         if not purpose.startswith("workspace.") or type(result) is not dict:
             return
         workspace = result.get("workspace")
