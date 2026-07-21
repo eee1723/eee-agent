@@ -235,7 +235,7 @@ class RuntimePanel(QtWidgets.QWidget):
             self._shown_output_run_id = None
             self._run_state = "idle"
             self.conversation.set_composer_state("idle")
-            self.inspector.set_run_snapshot(None)
+            self.inspector.set_run_snapshot(None, ())
             self._refresh_context_bar()
             return
         active = snapshot.get("active_run")
@@ -259,7 +259,8 @@ class RuntimePanel(QtWidgets.QWidget):
         else:
             self._run_state = "idle"
         self.inspector.set_run_snapshot(
-            shown if type(shown) is dict else None)
+            shown if type(shown) is dict else None,
+            snapshot.get("activity") if hasattr(snapshot, "get") else ())
         self._maybe_render_output(snapshot, shown)
         self._refresh_context_bar()
 

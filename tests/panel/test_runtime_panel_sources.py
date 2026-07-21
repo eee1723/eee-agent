@@ -110,7 +110,7 @@ def test_inspector_contract() -> None:
     for tab in ('"RUN"', '"WORKSPACE"', '"ARTIFACTS"'):
         assert tab in source
     assert '"VALIDATION"' not in source  # no data channel in the Runtime protocol
-    assert "def set_run_snapshot(self, snapshot)" in source
+    assert "def set_run_snapshot(self, snapshot, activity" in source
     assert "def set_workspace_facts(self, facts)" in source
     assert "def render_artifacts(self, summaries)" in source
     assert "def render_visions(self, summaries)" in source

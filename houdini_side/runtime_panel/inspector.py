@@ -58,7 +58,7 @@ class InspectorPane(QtWidgets.QWidget):
     def _dump(view: QtWidgets.QPlainTextEdit, rows: list[str]) -> None:
         view.setPlainText("\n".join(rows[:_MAX_ROWS]) or "No data.")
 
-    def set_run_snapshot(self, snapshot) -> None:
+    def set_run_snapshot(self, snapshot, activity=()) -> None:
         if not snapshot:
             self._dump(self.run_view, [])
             return
@@ -71,6 +71,16 @@ class InspectorPane(QtWidgets.QWidget):
             f"started: {snapshot.get('started_at', '-')}",
             f"finished: {snapshot.get('finished_at', '-')}",
         ]
+        # Mirror legacy run_activity: show the most recent tool step. Activity
+        # items are {type, name, detail} dicts from RuntimePanelState.
+        latest = activity[-1] if activity else None
+        if type(latest) is dict:
+            name = latest.get("name") or "tool"
+            detail = latest.get("detail") or ""
+            suffix = f" — {detail[:160]}" if detail else ""
+            rows.append(f"activity: {name}{suffix}")
+        else:
+            rows.append("activity: (none)")
         self._dump(self.run_view, rows)
 
     def set_workspace_facts(self, facts) -> None:
