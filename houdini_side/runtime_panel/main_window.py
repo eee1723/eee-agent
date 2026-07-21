@@ -269,7 +269,11 @@ class RuntimePanel(QtWidgets.QWidget):
             self._run_state = "idle"
         self.inspector.set_run_snapshot(
             shown if type(shown) is dict else None,
-            snapshot.get("activity") if hasattr(snapshot, "get") else ())
+            snapshot.get("activity") if hasattr(snapshot, "get") else (),
+            apply_outcomes=(
+                snapshot.get("apply_outcomes") if hasattr(snapshot, "get") else ()
+            ),
+        )
         self._maybe_render_output(snapshot, shown)
         self._refresh_context_bar()
 

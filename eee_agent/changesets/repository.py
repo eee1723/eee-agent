@@ -2656,7 +2656,7 @@ def _receipt_event_payload(
     receipt: ChangeReceipt,
     state: ChangeSetState,
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "change_id": changeset.change_id,
         "changeset_digest": changeset.digest,
         "state": state.value,
@@ -2668,6 +2668,15 @@ def _receipt_event_payload(
         "applied_op_ids": list(receipt.applied_op_ids),
         "scene_may_have_changed": receipt.scene_may_have_changed,
     }
+    # B-2: surface the structured apply cause so the LLM and UI can branch on
+    # error_code instead of guessing from applied_op_ids alone. Omitted when
+    # the receipt has no cause (APPLIED, or a RolledBack that classified
+    # cleanly without a captured exception).
+    if receipt.error_code is not None:
+        payload["error_code"] = receipt.error_code
+    if receipt.error_message is not None:
+        payload["error_message"] = receipt.error_message
+    return payload
 
 
 def _workspace_event_payload(

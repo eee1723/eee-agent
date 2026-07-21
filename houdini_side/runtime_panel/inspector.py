@@ -60,7 +60,7 @@ class InspectorPane(QtWidgets.QWidget):
     def _dump(view: QtWidgets.QPlainTextEdit, rows: list[str]) -> None:
         view.setPlainText("\n".join(rows[:_MAX_ROWS]) or "No data.")
 
-    def set_run_snapshot(self, snapshot, activity=()) -> None:
+    def set_run_snapshot(self, snapshot, activity=(), *, apply_outcomes=()) -> None:
         if not snapshot:
             self._dump(self.run_view, [])
             return
@@ -83,6 +83,21 @@ class InspectorPane(QtWidgets.QWidget):
             rows.append(f"activity: {name}{suffix}")
         else:
             rows.append("activity: (none)")
+        # B-2: surface the most recent apply outcome so the user can see why
+        # an approved proposal did not reach the scene. The structured
+        # Run/Workspace/Artifacts redesign (stage A) replaces this text row
+        # with a dedicated error card.
+        latest_outcome = apply_outcomes[-1] if apply_outcomes else None
+        if type(latest_outcome) is dict:
+            status = latest_outcome.get("receipt_status") or "?"
+            code = latest_outcome.get("error_code") or ""
+            message = latest_outcome.get("error_message") or ""
+            line = f"apply: {status}"
+            if code:
+                line += f"  [{code}]"
+            if message:
+                line += f" — {message[:200]}"
+            rows.append(line)
         self._dump(self.run_view, rows)
 
     def set_workspace_facts(self, facts) -> None:

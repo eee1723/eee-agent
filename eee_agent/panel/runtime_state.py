@@ -334,6 +334,11 @@ class RuntimePanelState:
         # active run's thinking while the panel is connected.
         self._thinking: dict[str, str] = {}
         self._activity: list[dict[str, str]] = []
+        # B-2: outcomes of changeset apply events observed on this session.
+        # Keyed by change_id so the UI can show "this proposal you approved
+        # failed with code X" without rereading the event log. Cleared on
+        # load_snapshot (snapshots do not carry apply outcomes today).
+        self._apply_outcomes: dict[str, dict[str, object]] = {}
 
     def load_snapshot(self, payload: object) -> None:
         snap = parse_session_snapshot(payload)
@@ -357,6 +362,9 @@ class RuntimePanelState:
         # stream on any run, so there is nothing to carry over.
         self._thinking = {}
         self._activity = []
+        # B-2: snapshot does not carry apply outcomes today; clear any stale
+        # entries from a previous session so they cannot leak into this view.
+        self._apply_outcomes = {}
 
     def apply_event(self, message: Mapping[str, object]) -> bool:
         if message.get("kind") != "event":
@@ -441,6 +449,17 @@ class RuntimePanelState:
                 if type(error) is not dict:
                     raise PanelClientError("Runtime failure event is invalid.")
                 run["failure_json"] = dict(error)
+            elif event_type in (
+                "changeset.applied",
+                "changeset.rolled_back",
+                "recovery.critical",
+            ):
+                # B-2: capture the apply outcome so the inspector and any
+                # LLM-facing context can show why an approved proposal did not
+                # reach the scene. The event payload (from
+                # _receipt_event_payload) carries change_id, receipt_status,
+                # applied_op_ids, and optional error_code/error_message.
+                self._record_apply_outcome(payload)
             elif event_type in ("tool.started", "tool.completed"):
                 name = payload.get("name")
                 if type(name) is not str:
@@ -456,6 +475,37 @@ class RuntimePanelState:
                 self._activity = self._activity[-_MAX_ACTIVITY:]
         self._last_seq = seq
         return True
+
+    def _record_apply_outcome(self, payload: Mapping[str, object]) -> None:
+        """B-2: stash the latest receipt outcome keyed by change_id.
+
+        Defensive: ignores malformed payloads instead of raising, because a
+        bad apply-outcome event must not wedge the live event stream. The
+        inspector and any LLM context layer read from this dict by change_id.
+        """
+        if type(payload) is not dict:
+            return
+        change_id = payload.get("change_id")
+        if type(change_id) is not str or not change_id:
+            return
+        outcome: dict[str, object] = {
+            "change_id": change_id,
+            "receipt_status": payload.get("receipt_status"),
+            "applied_op_ids": list(payload.get("applied_op_ids") or []),
+            "scene_may_have_changed": payload.get("scene_may_have_changed"),
+        }
+        if payload.get("error_code") is not None:
+            outcome["error_code"] = payload.get("error_code")
+        if payload.get("error_message") is not None:
+            outcome["error_message"] = payload.get("error_message")
+        # Cap the in-memory outcome log so a runaway session cannot grow it
+        # without bound. Most recent 32 outcomes per session is plenty for UI
+        # display and any next-run LLM context injection.
+        self._apply_outcomes[change_id] = outcome
+        if len(self._apply_outcomes) > 32:
+            # Drop the oldest insertion-order entry (Python dict preserves it).
+            oldest = next(iter(self._apply_outcomes))
+            self._apply_outcomes.pop(oldest, None)
 
     def _trim_runs(self) -> None:
         while len(self._run_order) > _MAX_RUNS:
@@ -489,6 +539,10 @@ class RuntimePanelState:
                 "output": output,
                 "thinking": thinking,
                 "activity": tuple(dict(item) for item in self._activity),
+                # B-2: apply outcomes keyed by change_id. Inspector and any
+                # next-run LLM context layer can read this to see why an
+                # approved proposal did not reach the scene.
+                "apply_outcomes": tuple(dict(v) for v in self._apply_outcomes.values()),
             }
         )
 

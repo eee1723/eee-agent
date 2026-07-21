@@ -718,3 +718,133 @@ def test_lifecycle_merge_does_not_touch_other_artifacts() -> None:
     states = {item.get("artifact_id"): item["state"] for item in items}
     assert states[ART] == "failed"
     assert states["art_" + "9" * 32] == "available"
+
+
+# --------------------------------------------------------------------------
+# B-2: changeset.applied / changeset.rolled_back events carry apply outcomes
+# --------------------------------------------------------------------------
+
+
+def test_b2_changeset_rolled_back_event_records_error_outcome() -> None:
+    """The reported symptom from ses_65fefe0a5d: a RolledBack with
+    applied_op_ids=[] reached the LLM with no cause, so it guessed
+    '似乎仅部分应用'. B-2 captures the receipt's error fields into the
+    panel state so the inspector (and any LLM context layer) can read them.
+    """
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=10))
+    assert state.apply_event(
+        _event(
+            11,
+            "changeset.rolled_back",
+            {
+                "change_id": CHG,
+                "receipt_status": "RolledBack",
+                "applied_op_ids": [],
+                "scene_may_have_changed": False,
+                "error_code": "houdini.operation_failed",
+                "error_message": "Cannot create node 'copytopoints::2.0'",
+            },
+        )
+    )
+    snap = state.snapshot()
+    outcomes = snap["apply_outcomes"]
+    assert len(outcomes) == 1
+    outcome = outcomes[0]
+    assert outcome["change_id"] == CHG
+    assert outcome["receipt_status"] == "RolledBack"
+    assert outcome["error_code"] == "houdini.operation_failed"
+    assert outcome["error_message"] == "Cannot create node 'copytopoints::2.0'"
+
+
+def test_b2_changeset_applied_event_has_no_error_fields() -> None:
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=10))
+    assert state.apply_event(
+        _event(
+            11,
+            "changeset.applied",
+            {
+                "change_id": CHG,
+                "receipt_status": "Applied",
+                "applied_op_ids": ["op_a", "op_b"],
+                "scene_may_have_changed": False,
+            },
+        )
+    )
+    outcome = state.snapshot()["apply_outcomes"][0]
+    assert outcome["receipt_status"] == "Applied"
+    assert outcome["applied_op_ids"] == ["op_a", "op_b"]
+    assert "error_code" not in outcome
+    assert "error_message" not in outcome
+
+
+def test_b2_load_snapshot_clears_apply_outcomes() -> None:
+    """A snapshot from the server does not carry apply outcomes today; a
+    fresh snapshot must clear stale outcomes from the previous session so
+    they cannot leak into the new view."""
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=10))
+    state.apply_event(
+        _event(
+            11,
+            "changeset.rolled_back",
+            {
+                "change_id": CHG,
+                "receipt_status": "RolledBack",
+                "applied_op_ids": [],
+                "scene_may_have_changed": False,
+                "error_code": "houdini.operation_failed",
+                "error_message": "boom",
+            },
+        )
+    )
+    assert len(state.snapshot()["apply_outcomes"]) == 1
+    state.load_snapshot(_snapshot(active=_run(), seq=20))
+    assert state.snapshot()["apply_outcomes"] == ()
+
+
+def test_b2_apply_outcome_keyed_by_change_id_overwrites_on_replay() -> None:
+    """Replaying the same change_id (e.g. after a reconnect) overwrites the
+    previous entry instead of accumulating duplicates."""
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=10))
+    payload = {
+        "change_id": CHG,
+        "receipt_status": "RolledBack",
+        "applied_op_ids": [],
+        "scene_may_have_changed": False,
+        "error_code": "houdini.operation_failed",
+        "error_message": "first",
+    }
+    state.apply_event(_event(11, "changeset.rolled_back", payload))
+    payload["error_message"] = "second"
+    state.apply_event(_event(12, "changeset.rolled_back", payload))
+    outcomes = state.snapshot()["apply_outcomes"]
+    assert len(outcomes) == 1
+    assert outcomes[0]["error_message"] == "second"
+
+
+def test_b2_recovery_critical_event_also_recorded() -> None:
+    """Partial/CriticalRecovery outcomes use the recovery.critical event type
+    but should still be captured so the inspector can flag them."""
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=10))
+    assert state.apply_event(
+        _event(
+            11,
+            "recovery.critical",
+            {
+                "change_id": CHG,
+                "receipt_status": "CriticalRecovery",
+                "applied_op_ids": ["op_a"],
+                "scene_may_have_changed": True,
+                "error_code": "apply.unexpected_error",
+                "error_message": "rollback crashed; scene state uncertain",
+            },
+        )
+    )
+    outcome = state.snapshot()["apply_outcomes"][0]
+    assert outcome["receipt_status"] == "CriticalRecovery"
+    assert outcome["scene_may_have_changed"] is True
+    assert outcome["error_code"] == "apply.unexpected_error"
