@@ -66,4 +66,3 @@ cover every created identity, parameter assignment, and wire.
 - rollback/partial/recovery/stale/Bridge-unavailable paths create no manifest;
 - fresh-scene Houdini 21.0.440 hython smoke proves owned metadata, graph, cook,
   receipt, manifest, and zero leftover nodes after forced rollback.
-

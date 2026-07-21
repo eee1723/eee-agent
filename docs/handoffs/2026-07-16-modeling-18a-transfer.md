@@ -98,4 +98,3 @@ Task 18-B may add one structured, model-facing proposal capability. It must:
 Do not start staging, approval-to-Apply orchestration, Houdini catalog
 introspection, Wrangle/Python source, validators, capture, vision, or Task 19
 as a side effect of this handoff.
-

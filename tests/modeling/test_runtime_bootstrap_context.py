@@ -46,4 +46,3 @@ def test_runtime_builds_bootstrap_context_when_session_has_no_workspace(
             assert proposal_context.scene_binding == binding
 
     asyncio.run(scenario())
-

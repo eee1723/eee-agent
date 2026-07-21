@@ -80,4 +80,3 @@ object, or filesystem content. The adapter returns only a bounded
 
 No live Runtime/Houdini test is claimed until the later graph-injection slice
 has a production catalog and active Workspace path.
-

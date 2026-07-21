@@ -26,4 +26,3 @@
 
 Hython can cover geometry/camera/capture inputs. Final viewport appearance and
 viewer interaction remain real Houdini GUI acceptance.
-

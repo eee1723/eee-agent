@@ -71,4 +71,3 @@ one-argument runner factories and read-only defaults.
   confirm one AwaitingApproval ChangeSet summary, approve/reject exact digest,
   verify no Apply occurs before the next explicit trusted integration, and
   confirm zero scene mutation before approval.
-

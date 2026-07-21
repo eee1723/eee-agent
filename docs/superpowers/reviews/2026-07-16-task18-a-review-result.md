@@ -51,4 +51,3 @@ Task 18-B is not started. It is the next bounded slice and requires its own
 review before adding a model-facing proposal tool. Houdini catalog verification
 and real pending-approval/Apply testing begin only after that integration
 exists.
-

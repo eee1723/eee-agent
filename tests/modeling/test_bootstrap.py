@@ -78,4 +78,3 @@ def test_manifest_derivation_rejects_non_bootstrap_changeset() -> None:
             _receipt(),
         )
     assert exc.value.code == "modeling.bootstrap_changeset_invalid"
-

@@ -993,5 +993,3 @@ class RuntimeObserverClient(QtCore.QObject):
                 self.sessionChanged.emit(
                     session_id, self._current_session_title, seq
                 )
-
-

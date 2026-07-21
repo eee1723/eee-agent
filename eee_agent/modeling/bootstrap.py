@@ -146,4 +146,3 @@ __all__ = [
     "BootstrapFinalizeError",
     "derive_bootstrap_manifest",
 ]
-
