@@ -84,7 +84,9 @@ class ConversationView(QtWidgets.QWidget):
             self.flow.removeWidget(old)
             old.deleteLater()
         bar = self.scroll.verticalScrollBar()
-        bar.setValue(bar.maximum())
+        # Layout activation is deferred to the next event-loop pass, so
+        # maximum() is stale here; scroll after it via a zero-delay timer.
+        QtCore.QTimer.singleShot(0, lambda: bar.setValue(bar.maximum()))
 
     def set_composer_state(self, state: str) -> None:
         """state: idle | running | stopping (mirrors Run state machine)."""
