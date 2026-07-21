@@ -452,3 +452,67 @@ def test_proposal_module_has_no_houdini_runtime_or_dynamic_execution_imports() -
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
     assert calls.isdisjoint({"eval", "exec", "open", "__import__"})
+
+
+def test_tool_docstring_minimal_skeleton_parses() -> None:
+    """The example embedded in the propose_modeling docstring stays valid.
+
+    The docstring IS the tool description sent to the model; its minimal
+    skeleton must parse through the same strict from_dict validators, with
+    the Runtime-injected spec keys filled exactly as the coordinator does.
+    """
+    brief_data = {
+        "schema_version": 1,
+        "brief_key": "table",
+        "title": "Parametric table",
+        "asset_family": "furniture",
+        "goal": "Simple table with a box top",
+        "units": "Centimeters",
+        "up_axis": "Y",
+        "front_axis": "NegativeZ",
+        "constraints": [],
+    }
+    spec_data = {
+        "schema_version": 1,
+        "spec_key": "table_v1",
+        "components": [
+            {
+                "component_id": "top",
+                "role": "primary",
+                "depends_on": [],
+                "nodes": [
+                    {
+                        "node_key": "top_box",
+                        "node_type": "box",
+                        "node_name": "tabletop",
+                        "parent_node": None,
+                        "parameters": [
+                            {"parm_name": "sizex", "value": 120.0},
+                            {"parm_name": "sizey", "value": 4.0},
+                            {"parm_name": "sizez", "value": 70.0},
+                        ],
+                        "inputs": [],
+                    }
+                ],
+            }
+        ],
+    }
+    brief = ModelingBrief.from_dict(brief_data)
+    trusted_spec = dict(spec_data)
+    trusted_spec["brief_digest"] = brief.digest
+    trusted_spec["quality_profile_id"] = "strict_sop_v1"
+    trusted_spec["workspace_root_node_id"] = "n_workspace"
+    spec = ProceduralSpec.from_dict(trusted_spec)
+    assert spec.components[0].nodes[0].node_type == "box"
+    # The catalog node types named in the docstring exist in the production
+    # minimal catalog.
+    from eee_agent.modeling.catalog import houdini_21_minimal_catalog
+
+    production_types = {
+        entry.node_type for entry in houdini_21_minimal_catalog().entries
+    }
+    assert {
+        "box", "grid", "line", "normal", "fuse2", "polyextrude2", "subdivide",
+        "resample", "sweep2", "xform", "null", "merge", "copytopoints2",
+        "boolean2", "geo",
+    } <= production_types

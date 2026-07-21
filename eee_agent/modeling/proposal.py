@@ -291,10 +291,68 @@ async def propose_modeling(
     """Propose a bounded procedural model for explicit user approval.
 
     This tool creates no scene effect. It compiles strict modeling intent and
-    returns only a ChangeSet digest/risk summary; the Runtime must provide the
-    trusted context. In ``spec``, Runtime supplies the brief digest, quality
-    profile ID, and Workspace root binding; the model should supply the strict
-    component/node/parameter/input graph rather than inventing scene IDs.
+    returns only a ChangeSet digest/risk summary. Both arguments are exact-key
+    JSON objects: extra or missing keys are rejected
+    (modeling.proposal_input_invalid), so follow these schemas EXACTLY.
+
+    brief — exactly these 9 keys:
+      schema_version: 1
+      brief_key: identifier ([A-Za-z0-9_]+)
+      title: non-empty text (<=256 chars)
+      asset_family: identifier (e.g. "furniture")
+      goal: non-empty text stating the modeling goal
+      units: "Millimeters" | "Centimeters" | "Meters"
+      up_axis: "X" | "Y" | "Z"
+      front_axis: "PositiveX" | "NegativeX" | "PositiveY" | "NegativeY" |
+        "PositiveZ" | "NegativeZ"; must not parallel up_axis (Y-up scenes
+        usually use "NegativeZ")
+      constraints: list (may be empty) of
+        {"code": lowercase dotted code (e.g. "size.max"), "statement": text};
+        codes must be unique
+
+    spec — exactly these 6 keys:
+      schema_version: 1
+      spec_key: identifier
+      brief_digest, quality_profile_id, workspace_root_node_id: INJECTED by
+        the Runtime — omit them; any value you send is overwritten. Never
+        invent scene IDs, paths, or digests.
+      components: non-empty list of:
+        component_id: identifier (unique)
+        role: identifier (e.g. "primary", "support")
+        depends_on: list of other component_ids ([] when none); every
+          cross-component parent/input reference must be declared here
+        nodes: non-empty list of:
+          node_key: identifier (unique within the component)
+          node_type: catalog node type ONLY — one of: box, grid, line,
+            normal, fuse2, polyextrude2, subdivide, resample, sweep2, xform,
+            null, merge, copytopoints2, boolean2, geo
+          node_name: identifier (unique across the whole spec; becomes the
+            Houdini node name)
+          parent_node: null (created under the workspace root) or a qualified
+            "component_id.node_key" of a geo node (only geo may parent)
+          parameters: list of {"parm_name": catalog parameter name for that
+            node_type, "value": number|integer|boolean|string or a
+            homogeneous list of <=16 numbers}; literal values only — no
+            expressions, no file paths
+          inputs: list of {"input_index": int >= 0, "source_node":
+            "component_id.node_key", "source_output_index": int >= 0}
+
+    Qualified node references always use "component_id.node_key" and must
+    point at nodes defined in this spec. Use only the catalog node types and
+    parameter names above/known (unknown types or parms are rejected); check
+    search_houdini_knowledge when unsure. Keep the graph small.
+
+    Minimal valid skeleton:
+      brief = {"schema_version": 1, "brief_key": "table", "title":
+        "Parametric table", "asset_family": "furniture", "goal": "Simple
+        table with a box top", "units": "Centimeters", "up_axis": "Y",
+        "front_axis": "NegativeZ", "constraints": []}
+      spec = {"schema_version": 1, "spec_key": "table_v1", "components":
+        [{"component_id": "top", "role": "primary", "depends_on": [],
+        "nodes": [{"node_key": "top_box", "node_type": "box", "node_name":
+        "tabletop", "parent_node": null, "parameters": [{"parm_name":
+        "sizex", "value": 120.0}, {"parm_name": "sizey", "value": 4.0},
+        {"parm_name": "sizez", "value": 70.0}], "inputs": []}]}]}
     """
     context = getattr(runtime, "context", None)
     if type(context) is not RuntimeToolContext:
