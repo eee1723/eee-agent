@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-eval = ["pytest==8.4.1"]
+eval = ["pytest>=9.0.3,<10"]
 
 [build-system]
 requires = ["setuptools>=68"]
