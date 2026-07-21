@@ -915,11 +915,26 @@ def test_d2_snapshot_run_carries_todos_field() -> None:
     assert runs[0]["todos"] == [{"content": "from server", "status": "completed"}]
 
 
-def test_d2_snapshot_run_rejects_missing_todos_field() -> None:
-    """A snapshot without the todos field is invalid (server is required to
-    emit it post-D-2)."""
+def test_d2_snapshot_run_accepts_missing_todos_field_for_backward_compat() -> None:
+    """A snapshot from a pre-D-2 Runtime does not include the todos field.
+    The panel must accept it (treating todos as empty) instead of going
+    offline — that was the original 'Runtime offline after one message'
+    regression when D-2 first shipped."""
     state = RuntimePanelState()
-    bad_run = _run()
-    del bad_run["todos"]
+    legacy_run = _run()
+    del legacy_run["todos"]
+    state.load_snapshot(_snapshot(active=None, seq=5) | {"runs": [legacy_run]})
+    runs = state.snapshot()["runs"]
+    assert len(runs) == 1
+    # Backfilled to [] so downstream consumers (inspector, history replay)
+    # see a stable shape regardless of which Runtime version emitted it.
+    assert runs[0]["todos"] == []
+
+
+def test_d2_snapshot_run_rejects_extra_unknown_field() -> None:
+    """Backward-compat for missing 'todos' is allowed; adding brand-new
+    unknown fields still fails loudly so a server bug surfaces immediately."""
+    state = RuntimePanelState()
+    bad_run = {**_run(), "unknown_future_field": "x"}
     with pytest.raises(PanelClientError):
         state.load_snapshot(_snapshot(active=None, seq=5) | {"runs": [bad_run]})

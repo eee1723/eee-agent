@@ -252,7 +252,17 @@ def _matching(value: object, pattern: re.Pattern[str]) -> str:
 
 
 def _validate_run(value: object) -> dict[str, object]:
-    if type(value) is not dict or set(value) != _RUN_FIELDS:
+    if type(value) is not dict:
+        raise PanelClientError("Runtime Run snapshot is invalid.")
+    # D-2: 'todos' is a new field added in schema v6 / RunRecord change. Older
+    # Runtime processes still emit snapshots without it; treat a missing
+    # 'todos' as an empty list instead of rejecting the whole snapshot, which
+    # would otherwise wedge the panel offline against any pre-D-2 Runtime.
+    keys = set(value)
+    if "todos" not in keys:
+        keys = keys | {"todos"}
+        value = {**value, "todos": []}
+    if keys != _RUN_FIELDS:
         raise PanelClientError("Runtime Run snapshot is invalid.")
     run = dict(value)
     _matching(run["run_id"], _RUN_ID_RE)
