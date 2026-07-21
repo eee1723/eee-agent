@@ -163,6 +163,11 @@ class RuntimePanel(QtWidgets.QWidget):
             return
         self._launch_result.append(result)
         self._launch_done.set()
+        if self._closing.is_set() and result.process is not None:
+            # closeEvent may have completed between the first check and the
+            # append; reap here too. terminate() is idempotent on exited
+            # processes, so a double-reap against closeEvent is harmless.
+            backend_launcher.terminate(result.process)
 
     def _poll_launch(self) -> None:
         if not self._launch_done.is_set():
