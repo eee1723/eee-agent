@@ -29,6 +29,9 @@ _WIDE_MIN_WIDTH = 900
 _MEDIUM_MIN_WIDTH = 700
 _DRAWER_WIDTH = 320
 _DRAWER_MARGIN = 8
+# Default floating-window size (docked panes ignore it; Houdini owns those).
+_DEFAULT_WIDTH = 1440
+_DEFAULT_HEIGHT = 900
 _TERMINAL_RUN_STATES = frozenset({"Completed", "Cancelled", "Failed"})
 _STOPPING_RUN_STATES = frozenset({"StopRequested", "Stopping"})
 
@@ -89,8 +92,9 @@ class RuntimePanel(QtWidgets.QWidget):
         self.splitter.setStretchFactor(0, 0)
         self.splitter.setStretchFactor(1, 1)
         self.splitter.setStretchFactor(2, 0)
-        self.splitter.setSizes([220, 600, 300])
+        self.splitter.setSizes([260, 780, 360])
         layout.addWidget(self.splitter, 1)
+        self.resize(_DEFAULT_WIDTH, _DEFAULT_HEIGHT)
 
         # Right-anchored overlay inside the conversation pane; positioned in
         # _position_drawer, which runs on every conversation resize.
