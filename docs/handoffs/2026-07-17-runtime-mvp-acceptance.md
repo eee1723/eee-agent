@@ -13,7 +13,7 @@ system is reported as `not run`; it is never folded into an offline pass.
 | --- | --- | --- |
 | `offline-ready` | **ready** | `tests/runtime/test_runtime_mvp_e2e.py` (8 passed); existing Runtime, ChangeSet, Artifact, Knowledge and restart suites remain the source of detailed contract coverage. |
 | `real-Houdini-ready` | **ready (runner-gated)** | `tests/runtime/runtime_mvp_provider_e2e.py` requires an HFS `hython` executable and a disposable `EEE_RUNTIME_HOME`; no HFS means `not_run`. |
-| `real-provider-tested` | **not run** | Requires explicit opt-in, provider credentials and `EEE_RUNTIME_MVP_PROVIDER_COMMAND`; no credentials or command means `not_run`. No provider secret is printed or persisted. |
+| `real-provider-tested` | **passed** (2026-07-20, second machine) | `tests/runtime/provider_journey.py` adapter executed the real journey on Houdini 21.0.440 with DeepSeek credentials: proposal digest, approval, receipt `applied`, validation `passed`, artifact `available`, replay and scene cleanup evidence validated by the harness. Two production gaps found and fixed first: `read_only_provider` was never wired in `__main__.py` (new `BridgeReadOnlyProvider`), and the `propose_modeling` tool description never exposed the strict Brief/Spec schema (now embedded in the docstring). |
 | `GUI-accepted` | **pending** | Requires the separate Houdini GUI/manual checklist in Task 9. |
 
 ## Deterministic coverage

@@ -44,6 +44,12 @@ eee_agent/
   harness.py           disable Deep Agents' implicit general-purpose/task (Foundation)
   runtime/             persistent authenticated Runtime and read-only tools
   core/                Foundation contracts: ids · errors · artifacts · events · versioning
+  changesets/          typed ChangeSet policy · services · repositories
+  modeling/            strict Brief/Spec contracts · catalog compiler · validation
+  houdini_bridge/      authenticated typed Secure Bridge providers (incl. read-only)
+  knowledge/           read-only Houdini knowledge cache (build · store · service)
+  vision/              advisory post-Apply evaluation contracts · router
+  panel/               Runtime panel state projection
   providers/           Foundation: contracts · registry · secrets · deepseek_v4 · anthropic
                        · openai · factory · events · normalize
   context_store.py     ContextSeek file-backed memory (EEE_CONTEXTSEEK)  [dep not in Foundation lock]
@@ -103,9 +109,9 @@ copy .env.example .env   # fill DEEPSEEK_API_KEY  (or switch EEE_LLM_PROVIDER)
    ```powershell
    uv run --extra eval python -m eee_agent.cli versions
    ```
-5. **Tracing** (optional): `EEE_TRACING=phoenix` → http://localhost:6006 — **not on
+3. **Tracing** (optional): `EEE_TRACING=phoenix` → http://localhost:6006 — **not on
    Foundation**; `openinference` is not in `uv.lock` (later milestone). See `CLAUDE.md`
-   gotcha #7.
+   gotcha #2.
 
 ## Runtime (production, loopback, read-only MVP)
 
@@ -150,8 +156,9 @@ uv run --extra eval python -m eee_agent.runtime serve --help   # options
   automatic replay. Apply remains an in-process trusted API, not a public raw
   WebSocket command or LLM tool.
 - **Offline tests** — the full Runtime suite (incl. a real-subprocess restart E2E)
-  runs with **no live LLM and no Houdini**. GLM-5.2 and Houdini read-only smokes
-  are **manual only** and never block offline acceptance.
+  runs with **no live LLM and no Houdini**. Real-provider and real-Houdini
+  smokes are **explicit opt-in acceptance runs** and never block offline
+  acceptance.
 - **CI quality gates** — `.github/workflows/runtime-ci.yml` runs on Windows with
   the checked-in lockfile: `uv sync --frozen --extra eval`, the full
   `uv run --frozen --extra eval pytest -q` gate, `uv lock --check`, compileall,
@@ -172,12 +179,12 @@ uv run --extra eval python -m eee_agent.runtime serve --help   # options
 |---|---|
 | Phase 0 — typed Secure Bridge API | ✅ verified (source read + hython introspection) |
 | Phase 1 — legacy Foundation bridge/tools/CLI | historical (removed from production Runtime) |
-| Phase C — port-based parametric components | ✅ done (`make_component` geo/anchors ports, `wire_anchor`, `assemble_output`, ranged `p_*` parms) |
+| Phase C — port-based parametric components | historical — the legacy `eee_agent.tools` implementation was removed; superseded by the strict modeling foundation below (the multi-output port gotcha survives in `CLAUDE.md` #3) |
 | Reliability layers | ✅ read-back trim · loop guard · tool-error trace · compact tool; recursion 999 |
 | Runtime UI | ✅ PySide6 panel (dark, tool cards / todos / metrics / send-stop) |
 | Observability | ✅ Phoenix one-click launcher + tool-error spans (runtime deps return in a later milestone) |
 | **Foundation milestone** | ✅ done — uv-locked deps, core contracts, provider registry (DeepSeek via official Anthropic endpoint), normalized events, explicit harness (no implicit `task`), `cli versions`. 369 tests pass. See `docs/handoffs/2026-07-13-foundation-migration.md` |
-| **Live Runtime acceptance on current machine** | pending — start Runtime Control with the authenticated Secure Bridge, then run the Runtime/typed-bridge smoke and approval-gate acceptance suite |
+| **Live Runtime acceptance on current machine** | real provider journey **passed 2026-07-20** (DeepSeek + Houdini 21.0.440, strict evidence harness); interactive GUI checklist and RC tag remain — see `docs/handoffs/2026-07-20-runtime-development-transfer.md` |
 | Runtime + typed Houdini ChangeSets | Complete through local Task 16-E acceptance on `feature/runtime`: trusted Workspace, ordered created references, transactional Apply, atomic receipts, and no-replay restart recovery. |
 | Docked Runtime panel | Task 17-A and Task 17-B are accepted. The complete Houdini 21.0.440 gate passed Chinese IME/default Session behavior, read-only Run, high-volume reopen, Runtime restart recovery, Stop to Cancelled, empty approvals/no Apply, Scene regression, and zero mutation. See `docs/superpowers/reviews/2026-07-16-task17-b-review-result.md` and `docs/handoffs/2026-07-16-runtime-17b-transfer.md` |
 | Strict modeling foundation | Task 18-A through 18-E, Cook/Geometry and Sensitivity validation, first 18-G catalog/Golden Case batches, and the first 18-H product-mode panel slice are implemented on `feature/runtime`: strict Brief/Spec contracts, catalog-gated compilation, trusted bootstrap persistence, approval-to-single-flight Apply, durable validation evidence, bounded repair tickets, verified assembly/surface/boolean replays, Golden Case semantic checks, and a MODEL/REVIEW user flow with Details diagnostics. Full offline gate is 2171 passed with 1 optional WSL skip; dedicated Houdini 21 hython Golden Case replay passed. Transactional sensitivity Bridge, Artifact evidence, richer asset batches, and final GUI acceptance remain next. See `docs/superpowers/plans/2026-07-17-task18-h-product-ui.md` and `docs/superpowers/plans/2026-07-17-task18-g-catalog-golden-cases.md` |
@@ -193,7 +200,7 @@ uv run --extra eval python -m eee_agent.runtime serve --help   # options
 - The agent venv contains only the locked Runtime dependencies; Houdini-side
   integration uses the authenticated typed Secure Bridge protocol.
 - Multi-output SOP subnets require internal `output` nodes with explicit
-  `outputidx` (a vanilla subnet has one effective output) — see `CLAUDE.md` gotcha #5.
+  `outputidx` (a vanilla subnet has one effective output) — see `CLAUDE.md` gotcha #3.
 - DeepSeek V4 routes through `ChatAnthropic` on `https://api.deepseek.com/anthropic`
   (Foundation). Exact model ids only: `deepseek-v4-pro` / `deepseek-v4-flash`
   (legacy `deepseek-chat` / `deepseek-reasoner` deprecated 2026/07/24 — rejected by

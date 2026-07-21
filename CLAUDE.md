@@ -11,8 +11,10 @@ The source of truth is
 `docs/handoffs/2026-07-20-runtime-development-transfer.md`. The active delivery
 line is `feature/runtime` (pushed to origin on 2026-07-20 for cross-machine
 development). Runtime MVP and advisory Vision are offline-complete and wired
-into the production post-Apply flow; the remaining gates are the real provider
-journey, the interactive Houdini GUI checklist, and the release-candidate tag.
+into the production post-Apply flow; the real provider journey passed on
+2026-07-20 (`tests/runtime/provider_journey.py` + harness, DeepSeek + Houdini
+21.0.440). The remaining gates are the interactive Houdini GUI checklist, the
+Vision real-provider journey, and the release-candidate tag.
 Offline tests and disposable Houdini 21.0.440 `hython` are the default
 verification path until
 the documented GUI gate is required.
@@ -42,7 +44,7 @@ authoritative documentation; never rely on memory for version/API details.
 
 - **Bridge**: Runtime scene queries use the authenticated loopback Secure Bridge
   and typed DTOs in `eee_agent.houdini_bridge` (auth, client, queue, contracts,
-  capture, changeset, workspace, and sensitivity providers). Calls are
+  capture, changeset, workspace, read-only, and sensitivity providers). Calls are
   main-thread serialized and return bounded plain data; raw HOM objects and RPC
   proxies never cross the agent boundary.
 - **Panel**: Houdini's PySide6 **Runtime Control** panel in
@@ -118,6 +120,11 @@ directories; do not restore or invoke them.
 `eee_agent/core` (IDs, errors, artifacts, events, versioning) ·
 `eee_agent/providers` (contracts, registry, secrets, adapters) ·
 `eee_agent/houdini_bridge` (authenticated typed bridge) ·
+`eee_agent/changesets` (typed ChangeSet policy, services, repositories) ·
+`eee_agent/modeling` (strict Brief/Spec contracts, catalog compiler, validation) ·
+`eee_agent/knowledge` (read-only Houdini knowledge cache build/store/service) ·
+`eee_agent/vision` (advisory post-Apply evaluation contracts/router) ·
+`eee_agent/panel` (Runtime panel state projection) ·
 `eee_agent/runtime` (paths, models, lock, database, migrations, sessions, runs,
 events, protocol, auth, checkpoints, agent runner, service, server) ·
 `eee_agent/model`, `eee_agent/app`, `eee_agent/cli` ·

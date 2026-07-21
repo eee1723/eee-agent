@@ -42,7 +42,7 @@ and execution plan first:
 | S6 | complete | Input/DTO hardening and Windows frozen/static/HFS CI workflow added. |
 | S7 | offline complete | Deterministic MVP acceptance plus strict provider evidence harness. |
 | S8 | offline complete | Vision wired into the production post-Apply flow; real provider journey is an S9 gate. |
-| S9 | incomplete | GUI/manual provider/release gates remain open. |
+| S9 | partial | Real provider journey passed 2026-07-20 (see below); interactive GUI checklist and RC tag remain open. |
 
 Key recent commits:
 
@@ -187,8 +187,21 @@ Do not close it without checking for unsaved work.
 
 Still required:
 
-- Real provider journey using approved credentials and the strict evidence
-  sidecar. Current status: `not run`.
+- ~~Real provider journey using approved credentials and the strict evidence
+  sidecar~~ Done 2026-07-20 (second machine, `Z:/EEE_Project/EEEProceduralModeling`,
+  Houdini 21.0.440 + DeepSeek): harness `tests/runtime/runtime_mvp_provider_e2e.py`
+  returned `{"status": "passed", "reason": "provider_journey_completed"}` with
+  the new adapter `tests/runtime/provider_journey.py` (+ hython worker
+  `provider_journey_houdini_worker.py`). The first real run exposed two
+  production gaps, both fixed and covered by offline tests: (1) production
+  never passed a `read_only_provider` to `RuntimeService.open()`, so all
+  read-only tools were always `bridge.unavailable` — new
+  `eee_agent/houdini_bridge/read_only_provider.py` (`BridgeReadOnlyProvider`)
+  wired in `__main__.py`; (2) the strict Brief/Spec schema was invisible to
+  the model (`propose_modeling` took bare `dict` args) — the tool docstring
+  now embeds the exact schema, validated by
+  `test_tool_docstring_minimal_skeleton_parses`. The Vision seam remains
+  `None` in production; the Vision real-provider journey is still open.
 - ~~Dedicated panel rendering for normalized Vision status/report~~ Done
   2026-07-20: `parse_vision_event()` validates the durable
   `vision.evaluation_completed` payload into a bounded summary and the
