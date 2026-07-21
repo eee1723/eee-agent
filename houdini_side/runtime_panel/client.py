@@ -478,6 +478,10 @@ class RuntimeObserverClient(QtCore.QObject):
         self._preferred_session_id = _load_preferred_session_id()
         self._current_session_id: str | None = None
         self._current_session_title = ""
+        # When the user sends a prompt with no active Session, we auto-create
+        # one (placeholder title) and stash the prompt here to fire run.start
+        # once the new Session activates after reconnect.
+        self._pending_run_input: str | None = None
         self._attempt = 0
         self._stopping = False
 
@@ -525,12 +529,15 @@ class RuntimeObserverClient(QtCore.QObject):
     def start_run(self, user_input: str) -> None:
         session_id = self._current_session_id
         if session_id is None:
-            self.commandFailed.emit(
-                "run.start",
-                "runtime.session_required",
-                "Create or select a Session before starting a Run.",
-                True,
-                False,
+            # No active Session: auto-create one with a placeholder title and
+            # hold the prompt until the new Session activates post-reconnect.
+            # The backend renames it to a meaningful title once the first run
+            # completes (see RuntimeService auto-title).
+            self._pending_run_input = user_input
+            self._send(
+                "session.create",
+                {"title": "New session"},
+                "session.create",
             )
             return
         self._send(
@@ -734,6 +741,10 @@ class RuntimeObserverClient(QtCore.QObject):
                 scene_changed = False
             if purpose in ("ping", "session.list", None):
                 self.connectionChanged.emit("error", text)
+            if purpose == "session.create":
+                # Auto-create failed: drop the stashed prompt so a later manual
+                # retry isn't silently swallowed when a Session activates.
+                self._pending_run_input = None
             self.commandFailed.emit(
                 purpose or "runtime.request",
                 code,
@@ -839,6 +850,17 @@ class RuntimeObserverClient(QtCore.QObject):
         self.sessionChanged.emit("", f"Loading {title}", 0)
         self._request_snapshot(purpose="session.bootstrap_snapshot")
         self.refresh_changesets()
+        # If the user sent a prompt that triggered auto-create, fire the run
+        # now that the new Session is active. The server queues run events
+        # until our subscribe catches up, so no prompt is lost.
+        if self._pending_run_input is not None:
+            prompt = self._pending_run_input
+            self._pending_run_input = None
+            self._send(
+                "run.start",
+                {"session_id": session_id, "user_input": prompt},
+                "run.start",
+            )
 
     def _request_snapshot(self, *, purpose: str = "session.snapshot") -> None:
         if self._current_session_id is None:

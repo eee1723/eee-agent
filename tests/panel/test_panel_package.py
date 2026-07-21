@@ -60,3 +60,17 @@ def test_client_keeps_ime_and_security_wiring() -> None:
     assert "QInputDialog.getText" not in source
     assert "textMessageReceived.connect(self._on_text_message)" in source
     assert "binaryMessageReceived.connect(self._on_binary_message)" in source
+
+
+def test_client_auto_creates_session_when_none_active() -> None:
+    # Sending a prompt with no active Session auto-creates one (placeholder
+    # title) and stashes the prompt to fire run.start once it activates.
+    source = (PKG / "client.py").read_text(encoding="utf-8")
+    assert "_pending_run_input" in source
+    assert '"New session"' in source
+    assert "self._pending_run_input = user_input" in source
+    # The stashed prompt fires when the new Session activates post-reconnect.
+    assert "self._pending_run_input is not None" in source
+    # A failed auto-create clears the stash so it isn't silently swallowed.
+    assert 'purpose == "session.create"' in source
+    assert "self._pending_run_input = None" in source
