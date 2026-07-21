@@ -176,10 +176,12 @@ class ConversationView(QtWidgets.QWidget):
 
         composer = QtWidgets.QHBoxLayout()
         self.input = RunRequestEdit()
-        self.input.setPlaceholderText("Describe what to build…")
         self.send_button = QtWidgets.QPushButton("Send")
         self.send_button.setAutoDefault(False)
         self.send_button.clicked.connect(self._send)
+        # Ctrl+Enter in the multi-line editor also sends (bare Enter just
+        # inserts a newline — IME candidate confirmation stays safe).
+        self.input.submitRequested.connect(self._send)
         self.stop_button = QtWidgets.QPushButton("Stop")
         self.stop_button.setAutoDefault(False)
         self.stop_button.setEnabled(False)

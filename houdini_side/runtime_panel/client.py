@@ -357,27 +357,65 @@ class SessionTitleDialog(QtWidgets.QDialog):
         return self.title_edit.text().strip()
 
 
-class RunRequestEdit(QtWidgets.QLineEdit):
-    """Single-line Run request editor resilient to Windows IME confirmation."""
+class RunRequestEdit(QtWidgets.QPlainTextEdit):
+    """Multi-line Run request editor resilient to Windows IME confirmation.
+
+    Enter inserts a newline (so IME candidate confirmation never accidentally
+    fires a Run); Ctrl+Enter is the explicit submit gesture. Exposes a
+    QLineEdit-compatible ``text()``/``clear()`` so the composer does not need
+    to know it is a plain-text widget.
+    """
+
+    submitRequested = QtCore.Signal()
+
+    _MAX_CHARS = 16_000
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMaxLength(16_000)
+        self.setObjectName("RunRequestEdit")
         self.setPlaceholderText(
-            "Ask the Runtime to inspect or reason about the current scene..."
+            "Ask the Runtime to inspect or reason about the current scene…"
+            "  (Ctrl+Enter to send)"
         )
-        _configure_ime(self, multiline=False)
+        self.setMaximumHeight(90)
+        self.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        _configure_ime(self, multiline=True)
 
     def keyPressEvent(self, event) -> None:
         if event.key() in (
             QtCore.Qt.Key.Key_Return,
             QtCore.Qt.Key.Key_Enter,
         ):
-            # Candidate confirmation must not bubble into Houdini or trigger
-            # another panel action. Runs start only from the Start run button.
-            event.accept()
-            return
+            modifiers = event.modifiers()
+            if modifiers & QtCore.Qt.KeyboardModifier.ControlModifier:
+                # Explicit submit gesture: Ctrl+Enter. The modifier makes IME
+                # candidate confirmation (a bare Enter) safe — it just inserts
+                # a newline via the default handler below.
+                event.accept()
+                self.submitRequested.emit()
+                return
+            # Bare Enter/Return inserts a newline (default QPlainTextEdit
+            # behavior); do NOT start a Run from it.
         super().keyPressEvent(event)
+
+    def keyReleaseEvent(self, event) -> None:
+        super().keyReleaseEvent(event)
+        # Enforce the length cap on release so paste/drop are bounded too.
+        text = self.toPlainText()
+        if len(text) > self._MAX_CHARS:
+            cursor = self.textCursor()
+            pos = cursor.position()
+            self.setPlainText(text[: self._MAX_CHARS])
+            cursor.setPosition(min(pos, self._MAX_CHARS))
+            self.setTextCursor(cursor)
+
+    # QLineEdit-compatible surface so the composer stays widget-agnostic.
+
+    def text(self) -> str:  # type: ignore[override]
+        return self.toPlainText()
+
+    def setText(self, value: str) -> None:  # noqa: N802 — QLineEdit compat
+        self.setPlainText(value)
 
 
 class SelectionQueryWorker(QtCore.QObject):

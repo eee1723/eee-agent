@@ -91,6 +91,10 @@ def test_conversation_contract() -> None:
     assert "MAX_MESSAGES" in source            # bounded flow enforced
     assert "_TONE_COLORS" in source            # tones come from theme tokens
     assert "returnPressed.connect" not in source  # send only from the button
+    # Multi-line composer: Ctrl+Enter sends via the editor's submitRequested
+    # signal (the modifier handling lives in RunRequestEdit / client.py).
+    assert "submitRequested" in source
+    assert "self.input.submitRequested.connect" in source
     # Streaming + kind-based rendering: cards branch on item.kind, and an
     # in-flight assistant reply updates in place instead of appending copies.
     assert 'item.kind == "user"' in source

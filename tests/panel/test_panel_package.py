@@ -62,6 +62,18 @@ def test_client_keeps_ime_and_security_wiring() -> None:
     assert "binaryMessageReceived.connect(self._on_binary_message)" in source
 
 
+def test_composer_is_multiline_with_ctrl_enter_submit() -> None:
+    source = (PKG / "client.py").read_text(encoding="utf-8")
+    # The composer is a QPlainTextEdit (multi-line) with IME multiline mode,
+    # and Ctrl+Enter is the explicit submit gesture (bare Enter inserts a
+    # newline so IME candidate confirmation never fires a Run).
+    assert "class RunRequestEdit(QtWidgets.QPlainTextEdit)" in source
+    assert "_configure_ime(self, multiline=True)" in source
+    assert "submitRequested = QtCore.Signal()" in source
+    assert "ControlModifier" in source
+    assert "returnPressed" not in source  # never wired on the composer
+
+
 def test_client_auto_creates_session_when_none_active() -> None:
     # Sending a prompt with no active Session auto-creates one (placeholder
     # title) and stashes the prompt to fire run.start once it activates.
