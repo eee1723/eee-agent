@@ -192,6 +192,19 @@ def _vision_provider() -> VisionProvider | None:
     return None
 
 
+def _title_model_provider():
+    """Production seam for Session auto-titling.
+
+    Returns the project model factory so a placeholder Session is renamed to a
+    short meaningful title after its first run completes. The call is
+    best-effort: if credentials are absent or the provider fails, the title
+    generation times out / errors and the placeholder stays.
+    """
+    from eee_agent.model import build_model
+
+    return build_model()
+
+
 async def async_main(argv: Sequence[str] | None = None) -> int:
     """Run the Runtime lifecycle until shutdown, then release every resource.
 
@@ -232,6 +245,7 @@ async def async_main(argv: Sequence[str] | None = None) -> int:
             modeling_catalog_provider=houdini_21_minimal_catalog,
             read_only_provider=read_only_provider,
             vision_provider=_vision_provider(),
+            title_model_provider=_title_model_provider,
         ) as service:
             server = RuntimeWebSocketServer(
                 service, identity, host=args.host, port=args.port
