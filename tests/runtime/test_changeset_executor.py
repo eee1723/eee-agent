@@ -1693,3 +1693,77 @@ def test_fix5_multi_prior_jit_failure_strict_reverse_rollback() -> None:
     assert receipt.rollback_results[0].kind == "parm.value_equals"  # set_existing (reversed)
     assert receipt.rollback_results[1].kind == "node.absent"         # create (reversed)
     assert len(receipt.rollback_results) == 2  # only 2 ops applied (create + set_existing)
+
+
+# --------------------------------------------------------------------------
+# B-1: apply failure cause must reach the ChangeReceipt
+# --------------------------------------------------------------------------
+
+
+def test_b1_write_error_records_error_code_and_op_index_on_receipt() -> None:
+    """The reported symptom from ses_65fefe0a5d: a RolledBack receipt with
+    applied_op_ids=[] and no error field, leaving the LLM to guess "似乎仅部分
+    应用". With B-1, the captured write exception reaches the receipt as a
+    bounded (error_code, error_message) pair, including the failed op index.
+    """
+    spy: list = []
+    scene = _standard_scene(spy)
+    # Force createNode to raise on the very first create.
+    scene["/obj/ws"].fail_create = True
+    adapter = _adapter(spy, scene)
+    create = CreateNode(
+        op_id="op_a", parent=_noderef("n_root", "/obj/ws", "subnet"),
+        node_id="n_a", node_type="geo", node_name="a",
+        workspace_id=WS, capability="modeling", role="member",
+    )
+    _cs, req = _complete(adapter, (create,))
+    receipt = ChangeSetExecutor(adapter).apply(req)
+    assert receipt.status.value == "RolledBack"
+    assert receipt.applied_op_ids == ()
+    # B-1 contract: failure cause is no longer dropped on the floor.
+    assert receipt.error_code is not None
+    assert receipt.error_code == "apply.unexpected_error"
+    assert receipt.error_message is not None
+    # The cause string and the failed op label both reach the message.
+    assert "createNode failed" in receipt.error_message
+    assert "failed at op #1" in receipt.error_message
+    assert "geo 'a'" in receipt.error_message
+
+
+def test_b1_successful_apply_leaves_error_fields_none() -> None:
+    """APPLIED receipts must not carry an apply cause."""
+    spy: list = []
+    scene = _standard_scene(spy)
+    adapter = _adapter(spy, scene)
+    create = CreateNode(
+        op_id="op_a", parent=_noderef("n_root", "/obj/ws", "subnet"),
+        node_id="n_a", node_type="geo", node_name="a",
+        workspace_id=WS, capability="modeling", role="member",
+    )
+    _cs, req = _complete(adapter, (create,))
+    receipt = ChangeSetExecutor(adapter).apply(req)
+    assert receipt.status.value == "Applied"
+    assert receipt.error_code is None
+    assert receipt.error_message is None
+
+
+def test_b1_classify_helper_maps_adapter_error_to_its_code() -> None:
+    """When the bridge raises HoudiniAdapterError, the receipt should carry
+    that exception's own dotted code, not the generic fallback."""
+    from houdini_side.secure_bridge import HoudiniAdapterError
+
+    executor = ChangeSetExecutor.__new__(ChangeSetExecutor)
+    exc = HoudiniAdapterError(
+        code="bridge.stale_scene", category="scene",
+        message_for_user="Scene epoch mismatch",
+    )
+    code, message = executor._exception_to_code(exc)
+    assert code == "bridge.stale_scene"
+    assert "Scene epoch mismatch" in message
+
+
+def test_b1_classify_helper_falls_back_for_generic_exception() -> None:
+    executor = ChangeSetExecutor.__new__(ChangeSetExecutor)
+    code, message = executor._exception_to_code(ValueError("bad parm name"))
+    assert code == "apply.unexpected_error"
+    assert "bad parm name" in message

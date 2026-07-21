@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -136,6 +137,12 @@ _INTERRUPTED_ERROR = AgentError(
     category=ErrorCategory.INTERNAL_INVARIANT,
     message_for_user="The previous Runtime process stopped before this run completed.",
 )
+
+# B-1: diagnostic logger for swallowed exception paths in this module. Keep
+# all ``except Exception`` returns (capability unavailability is still
+# modeled as None), but record the cause so silent apply/inspection failures
+# are traceable instead of disappearing.
+_log = logging.getLogger("eee_agent.runtime.service")
 
 
 class _UnavailableWorkspaceFactProvider:
@@ -1537,6 +1544,15 @@ class RuntimeService:
                 )
             )
         except Exception:
+            # Capability unavailability is modeled as None so the run still
+            # works in read-only mode and the modeling tool fails closed.
+            # Record the cause so an apply/inspection failure is traceable
+            # instead of a silent None that surfaces as a downstream surprise.
+            _log.exception(
+                "modeling context build failed (session=%s run=%s)",
+                session_id,
+                run_id,
+            )
             return None
 
     async def _build_runtime_context(

@@ -62,8 +62,9 @@ def test_no_hex_colors_outside_theme() -> None:
 
     for path in PKG.glob("*.py"):
         # theme.py owns all tokens; client.py still carries the legacy
-        # SessionTitleDialog palette (tracked for Pluto migration in the
-        # handoff doc), every other module must reference colors via theme.
+        # SessionTitleDialog palette (the graphite/cyan source the theme
+        # tokens now track), every other module must reference colors via
+        # theme.
         if path.name in {"theme.py", "client.py"}:
             continue
         for match in re.finditer(r"#[0-9a-fA-F]{6}\b", path.read_text("utf-8")):

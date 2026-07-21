@@ -58,10 +58,12 @@ class ContextBar(QtWidgets.QWidget):
         root.addLayout(location)
 
         states = QtWidgets.QHBoxLayout()
+        states.setSpacing(14)
         self.runtime_label = QtWidgets.QLabel()
         self.bridge_label = QtWidgets.QLabel()
         self.run_label = QtWidgets.QLabel()
         for label in (self.runtime_label, self.bridge_label, self.run_label):
+            label.setObjectName("StateLabel")
             states.addWidget(label)
         states.addStretch(1)
         root.addLayout(states)

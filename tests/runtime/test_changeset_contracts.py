@@ -1456,6 +1456,97 @@ def test_receipt_rejects_wrong_id_kind_and_bad_revision() -> None:
         _receipt(before_revision="bad")
 
 
+# --------------------------------------------------------------------------
+# B-1: optional apply-error fields on ChangeReceipt
+# --------------------------------------------------------------------------
+
+
+def test_receipt_applied_omits_error_fields_from_to_dict() -> None:
+    rec = _receipt()
+    payload = rec.to_dict()
+    assert "error_code" not in payload
+    assert "error_message" not in payload
+
+
+def test_receipt_rolled_back_carries_error_fields_round_trip() -> None:
+    rec = _receipt(
+        status=ReceiptStatus.ROLLED_BACK,
+        postcondition_results=(),
+        rollback_results=(),
+        after_revision=REVISION,
+        applied_op_ids=(),
+        error_code="houdini.operation_failed",
+        error_message="Cannot create node 'copytopoints::2.0'",
+    )
+    payload = rec.to_dict()
+    assert payload["error_code"] == "houdini.operation_failed"
+    assert payload["error_message"] == "Cannot create node 'copytopoints::2.0'"
+    assert rec.error_code == "houdini.operation_failed"
+    assert rec.error_message == "Cannot create node 'copytopoints::2.0'"
+
+
+def test_receipt_applied_rejects_error_fields() -> None:
+    # Success states must never carry a cause; consumers treat APPLIED as
+    # authoritative success.
+    with pytest.raises((TypeError, ValueError)):
+        _receipt(error_code="houdini.operation_failed", error_message="boom")
+    with pytest.raises((TypeError, ValueError)):
+        _receipt(status=ReceiptStatus.ALREADY_APPLIED,
+                 error_code="houdini.operation_failed", error_message="boom")
+
+
+def test_receipt_error_code_must_be_dotted_lowercase() -> None:
+    with pytest.raises((TypeError, ValueError)):
+        _receipt(status=ReceiptStatus.ROLLED_BACK, applied_op_ids=(),
+                 rollback_results=(), after_revision=REVISION,
+                 error_code="UPPER", error_message="x")
+    with pytest.raises((TypeError, ValueError)):
+        _receipt(status=ReceiptStatus.ROLLED_BACK, applied_op_ids=(),
+                 rollback_results=(), after_revision=REVISION,
+                 error_code="houdini.", error_message="x")
+    with pytest.raises((TypeError, ValueError)):
+        _receipt(status=ReceiptStatus.ROLLED_BACK, applied_op_ids=(),
+                 rollback_results=(), after_revision=REVISION,
+                 error_code="houdini.123bad", error_message="x")
+
+
+def test_receipt_error_message_without_code_is_rejected() -> None:
+    # Downstream consumers dispatch on codes, not prose. A message without
+    # a code would orphan the cause from any structured handling.
+    with pytest.raises((TypeError, ValueError)):
+        _receipt(status=ReceiptStatus.ROLLED_BACK, applied_op_ids=(),
+                 rollback_results=(), after_revision=REVISION,
+                 error_message="boom")
+
+
+def test_receipt_error_code_alone_is_allowed() -> None:
+    # Code without message: the cause may be obvious from the code itself.
+    rec = _receipt(
+        status=ReceiptStatus.ROLLED_BACK, applied_op_ids=(),
+        rollback_results=(), after_revision=REVISION,
+        error_code="bridge.stale_scene", error_message=None,
+    )
+    payload = rec.to_dict()
+    assert payload["error_code"] == "bridge.stale_scene"
+    assert "error_message" not in payload
+
+
+def test_receipt_error_message_is_length_bounded() -> None:
+    with pytest.raises((TypeError, ValueError)):
+        _receipt(status=ReceiptStatus.ROLLED_BACK, applied_op_ids=(),
+                 rollback_results=(), after_revision=REVISION,
+                 error_code="houdini.operation_failed",
+                 error_message="x" * 5000)
+
+
+def test_receipt_error_message_rejects_control_chars() -> None:
+    with pytest.raises((TypeError, ValueError)):
+        _receipt(status=ReceiptStatus.ROLLED_BACK, applied_op_ids=(),
+                 rollback_results=(), after_revision=REVISION,
+                 error_code="houdini.operation_failed",
+                 error_message="bad\nmultiline\tmessage")
+
+
 def test_condition_result_rejects_bad_types() -> None:
     with pytest.raises((TypeError, ValueError)):
         ConditionResult(kind="parm.value_equals", passed="yes")  # type: ignore[arg-type]

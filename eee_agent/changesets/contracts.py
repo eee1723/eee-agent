@@ -1424,12 +1424,62 @@ def _validate_receipt_state(receipt: ChangeReceipt) -> None:
             raise ValueError("Applied/AlreadyApplied receipts require scene_may_have_changed=False")
         if any(not result.passed for result in receipt.postcondition_results):
             raise ValueError("Applied/AlreadyApplied receipts require every postcondition to pass")
+        if receipt.error_code is not None or receipt.error_message is not None:
+            raise ValueError(
+                "Applied/AlreadyApplied receipts must not carry an apply error"
+            )
     elif status is ReceiptStatus.ROLLED_BACK:
         if any(not result.passed for result in receipt.rollback_results):
             raise ValueError("RolledBack receipts require every rollback result to pass")
     elif status in (ReceiptStatus.PARTIAL, ReceiptStatus.CRITICAL_RECOVERY):
         if not receipt.scene_may_have_changed:
             raise ValueError("Partial/CriticalRecovery receipts require scene_may_have_changed=True")
+
+
+_MAX_RECEIPT_ERROR_CODE_LEN = 128
+_MAX_RECEIPT_ERROR_MESSAGE_LEN = 1024
+_RECEIPT_ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$")
+
+
+def _normalize_optional_receipt_error(receipt: ChangeReceipt) -> None:
+    """Coerce and validate the optional apply-error fields on a ChangeReceipt.
+
+    - None for both is always valid (legacy rows / successful applies).
+    - error_code, when present, is a dotted lowercase identifier so the LLM
+      and UI can branch on a stable vocabulary rather than free text.
+    - error_message, when present, is bounded free text. It is the human/
+      model-readable cause; codes are the contract.
+    - code without message is allowed (the cause may be obvious from code);
+      message without code is rejected (downstream consumers dispatch on
+      codes, not prose).
+    """
+    code = receipt.error_code
+    message = receipt.error_message
+    if code is None and message is None:
+        return
+    if code is None:
+        raise ValueError(
+            "ChangeReceipt.error_message requires a matching error_code"
+        )
+    if type(code) is not str:
+        raise TypeError("ChangeReceipt.error_code must be a string")
+    if not code or len(code) > _MAX_RECEIPT_ERROR_CODE_LEN:
+        raise ValueError("ChangeReceipt.error_code exceeds the bounded length")
+    if _RECEIPT_ERROR_CODE_RE.match(code) is None:
+        raise ValueError("ChangeReceipt.error_code must be a dotted lowercase code")
+    object.__setattr__(receipt, "error_code", code)
+    if message is not None:
+        if type(message) is not str:
+            raise TypeError("ChangeReceipt.error_message must be a string")
+        if not message or len(message) > _MAX_RECEIPT_ERROR_MESSAGE_LEN:
+            raise ValueError(
+                "ChangeReceipt.error_message exceeds the bounded length"
+            )
+        if _CONTROL_RE.search(message) is not None:
+            raise ValueError(
+                "ChangeReceipt.error_message must not contain control characters"
+            )
+        object.__setattr__(receipt, "error_message", message)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1446,6 +1496,13 @@ class ChangeReceipt:
     scene_may_have_changed: bool
     completed_at: datetime
     schema_version: int = 1
+    # B-1: structured apply failure reason. APPLIED/ALREADY_APPLIED receipts
+    # require both to be None; RolledBack/Partial/CriticalRecovery receipts
+    # SHOULD carry them when the Runtime knows the cause. Kept optional so
+    # legacy construction sites and existing rows (which pre-date this field)
+    # remain valid; serialization omits the keys when None.
+    error_code: str | None = None
+    error_message: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.schema_version) is not int or self.schema_version != 1:
@@ -1470,6 +1527,7 @@ class ChangeReceipt:
         object.__setattr__(self, "postcondition_results", post)
         object.__setattr__(self, "rollback_results", rollback)
         object.__setattr__(self, "completed_at", _require_utc("ChangeReceipt.completed_at", self.completed_at))
+        _normalize_optional_receipt_error(self)
         _validate_receipt_state(self)
 
     @property
@@ -1477,7 +1535,7 @@ class ChangeReceipt:
         return self.status in (ReceiptStatus.APPLIED, ReceiptStatus.ALREADY_APPLIED)
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        result: dict[str, object] = {
             "schema_version": self.schema_version,
             "change_id": self.change_id,
             "status": self.status.value,
@@ -1491,6 +1549,11 @@ class ChangeReceipt:
             "scene_may_have_changed": self.scene_may_have_changed,
             "completed_at": self.completed_at.isoformat(),
         }
+        if self.error_code is not None:
+            result["error_code"] = self.error_code
+        if self.error_message is not None:
+            result["error_message"] = self.error_message
+        return result
 
 
 # --------------------------------------------------------------------------

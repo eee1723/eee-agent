@@ -13,7 +13,8 @@ parms so a model can be reshaped without rebuilding.
 **Highlights**
 
 - **Conversation-first three-pane panel** (Session Sidebar · Conversation ·
-  Inspector) in H22 Pluto tokens, with an amber approval drawer and automatic
+  Inspector) in graphite-industrial tokens (cyan accent, amber gate), with an
+  amber approval drawer and automatic
   backend spawn — docked inside Houdini, zero install in Houdini's Python.
 - **Strict, audited write boundary**: the model never gets a raw write tool.
   Every scene change is a typed ChangeSet → explicit approval → transactional
@@ -203,7 +204,7 @@ uv run --extra eval python -m eee_agent.runtime serve --help   # options
 | Phase 1 — legacy Foundation bridge/tools/CLI | historical (removed from production Runtime) |
 | Phase C — port-based parametric components | historical — the legacy `eee_agent.tools` implementation was removed; superseded by the strict modeling foundation below (the multi-output port gotcha survives in `CLAUDE.md` #3) |
 | Reliability layers | ✅ read-back trim · loop guard · tool-error trace · compact tool; recursion 999 |
-| Runtime UI | ✅ PySide6 **three-pane** panel (Session Sidebar · Conversation + composer · Inspector), H22 Pluto tokens, auto-starting backend, amber approval drawer, **streaming assistant replies with a collapsible thinking block, kind-based cards (user bubbles vs assistant cards), multi-line Ctrl+Enter composer, auto-create + auto-title Sessions**. See the redesign row below. |
+| Runtime UI | ✅ PySide6 **three-pane** panel (Session Sidebar · Conversation + composer · Inspector), graphite-industrial tokens (cyan accent, amber gate), auto-starting backend, amber approval drawer, **streaming assistant replies with a collapsible thinking block, kind-based cards (user bubbles vs assistant cards), multi-line Ctrl+Enter composer, auto-create + auto-title Sessions**. See the redesign row below. |
 | Observability | ⚠️ Phoenix one-click launcher wired (menu → `start_phoenix.py`), but `arize-phoenix` is **not** in the frozen lockfile — install it as an optional extra. Tool-error span marking is in place; tracing emits only when `EEE_TRACING=phoenix`. |
 | **Foundation milestone** | ✅ done — uv-locked deps, core contracts, provider registry (DeepSeek via official Anthropic endpoint), normalized events, explicit harness (no implicit `task`), `cli versions`. See `docs/handoffs/2026-07-13-foundation-migration.md` |
 | **Live Runtime acceptance on current machine** | real provider journey **passed 2026-07-20** (DeepSeek + Houdini 21.0.440, strict evidence harness); interactive GUI checklist and RC tag remain — see `docs/handoffs/2026-07-20-runtime-development-transfer.md` |

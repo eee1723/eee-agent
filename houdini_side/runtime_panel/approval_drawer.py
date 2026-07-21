@@ -20,8 +20,10 @@ class ApprovalDrawer(QtWidgets.QFrame):
         super().__init__(parent)
         self.setObjectName("ApprovalDrawer")
         self.setStyleSheet(
-            f"QFrame#ApprovalDrawer {{ background: {theme.SURFACE_2};"
-            f" border: 1px solid {theme.HIGHLIGHT}; border-radius: 5px; }}")
+            f"QFrame#ApprovalDrawer {{ background: {theme.SURFACE_3};"
+            f" border: 1px solid {theme.HIGHLIGHT};"
+            f" border-left: 4px solid {theme.HIGHLIGHT};"
+            f" border-radius: 3px; }}")
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(10, 8, 10, 8)
 

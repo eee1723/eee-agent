@@ -1389,13 +1389,15 @@ class ChangeSetExecutor:
 
         post_results: tuple[ConditionResult, ...] = ()
         reconciled = False
+        reconciliation_error: BaseException | None = None
         if write_error is None:
             try:
                 after_index = self._index_scene_by_node_id(hou)
                 after = self._snapshot(hou, changeset, after_index)
                 post_results = self._evaluate_postconditions(changeset, after, binding)
                 reconciled = all(result.passed for result in post_results)
-            except Exception:  # noqa: BLE001 — reconciliation crash -> uncertain
+            except Exception as exc:  # noqa: BLE001 — reconciliation crash -> uncertain
+                reconciliation_error = exc
                 reconciled = False
             if reconciled:
                 after_revision = self._revision(after)
@@ -1425,6 +1427,14 @@ class ChangeSetExecutor:
         if status != ReceiptStatus.ROLLED_BACK:
             # An uncertain recovery freezes further writes until process restart.
             self._write_frozen = True
+        error_code, error_message = self._classify_apply_failure(
+            write_error=write_error,
+            reconciliation_error=reconciliation_error,
+            post_results=post_results,
+            reconciled=reconciled,
+            applied_op_ids=applied_op_ids,
+            operations=changeset.operations,
+        )
         receipt = ChangeReceipt(
             change_id=change_id,
             status=status,
@@ -1437,6 +1447,8 @@ class ChangeSetExecutor:
             rollback_results=rollback_results,
             scene_may_have_changed=scene_may_have_changed,
             completed_at=_now(),
+            error_code=error_code,
+            error_message=error_message,
         )
         self._cache(key, receipt)
         return receipt
@@ -2242,6 +2254,141 @@ class ChangeSetExecutor:
         if passed == 0:
             return ReceiptStatus.CRITICAL_RECOVERY, True
         return ReceiptStatus.PARTIAL, True
+
+    def _classify_apply_failure(
+        self,
+        *,
+        write_error: BaseException | None,
+        reconciliation_error: BaseException | None,
+        post_results: tuple[ConditionResult, ...],
+        reconciled: bool,
+        applied_op_ids: list[str],
+        operations: tuple,
+    ) -> tuple[str | None, str | None]:
+        """Translate a failed transaction into a bounded (code, message) pair.
+
+        The classification is intentionally lossy: callers (the LLM, the UI,
+        the durable event log) dispatch on the dotted ``code`` vocabulary, not
+        on prose. ``message`` carries a bounded human-readable cause so a user
+        can read what actually broke instead of seeing the old "applied_op_ids
+        is empty, scene unchanged, no further info" dead-end.
+
+        Order matters: an explicit write exception beats a reconciliation
+        crash beats a postcondition mismatch beats the generic fallback.
+        """
+        # 1) Write exception (an op raised before all operations completed).
+        if write_error is not None:
+            code, message = self._exception_to_code(write_error)
+            # Tag the failed op index so the user can see where execution died.
+            # The failing op is at index len(applied_op_ids): when no op has
+            # been applied yet this is 0 (the first op raised), and so on.
+            if operations:
+                failed_index = len(applied_op_ids)
+                if 0 <= failed_index < len(operations):
+                    op = operations[failed_index]
+                    op_label = self._describe_op_for_error(op)
+                    if op_label:
+                        message = f"{message} (failed at op #{failed_index + 1}: {op_label})"
+            return code, self._bounded_exception_message_str(message)
+        # 2) Reconciliation crash (post-snapshot / postcondition eval raised).
+        if reconciliation_error is not None:
+            code, message = self._exception_to_code(reconciliation_error)
+            return code, self._bounded_exception_message_str(
+                f"post-apply reconciliation failed: {message}"
+            )
+        # 3) Postconditions evaluated but did not all pass.
+        if not reconciled:
+            failed = [
+                r for r in post_results if not r.passed
+            ]
+            if failed:
+                kinds = ", ".join(sorted({r.kind for r in failed}))
+                return (
+                    "apply.postcondition_failed",
+                    self._bounded_exception_message_str(
+                        f"{len(failed)} postcondition(s) failed: {kinds}"
+                    ),
+                )
+        # 4) Nothing else to say; leave the receipt descriptive-only so
+        # consumers still see RolledBack without a fabricated cause.
+        return None, None
+
+    def _exception_to_code(
+        self, exc: BaseException
+    ) -> tuple[str, str]:
+        """Map a raised exception to a bounded (code, message) pair.
+
+        ``hou.OperationFailed`` is the dominant case for "createNode / setParm
+        / connect rejected by Houdini" (bad node type name, wrong context,
+        parm name not on the node, etc.). ``HoudiniAdapterError`` (imported
+        at the top of this module from ``houdini_side.secure_bridge``) is the
+        typed failure path the bridge raises for stale/frozen scenes and
+        carries its own dotted ``code``.
+        """
+        message = self._bounded_exception_message(exc)
+        # HoudiniAdapterError is already imported at the top of this module.
+        if isinstance(exc, HoudiniAdapterError):
+            code = getattr(exc, "code", None)
+            # message_for_user is the bounded, leak-free cause string.
+            cause = getattr(exc, "message_for_user", None)
+            if type(cause) is str and cause.strip():
+                message = self._bounded_exception_message_str(cause)
+            if type(code) is str and code:
+                return (code, message)
+            return ("houdini.adapter_error", message)
+        # hou is only available inside Houdini; guard the import.
+        try:
+            import hou  # type: ignore
+            if isinstance(exc, hou.OperationFailed):  # type: ignore[attr-defined]
+                return ("houdini.operation_failed", message)
+        except Exception:  # noqa: BLE001 — hou absent in the test venv
+            pass
+        # Generic exception: prefix the class name so the message stays
+        # self-describing, then re-bound (the prefix can push past the limit).
+        cls = type(exc).__name__
+        return (
+            "apply.unexpected_error",
+            self._bounded_exception_message_str(f"{cls}: {message}"),
+        )
+
+    @staticmethod
+    def _bounded_exception_message(exc: BaseException) -> str:
+        """Best-effort one-line message from an exception, bounded."""
+        text = str(exc).strip()
+        if not text:
+            text = type(exc).__name__
+        return ChangeSetExecutor._bounded_exception_message_str(text)
+
+    @staticmethod
+    def _bounded_exception_message_str(text: str) -> str:
+        """Bound and collapse whitespace in a pre-extracted message string."""
+        # Collapse newlines so the (code, message) contract stays one record.
+        text = " ".join(text.split())
+        if len(text) > 500:
+            text = text[:497] + "..."
+        return text
+
+    @staticmethod
+    def _describe_op_for_error(op: object) -> str:
+        """Short human label for a failed operation (node type + name).
+
+        Only the most common CreateNode/SetParm/ConnectInput shapes are
+        described; anything else returns an empty string so the caller skips
+        the op-tag suffix instead of inventing a label.
+        """
+        node_type = getattr(op, "node_type", None)
+        node_name = getattr(op, "node_name", None)
+        if type(node_type) is str and type(node_name) is str:
+            return f"{node_type} '{node_name}'"
+        parm_name = getattr(op, "parm_name", None)
+        if type(parm_name) is str:
+            target = getattr(op, "node_id", None) or getattr(op, "node_name", None)
+            target_text = f" on {target}" if target else ""
+            return f"set parm '{parm_name}'{target_text}"
+        input_index = getattr(op, "input_index", None)
+        if type(input_index) is int:
+            return f"connect input {input_index}"
+        return ""
 
     def _safe_after_revision(
         self, hou: object, changeset: ChangeSet, before_revision: str
