@@ -151,6 +151,23 @@ def test_inspector_uses_structured_widgets_not_plain_text() -> None:
     assert "STATUS_ERROR" in source or "theme.STATUS_ERROR" in source
 
 
+def test_inspector_renders_todolist_block() -> None:
+    # D-3: the agent's deepagents TodoList plan must appear in the Run tab
+    # with a per-item status marker (one row per todo).
+    source = _source("inspector.py")
+    assert "_build_todos_block" in source
+    assert "TodoItemView" in source or "vm.TodoItemView" in source
+    # Status markers for the three deepagents todo states. Pending is the
+    # else branch so its literal may be absent; completed and in_progress
+    # are explicit branches.
+    assert '"completed"' in source or "'completed'" in source
+    assert '"in_progress"' in source or "'in_progress'" in source
+    # The marker glyphs for done / active / pending must all be present.
+    assert "✓" in source   # completed
+    assert "▶" in source   # in_progress
+    assert "○" in source   # pending
+
+
 def test_main_window_contract() -> None:
     source = _source("main_window.py")
     assert "class RuntimePanel(QtWidgets.QWidget)" in source

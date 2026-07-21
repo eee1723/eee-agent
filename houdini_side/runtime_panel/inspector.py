@@ -104,6 +104,8 @@ class _RunViewWidget(QtWidgets.QFrame):
             return
         self._build_header(run_view)
         self._build_time_block(run_view)
+        if run_view.todos:
+            self._build_todos_block(run_view.todos)
         if run_view.environment is not None:
             self._build_environment_block(run_view.environment)
         if run_view.dependencies:
@@ -216,6 +218,47 @@ class _RunViewWidget(QtWidgets.QFrame):
         card_layout.addWidget(_dim_label(f"change: {outcome.change_id}"), 0,
                               QtCore.Qt.AlignmentFlag.AlignRight)
         self._layout.addWidget(card)
+
+    def _build_todos_block(self, todos: tuple[vm.TodoItemView, ...]) -> None:
+        # D-3: surface the agent's TodoList plan with one row per item and a
+        # status marker. The block is rendered above environment/deps so the
+        # user sees what the agent is doing before runtime metadata.
+        done = sum(1 for t in todos if t.status == "completed")
+        active = sum(1 for t in todos if t.status == "in_progress")
+        header_row = QtWidgets.QHBoxLayout()
+        header_row.addWidget(_dim_label(
+            f"PLAN ({done}/{len(todos)} done"
+            + (f", {active} active" if active else "")
+            + ")"))
+        header_row.addStretch(1)
+        header = QtWidgets.QWidget()
+        header.setLayout(header_row)
+        self._layout.addWidget(header)
+        for todo in todos:
+            row = QtWidgets.QHBoxLayout()
+            row.setSpacing(6)
+            if todo.status == "completed":
+                marker, tone = "✓", "ok"
+            elif todo.status == "in_progress":
+                marker, tone = "▶", "warn"
+            else:
+                marker, tone = "○", "normal"
+            row.addWidget(_tone_label(marker, tone))
+            content_label = QtWidgets.QLabel(todo.content)
+            content_label.setWordWrap(True)
+            content_label.setTextInteractionFlags(
+                QtCore.Qt.TextSelectableByMouse)
+            # Completed items read as dim (struck-through visually via color);
+            # in-progress items read prominent; pending items normal.
+            color = _TONE_COLORS.get(tone, theme.FG_DIM)
+            weight = "600" if todo.status == "in_progress" else "400"
+            content_label.setStyleSheet(
+                f"color: {color}; font-weight: {weight}; background: transparent;"
+            )
+            row.addWidget(content_label, 1)
+            line = QtWidgets.QWidget()
+            line.setLayout(row)
+            self._layout.addWidget(line)
 
     def _build_activity_block(self, steps: tuple[vm.ActivityStep, ...]) -> None:
         header_row = QtWidgets.QHBoxLayout()

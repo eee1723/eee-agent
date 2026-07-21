@@ -248,3 +248,75 @@ def test_vision_rows_decide_tone_by_status_and_acceptance() -> None:
     ])
     assert [r.tone for r in rows] == ["ok", "warn", "warn"]
     assert rows[2].report_summary == ""
+
+
+# --------------------------------------------------------------------------
+# D-3: TodoList view models for the deepagents plan
+# --------------------------------------------------------------------------
+
+
+def test_d3_todo_items_returns_empty_for_non_list() -> None:
+    assert vm.todo_items(None) == ()
+    assert vm.todo_items("foo") == ()
+    assert vm.todo_items({"a": 1}) == ()
+
+
+def test_d3_todo_items_maps_status_to_tone() -> None:
+    items = vm.todo_items([
+        {"content": "Plan", "status": "completed"},
+        {"content": "Apply", "status": "in_progress"},
+        {"content": "Review", "status": "pending"},
+    ])
+    assert [i.tone for i in items] == ["ok", "warn", "normal"]
+    assert [i.status for i in items] == ["completed", "in_progress", "pending"]
+
+
+def test_d3_todo_items_filters_invalid_entries() -> None:
+    items = vm.todo_items([
+        {"content": "good", "status": "pending"},
+        {"content": "", "status": "pending"},   # empty content
+        {"content": "bad", "status": "NOPE"},   # bad status
+        {"content": "no status"},               # missing status
+        "not a dict",                           # non-dict
+        {"content": "also good", "status": "completed"},
+    ])
+    assert len(items) == 2
+    assert items[0].content == "good"
+    assert items[1].status == "completed"
+
+
+def test_d3_todo_items_bounds_content_length() -> None:
+    items = vm.todo_items([{"content": "x" * 5000, "status": "pending"}])
+    assert len(items[0].content) == vm.MAX_BODY_CHARS
+
+
+def test_d3_run_view_picks_up_todos_from_snapshot() -> None:
+    snap = _full_snapshot()
+    snap["todos"] = [
+        {"content": "Plan", "status": "completed"},
+        {"content": "Apply", "status": "in_progress"},
+    ]
+    rv = vm.run_view(snap)
+    assert rv is not None
+    assert len(rv.todos) == 2
+    assert rv.todos[0].content == "Plan"
+    assert rv.todos[1].tone == "warn"
+
+
+def test_d3_run_view_handles_missing_todos_field() -> None:
+    # A snapshot from a pre-D-2 server (or a run that never wrote todos)
+    # has no 'todos' key; run_view must surface an empty tuple.
+    snap = _full_snapshot()
+    snap.pop("todos", None)
+    rv = vm.run_view(snap)
+    assert rv is not None
+    assert rv.todos == ()
+
+
+def test_d3_run_view_handles_invalid_todos_field() -> None:
+    # A malformed todos value must not crash the inspector; treat as empty.
+    snap = _full_snapshot()
+    snap["todos"] = "not a list"
+    rv = vm.run_view(snap)
+    assert rv is not None
+    assert rv.todos == ()

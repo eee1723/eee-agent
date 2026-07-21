@@ -244,6 +244,47 @@ class RunView:
     dependencies: tuple[tuple[str, str], ...]   # (package, version) pairs
     activity: tuple[ActivityStep, ...]
     apply_outcome: ApplyOutcomeView | None
+    todos: tuple["TodoItemView", ...]
+
+
+@dataclass(frozen=True, slots=True)
+class TodoItemView:
+    """One item in the deepagents TodoList plan."""
+    content: str
+    status: str  # "pending" | "in_progress" | "completed"
+    tone: str    # "normal" | "warn" | "ok"
+
+
+_TODO_STATUS_TONES = {
+    "pending": "normal",
+    "in_progress": "warn",
+    "completed": "ok",
+}
+
+
+def todo_items(todos: object) -> tuple[TodoItemView, ...]:
+    """Normalize a deepagents todos list (list of {content, status}) into
+    bounded TodoItemView records. Returns () for any non-list input."""
+    if not isinstance(todos, (list, tuple)):
+        return ()
+    items: list[TodoItemView] = []
+    for raw in todos:
+        if type(raw) is not dict:
+            continue
+        content = raw.get("content")
+        status = raw.get("status")
+        if type(content) is not str or not content:
+            continue
+        if type(status) is not str or status not in _TODO_STATUS_TONES:
+            continue
+        items.append(TodoItemView(
+            content=_bounded(content, MAX_BODY_CHARS),
+            status=status,
+            tone=_TODO_STATUS_TONES[status],
+        ))
+        if len(items) >= MAX_ACTIVITY_STEPS:
+            break
+    return tuple(items)
 
 
 @dataclass(frozen=True, slots=True)
@@ -416,6 +457,10 @@ def run_view(
         dependencies=_dependencies_from_snapshot(model_snapshot),
         activity=_activity_steps(activity),
         apply_outcome=_apply_outcome_view(apply_outcomes),
+        # D-3: render the deepagents plan from the run snapshot. The panel
+        # state keeps this fresh from both the D-1 todos.updated event and
+        # the D-2 persisted RunRecord.todos.
+        todos=todo_items(snapshot.get("todos")),
     )
 
 
