@@ -85,3 +85,15 @@ def test_conversation_contract() -> None:
     assert "MAX_MESSAGES" in source            # bounded flow enforced
     assert "_TONE_COLORS" in source            # tones come from theme tokens
     assert "returnPressed.connect" not in source  # send only from the button
+
+
+def test_approval_drawer_contract() -> None:
+    source = _source("approval_drawer.py")
+    assert "approved = QtCore.Signal()" in source
+    assert "rejected = QtCore.Signal()" in source
+    assert "def show_changeset(self, summary)" in source
+    assert "def hide_drawer(self)" in source
+    assert "HIGHLIGHT" in source                    # amber gate strip
+    assert "Approve and build" in source
+    assert "Reject" in source
+    assert "approval_is_actionable" in source       # digest binding enforced
