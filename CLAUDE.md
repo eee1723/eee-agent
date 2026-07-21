@@ -47,10 +47,13 @@ authoritative documentation; never rely on memory for version/API details.
   capture, changeset, workspace, read-only, and sensitivity providers). Calls are
   main-thread serialized and return bounded plain data; raw HOM objects and RPC
   proxies never cross the agent boundary.
-- **Panel**: Houdini's PySide6 **Runtime Control** panel in
-  `houdini_side/runtime_panel.py` starts or reuses the authenticated Secure
-  Bridge and submits bounded Session/Run/approval commands. The panel owns no
-  agent graph, SQLite, or Apply implementation.
+- **Panel**: Houdini's PySide6 **three-pane Runtime Control** panel in
+  `houdini_side/runtime_panel/` (a package: `theme`/`view_models`/
+  `backend_launcher` Qt-free core + thin `context_bar`/`session_sidebar`/
+  `conversation`/`approval_drawer`/`inspector`/`main_window` widgets +
+  `client`) starts the authenticated Secure Runtime automatically and submits
+  bounded Session/Run/approval commands. The panel owns no agent graph,
+  SQLite, or Apply implementation.
 - **Agent boundary**: `eee_agent.runtime.agent_context` injects a trusted
   `ReadOnlyProvider`; `eee_agent.runtime.agent_tools.build_read_only_tools()`
   returns exactly five tools: `scene_status`, `query_scene`,
@@ -128,8 +131,9 @@ directories; do not restore or invoke them.
 `eee_agent/runtime` (paths, models, lock, database, migrations, sessions, runs,
 events, protocol, auth, checkpoints, agent runner, service, server) ·
 `eee_agent/model`, `eee_agent/app`, `eee_agent/cli` ·
-`houdini_side/secure_bridge.py`, `secure_bridge_host.py`, `runtime_panel.py`,
-`changeset_executor.py`, and `install_menu.py` · `eval/` · `skills/` ·
+`houdini_side/secure_bridge.py`, `secure_bridge_host.py`, `runtime_panel/`
+(three-pane panel package), `changeset_executor.py`, `workspace_inspector.py`,
+`install_menu.py`, and `start_phoenix.py` · `eval/` · `skills/` ·
 `MainMenuCommon.xml`.
 
 Foundation and Runtime handoffs live under `docs/handoffs/`; approved designs

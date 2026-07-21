@@ -118,9 +118,10 @@ git diff --check
 git status --short --branch
 ```
 
-The accepted Task 16-B2b baseline was 2018 offline tests passing. Later commits
-may legitimately increase the count, but setup is blocked by any failure or
-unexplained new skip/xfail.
+The offline baseline on `feature/runtime` is ~2940 tests passing with 11
+Houdini-Knowledge skips (opt-in via `EEE_RUN_HOUDINI_KB_TESTS=true`). Later
+commits may legitimately increase the count, but setup is blocked by any
+failure or unexplained new skip/xfail.
 
 For the focused Workspace gate:
 
@@ -223,8 +224,9 @@ not.
 Read:
 
 1. `CLAUDE.md`
-2. `docs/handoffs/2026-07-16-runtime-b2b3-transfer.md`
-3. `docs/superpowers/reviews/2026-07-16-task16-b2b-review-result.md`
+2. `docs/handoffs/2026-07-20-runtime-development-transfer.md` (current entry doc)
+3. `docs/superpowers/plans/2026-07-21-runtime-panel-three-pane.md` (latest panel work)
 
-No post-B2b implementation slice is automatically authorized. Task 16-E and
-Task 17 require a new bounded design and plan before source changes.
+The Foundation, Runtime, Secure Bridge, Docked UI, and Strict Modeling
+milestones are complete; the interactive Houdini 21 GUI checklist and the
+Vision real-provider journey are the remaining open gates before an RC tag.

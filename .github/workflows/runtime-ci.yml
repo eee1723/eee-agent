@@ -67,8 +67,8 @@ jobs:
           enable-cache: true
       - name: Install frozen quality tools
         run: uv sync --frozen --extra eval --group dev
-      - name: Lint Runtime/Vision and reject retired bridge imports
-        run: uv run --frozen --group dev ruff check eee_agent/runtime eee_agent/vision
+      - name: Lint Runtime/Vision/panel and reject retired bridge imports
+        run: uv run --frozen --group dev ruff check eee_agent/runtime eee_agent/vision houdini_side tests/panel
       - name: Type-check DTO and tool boundaries
         run: >-
           uv run --frozen --group dev mypy

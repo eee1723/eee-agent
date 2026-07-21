@@ -180,8 +180,11 @@ C:\Users\EEE\Documents\houdini21.0\packages\eee_agent.json
 EEE_PATH=E:/eee-agent/.worktrees/runtime
 ```
 
-`hython` resolves the current `EEEAgentRuntime.pypanel` and
-`houdini_side/runtime_panel.py`. A visible Houdini FX 21.0.440 process was
+`hython` resolves the current `EEEAgentRuntime.pypanel` and the
+`houdini_side/runtime_panel/` package (the three-pane redesign landed after
+this handoff was written; see
+`docs/superpowers/plans/2026-07-21-runtime-panel-three-pane.md`). A visible
+Houdini FX 21.0.440 process was
 started as PID `20772` with window title `untitled.hip - Houdini FX 21.0.440`.
 Do not close it without checking for unsaved work.
 

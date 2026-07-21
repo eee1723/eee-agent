@@ -3,8 +3,8 @@
 The package makes only the authenticated Secure Bridge host and Runtime
 observer importable. Legacy raw-write modules are intentionally absent.
 
-Run once (from a shell or Houdini):
-    hython Z:\\EEE_Project\\EEEProceduralModeling\\houdini_side\\install_menu.py
+Run once (from a shell or Houdini), replacing ``<repo>`` with your checkout:
+    hython <repo>\\houdini_side\\install_menu.py
 then restart Houdini. An "EEE Agent" menu appears in the menu bar.
 """
 from __future__ import annotations

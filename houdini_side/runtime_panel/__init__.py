@@ -20,7 +20,7 @@ def create_panel():
     return RuntimePanel()
 
 
-def open_panel():  # kept for houdini_side.launch compatibility
+def open_panel():  # invoked from MainMenuCommon.xml (EEE Agent menu)
     panel = create_panel()
     panel.show()
     return panel

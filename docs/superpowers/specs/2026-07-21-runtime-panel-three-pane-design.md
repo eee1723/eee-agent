@@ -121,6 +121,16 @@ Boundaries:
 +------------+---------------------------------------+---------------+
 ```
 
+> **Implementation note (2026-07-21):** the Inspector ships with three tabs —
+> **Run / Workspace / Artifacts** — not four. The `Validation` tab shown above
+> was dropped because the Runtime protocol currently exposes validation
+> evidence only through the ChangeSet lifecycle and the deterministic
+> `vision.evaluation_completed` event, not as a standalone snapshot channel;
+> there was no data to populate a dedicated tab. The absence is locked by
+> `tests/panel/test_runtime_panel_sources.py` (`assert "VALIDATION" not in
+> source`). Add the tab back only when a structured validation-report channel
+> is introduced.
+
 Responsive rule (measured on the panel widget width):
 
 - width >= 900px: all three panes visible.
