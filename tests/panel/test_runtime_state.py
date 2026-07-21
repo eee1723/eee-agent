@@ -161,6 +161,50 @@ def test_runtime_panel_state_bounds_output_and_activity() -> None:
     assert len(state.snapshot()["activity"]) == 100
 
 
+def test_reasoning_delta_accumulates_into_separate_thinking_buffer() -> None:
+    # model.reasoning_delta is the thinking stream; it must accumulate into a
+    # buffer distinct from the output text and surface via snapshot["thinking"].
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=5))
+    state.apply_event(_event(6, "model.reasoning_delta", {"text": "Let me think "}))
+    state.apply_event(_event(7, "model.reasoning_delta", {"text": "about this."}))
+    snap = state.snapshot()
+    assert snap["thinking"] == "Let me think about this."
+    # Output stays untouched — thinking and reply are separate channels.
+    assert snap["output"] == ""
+
+
+def test_reasoning_delta_is_bounded_like_output() -> None:
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=0))
+    state.apply_event(_event(1, "model.reasoning_delta", {"text": "y" * 40_000}))
+    assert len(state.snapshot()["thinking"]) == 32_000
+
+
+def test_reasoning_delta_buffer_cleared_on_terminal_run() -> None:
+    # Thinking is OPERATIONAL: once the run terminates the live buffer is
+    # dropped (the streaming card is swapped for the final reply).
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=5))
+    state.apply_event(_event(6, "model.reasoning_delta", {"text": "thinking..."}))
+    assert state.snapshot()["thinking"] == "thinking..."
+    state.apply_event(
+        _event(7, "run.state_changed", {"from": "Planning", "to": "Completed"})
+    )
+    # selected_run is now the completed run; its thinking buffer is gone.
+    assert state.snapshot()["thinking"] == ""
+
+
+def test_load_snapshot_resets_thinking_buffer() -> None:
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=5))
+    state.apply_event(_event(6, "model.reasoning_delta", {"text": "mid-stream"}))
+    assert state.snapshot()["thinking"] == "mid-stream"
+    # A fresh snapshot means we are not mid-stream; thinking is not replayed.
+    state.load_snapshot(_snapshot(active=_run(), seq=10))
+    assert state.snapshot()["thinking"] == ""
+
+
 def test_runtime_panel_state_bounds_recovered_final_output() -> None:
     state = RuntimePanelState()
     state.load_snapshot(

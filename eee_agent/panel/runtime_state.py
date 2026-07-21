@@ -329,6 +329,10 @@ class RuntimePanelState:
         self._run_order: list[str] = []
         self._active_run_id: str | None = None
         self._output: dict[str, str] = {}
+        # model.reasoning_delta is OPERATIONAL: streamed live, not replayed from
+        # history. load_snapshot never repopulates this — it only carries the
+        # active run's thinking while the panel is connected.
+        self._thinking: dict[str, str] = {}
         self._activity: list[dict[str, str]] = []
 
     def load_snapshot(self, payload: object) -> None:
@@ -349,6 +353,9 @@ class RuntimePanelState:
             run_id: str(run.get("final_response") or "")[-_MAX_OUTPUT_CHARS:]
             for run_id, run in self._runs.items()
         }
+        # Thinking is OPERATIONAL-only: a fresh snapshot means we are not mid-
+        # stream on any run, so there is nothing to carry over.
+        self._thinking = {}
         self._activity = []
 
     def apply_event(self, message: Mapping[str, object]) -> bool:
@@ -392,6 +399,7 @@ class RuntimePanelState:
                 self._run_order.append(rid)
             self._active_run_id = rid
             self._output[rid] = ""
+            self._thinking[rid] = ""
             self._activity = []
             self._trim_runs()
         elif type(run_id) is str and run_id in self._runs:
@@ -405,12 +413,23 @@ class RuntimePanelState:
                     if self._active_run_id == run_id:
                         self._active_run_id = None
                     run["finished_at"] = timestamp
+                    # Drop the live-thinking buffer for this run; the terminal
+                    # snapshot swaps the streaming card for the final reply.
+                    self._thinking.pop(run_id, None)
             elif event_type == "model.text_delta":
                 text = payload.get("text")
                 if type(text) is not str:
                     raise PanelClientError("Runtime output event is invalid.")
                 combined = self._output.get(run_id, "") + text
                 self._output[run_id] = combined[-_MAX_OUTPUT_CHARS:]
+            elif event_type == "model.reasoning_delta":
+                # Thinking/reasoning stream. Same shape as text_delta, same
+                # bound, separate buffer. OPERATIONAL — never replayed.
+                text = payload.get("text")
+                if type(text) is not str:
+                    raise PanelClientError("Runtime output event is invalid.")
+                combined = self._thinking.get(run_id, "") + text
+                self._thinking[run_id] = combined[-_MAX_OUTPUT_CHARS:]
             elif event_type == "message.assistant_final":
                 text = payload.get("text")
                 if type(text) is not str:
@@ -446,6 +465,7 @@ class RuntimePanelState:
             self._run_order.pop(0)
             self._runs.pop(oldest, None)
             self._output.pop(oldest, None)
+            self._thinking.pop(oldest, None)
 
     def snapshot(self) -> Mapping[str, object]:
         active = (
@@ -458,6 +478,7 @@ class RuntimePanelState:
             selected_id = self._run_order[-1]
         selected = dict(self._runs[selected_id]) if selected_id else None
         output = self._output.get(selected_id or "", "")
+        thinking = self._thinking.get(selected_id or "", "")
         return MappingProxyType(
             {
                 "session_id": self._session_id,
@@ -466,6 +487,7 @@ class RuntimePanelState:
                 "active_run": active,
                 "selected_run": selected,
                 "output": output,
+                "thinking": thinking,
                 "activity": tuple(dict(item) for item in self._activity),
             }
         )
