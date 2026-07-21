@@ -11,6 +11,7 @@ teardown; a pre-existing backend is never killed.
 from __future__ import annotations
 
 import os
+import socket
 import subprocess
 import time
 from dataclasses import dataclass
@@ -38,10 +39,16 @@ class LaunchResult:
 
 def discovery_ready(state_dir: Path) -> bool:
     try:
-        load_runtime_credentials(state_dir)
+        creds = load_runtime_credentials(state_dir)
     except PanelClientError:
         return False
-    return True
+    # Identity files can outlive a killed backend (no graceful cleanup on
+    # Windows), so verify the endpoint is actually listening.
+    try:
+        with socket.create_connection((creds.host, creds.port), timeout=0.25):
+            return True
+    except OSError:
+        return False
 
 
 def interpreter_candidates(repo_root: Path) -> list[Path]:
@@ -71,7 +78,11 @@ def ensure_runtime(
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     spawn: SpawnFn = subprocess.Popen,
 ) -> LaunchResult:
-    """Ensure a Runtime backend is reachable; spawn one if needed."""
+    """Ensure a Runtime backend is reachable; spawn one if needed.
+
+    On a ``timeout`` result the process may still be running and must be
+    passed to ``terminate`` by the caller.
+    """
     if discovery_ready(state_dir):
         return LaunchResult(status="ready", detail="Runtime already running.")
     candidates = [p for p in interpreter_candidates(repo_root) if p.exists()]
@@ -89,13 +100,15 @@ def ensure_runtime(
             stdout=log_file, stderr=log_file,
             cwd=str(repo_root), env=env,
         )
-    except (OSError, FileNotFoundError) as exc:
+    except OSError as exc:
         log_file.close()
         return LaunchResult(
             status="missing_interpreter",
             detail=f"Failed to start the Runtime interpreter: {exc}",
             log_path=log_path,
         )
+    # The child holds its own duplicated handle; drop the parent's copy.
+    log_file.close()
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         if discovery_ready(state_dir):
