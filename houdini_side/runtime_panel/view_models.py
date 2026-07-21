@@ -20,11 +20,14 @@ TONES = frozenset({"normal", "ok", "warn", "error", "gate"})
 
 @dataclass(frozen=True, slots=True)
 class MessageItem:
-    kind: str        # user|assistant|proposal|approval|vision|artifact|notice|error
+    kind: str        # user|assistant|assistant_streaming|proposal|approval|vision|artifact|notice|error
     title: str
     body: str
     tone: str        # one of TONES
     mono: bool = False
+    # Live reasoning text shown in a collapsible block under assistant cards.
+    # Empty for non-streaming / non-thinking messages.
+    thinking: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +64,19 @@ def assistant_message(text: str) -> MessageItem:
     return MessageItem(
         kind="assistant", title="Assistant",
         body=_bounded(text, MAX_BODY_CHARS), tone="normal",
+    )
+
+
+def streaming_assistant(text: str, *, thinking: str = "") -> MessageItem:
+    # A live in-flight assistant reply: the body grows token-by-token from
+    # model.text_delta and thinking grows from model.reasoning_delta. The
+    # conversation view updates this card in place rather than appending, and
+    # swaps it for a final assistant_message once the run terminates. Empty
+    # body is allowed (the run just started; only a cursor shows).
+    return MessageItem(
+        kind="assistant_streaming", title="Assistant",
+        body=_bounded(text, MAX_BODY_CHARS), tone="normal",
+        thinking=_bounded(thinking, MAX_BODY_CHARS),
     )
 
 

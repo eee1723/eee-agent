@@ -91,6 +91,13 @@ def test_conversation_contract() -> None:
     assert "MAX_MESSAGES" in source            # bounded flow enforced
     assert "_TONE_COLORS" in source            # tones come from theme tokens
     assert "returnPressed.connect" not in source  # send only from the button
+    # Streaming + kind-based rendering: cards branch on item.kind, and an
+    # in-flight assistant reply updates in place instead of appending copies.
+    assert 'item.kind == "user"' in source
+    assert "def update_body(self, text" in source
+    assert "def update_streaming(self, text" in source
+    assert "def replace_last_assistant(self, item" in source
+    assert "stop_streaming" in source
 
 
 def test_approval_drawer_contract() -> None:
@@ -127,6 +134,8 @@ def test_main_window_contract() -> None:
     assert "backend_launcher.terminate" in source  # who spawns, reaps
     assert "context_bar.set_status" in source
     assert "conversation.append_item" in source
+    assert "conversation.update_streaming" in source  # streaming assistant card
+    assert "conversation.replace_last_assistant" in source  # terminal settle
     assert "approval_drawer.show_changeset" in source
     assert "_closing" in source                 # mid-launch close reaps backend
     assert "SelectionQueryWorker" in source     # bridge state wiring

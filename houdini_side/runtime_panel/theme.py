@@ -45,6 +45,14 @@ PRIMARY = "#7082b9"
 CHECKED_SURFACE = "#47578b"
 CHECKED_FG = "#e3ebff"
 
+# --- conversation accent (user bubbles + active emphasis) -----------------
+# A blue-leaning accent that breaks up the all-grey Pluto surface so user
+# input reads as distinct from assistant replies without a second hue family.
+ACCENT = "#3d6fb0"
+ACCENT_FG = "#ffffff"
+ACCENT_SURFACE = "#2c4f7a"
+THINKING_SURFACE = "#262626"
+
 # --- approval gate amber (reserved for pending authorization) -------------
 HIGHLIGHT = "#fdba00"
 HIGHLIGHT_FG = "#271900"
@@ -69,6 +77,14 @@ QFrame#Card {{ background: {surface2}; border: 1px solid {divider};
     border-radius: 5px; }}
 QFrame#GateCard {{ background: {surface2}; border: 1px solid {highlight};
     border-radius: 5px; }}
+QFrame#UserBubble {{ background: {accent}; color: {accent_fg};
+    border: none; border-radius: 10px; }}
+QFrame#AssistantCard {{ background: {surface3}; border: 1px solid {divider};
+    border-radius: 5px; }}
+QFrame#ThinkingBlock {{ background: {thinking_surface};
+    border: 1px solid {divider}; border-radius: 3px; }}
+QToolButton#ThinkingToggle {{ background: transparent; border: none;
+    color: {fg_dim}; font-size: 8pt; text-align: left; }}
 QPushButton {{ background: {button}; color: {fg}; border: none;
     border-radius: 4px; padding: 2px 15px; min-height: 17px; }}
 QPushButton:hover {{ background: {button_hover}; }}
@@ -111,9 +127,12 @@ def build_qss() -> str:
         bg=BG, fg=FG, fg_dim=FG_DIM, fg_dimmer=FG_DIMMER,
         fg_prominent=FG_PROMINENT, field=FIELD, field_fg=FIELD_FG,
         surface_lowest=SURFACE_LOWEST, surface1=SURFACE_1,
-        surface2=SURFACE_2, divider=DIVIDER, pane_divider=PANE_DIVIDER,
+        surface2=SURFACE_2, surface3=SURFACE_3,
+        divider=DIVIDER, pane_divider=PANE_DIVIDER,
         button=BUTTON, button_hover=BUTTON_HOVER, pressed=PRESSED,
         pressed_fg=PRESSED_FG, primary=PRIMARY,
+        accent=ACCENT, accent_fg=ACCENT_FG, accent_surface=ACCENT_SURFACE,
+        thinking_surface=THINKING_SURFACE,
         checked_surface=CHECKED_SURFACE, checked_fg=CHECKED_FG,
         highlight=HIGHLIGHT, highlight_fg=HIGHLIGHT_FG,
         highlight_surface=HIGHLIGHT_SURFACE, view_surface=VIEW_SURFACE,

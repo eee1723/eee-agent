@@ -21,6 +21,21 @@ def test_assistant_message_is_bounded_and_wraps() -> None:
     assert item.mono is False  # prose wraps, not monospace
 
 
+def test_streaming_assistant_carries_thinking_and_allows_empty_body() -> None:
+    # Just started: no tokens yet, only thinking is streaming.
+    empty = vm.streaming_assistant("", thinking="planning the approach")
+    assert empty.kind == "assistant_streaming"
+    assert empty.body == ""
+    assert empty.thinking == "planning the approach"
+
+    # Mid-stream: both body and thinking accumulate, each hard-capped.
+    big = vm.streaming_assistant("z" * 5000, thinking="w" * 5000)
+    assert len(big.body) == vm.MAX_BODY_CHARS
+    assert len(big.thinking) == vm.MAX_BODY_CHARS
+    # A final assistant_message has no thinking field by default.
+    assert vm.assistant_message("done").thinking == ""
+
+
 def test_proposal_card_summarizes_operations() -> None:
     item = vm.proposal_card(
         {"operation_count": 14, "permission_mode": "ProjectChange",

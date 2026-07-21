@@ -274,9 +274,8 @@ class RuntimePanel(QtWidgets.QWidget):
         self._refresh_context_bar()
 
     def _maybe_render_output(self, snapshot, shown) -> None:
-        # Append the run's final output as one assistant card, exactly once
-        # per run. Output can grow while the run streams, so we only render
-        # once the run is terminal — matching legacy's "final response" view.
+        # Stream the run's text + thinking into the trailing assistant card,
+        # then settle it into a final assistant_message on termination.
         run_id = None
         is_terminal = False
         if type(shown) is dict:
@@ -284,12 +283,27 @@ class RuntimePanel(QtWidgets.QWidget):
             status = shown.get("status")
             is_terminal = (
                 type(status) is str and status in _TERMINAL_RUN_STATES)
+
+        output = snapshot.get("output") if hasattr(snapshot, "get") else None
+        output = output if type(output) is str else ""
+        thinking = snapshot.get("thinking") if hasattr(snapshot, "get") else None
+        thinking = thinking if type(thinking) is str else ""
+
+        if not is_terminal and type(run_id) is str:
+            # Run in flight: update the streaming card in place (creates it
+            # on the first token so the user sees the reply forming).
+            if output or thinking:
+                self.conversation.update_streaming(output, thinking=thinking)
+            return
+
         if (not is_terminal or type(run_id) is not str
                 or run_id == self._shown_output_run_id):
             return
-        output = snapshot.get("output") if hasattr(snapshot, "get") else None
-        if type(output) is str and output:
-            self.conversation.append_item(view_models.assistant_message(output))
+        # Run terminated: swap the streaming card for the final reply exactly
+        # once. If there was no streamed output, still emit a final card so the
+        # user sees the run produced something (or an explicit empty marker).
+        self.conversation.replace_last_assistant(
+            view_models.assistant_message(output))
         self._shown_output_run_id = run_id
 
     def _on_changesets(self, changesets) -> None:
