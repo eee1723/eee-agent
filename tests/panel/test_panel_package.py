@@ -23,11 +23,18 @@ def test_pypanel_declares_one_menu_visible_runtime_interface() -> None:
 
 
 def test_runtime_panel_keeps_client_only_import_boundary() -> None:
-    path = ROOT / "houdini_side" / "runtime_panel.py"
-    source = path.read_text(encoding="utf-8")
-    tree = ast.parse(source)
+    paths = [
+        ROOT / "houdini_side" / "runtime_panel" / "legacy.py",
+        ROOT / "houdini_side" / "runtime_panel" / "client.py",
+    ]
+    source = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+    nodes = [
+        node
+        for path in paths
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+    ]
     imported: set[str] = set()
-    for node in ast.walk(tree):
+    for node in nodes:
         if isinstance(node, ast.Import):
             imported.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
@@ -84,7 +91,7 @@ def test_runtime_panel_keeps_client_only_import_boundary() -> None:
 
 
 def test_runtime_panel_bootstraps_snapshot_before_live_subscription() -> None:
-    source = (ROOT / "houdini_side" / "runtime_panel.py").read_text(
+    source = (ROOT / "houdini_side" / "runtime_panel" / "client.py").read_text(
         encoding="utf-8"
     )
     tree = ast.parse(source)
