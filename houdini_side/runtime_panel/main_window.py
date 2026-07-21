@@ -51,6 +51,9 @@ class RuntimePanel(QtWidgets.QWidget):
         self._workspace_id: str | None = None
         self._active_run_id: str | None = None
         self._active_run_status = ""
+        # Run output is append-only in the card flow (unlike legacy's single
+        # text box), so render each run's final output exactly once.
+        self._shown_output_run_id: str | None = None
         self._current_session_id = ""
         self._expired_notice_id = None
         self._pending_changeset = None
@@ -211,6 +214,7 @@ class RuntimePanel(QtWidgets.QWidget):
                 # into the inspector; reset and say so in the flow.
                 self._artifacts = ()
                 self._visions = ()
+                self._shown_output_run_id = None
                 self.inspector.render_artifacts(())
                 self.inspector.render_visions(())
                 self.conversation.append_item(view_models.notice_card(
@@ -228,6 +232,7 @@ class RuntimePanel(QtWidgets.QWidget):
         if not snapshot:
             self._active_run_id = None
             self._active_run_status = ""
+            self._shown_output_run_id = None
             self._run_state = "idle"
             self.conversation.set_composer_state("idle")
             self.inspector.set_run_snapshot(None)
@@ -255,7 +260,27 @@ class RuntimePanel(QtWidgets.QWidget):
             self._run_state = "idle"
         self.inspector.set_run_snapshot(
             shown if type(shown) is dict else None)
+        self._maybe_render_output(snapshot, shown)
         self._refresh_context_bar()
+
+    def _maybe_render_output(self, snapshot, shown) -> None:
+        # Append the run's final output as one assistant card, exactly once
+        # per run. Output can grow while the run streams, so we only render
+        # once the run is terminal — matching legacy's "final response" view.
+        run_id = None
+        is_terminal = False
+        if type(shown) is dict:
+            run_id = shown.get("run_id")
+            status = shown.get("status")
+            is_terminal = (
+                type(status) is str and status in _TERMINAL_RUN_STATES)
+        if (not is_terminal or type(run_id) is not str
+                or run_id == self._shown_output_run_id):
+            return
+        output = snapshot.get("output") if hasattr(snapshot, "get") else None
+        if type(output) is str and output:
+            self.conversation.append_item(view_models.assistant_message(output))
+        self._shown_output_run_id = run_id
 
     def _on_changesets(self, changesets) -> None:
         for summary in changesets:

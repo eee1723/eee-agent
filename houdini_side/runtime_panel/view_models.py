@@ -20,7 +20,7 @@ TONES = frozenset({"normal", "ok", "warn", "error", "gate"})
 
 @dataclass(frozen=True, slots=True)
 class MessageItem:
-    kind: str        # user|proposal|approval|validation|vision|artifact|notice|error
+    kind: str        # user|assistant|proposal|approval|vision|artifact|notice|error
     title: str
     body: str
     tone: str        # one of TONES
@@ -50,6 +50,16 @@ def _digest_prefix(value: object) -> str:
 def user_message(text: str) -> MessageItem:
     return MessageItem(
         kind="user", title="You",
+        body=_bounded(text, MAX_BODY_CHARS), tone="normal",
+    )
+
+
+def assistant_message(text: str) -> MessageItem:
+    # Renders the run's final output (RuntimePanelState.snapshot()["output"]).
+    # mono=False so long prose wraps like the user's message instead of
+    # scrolling sideways.
+    return MessageItem(
+        kind="assistant", title="Assistant",
         body=_bounded(text, MAX_BODY_CHARS), tone="normal",
     )
 

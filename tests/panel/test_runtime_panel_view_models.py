@@ -12,6 +12,15 @@ def test_user_message_is_bounded() -> None:
     assert item.tone == "normal"
 
 
+def test_assistant_message_is_bounded_and_wraps() -> None:
+    item = vm.assistant_message("y" * 5000)
+    assert item.kind == "assistant"
+    assert item.title == "Assistant"
+    assert len(item.body) == vm.MAX_BODY_CHARS
+    assert item.tone == "normal"
+    assert item.mono is False  # prose wraps, not monospace
+
+
 def test_proposal_card_summarizes_operations() -> None:
     item = vm.proposal_card(
         {"operation_count": 14, "permission_mode": "ProjectChange",
