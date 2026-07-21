@@ -165,3 +165,328 @@ def context_status(
         bridge=bridge,
         run_state=run_state,
     )
+
+
+# --------------------------------------------------------------------------
+# Stage A: structured Run/Workspace/Artifacts view models (Qt-free)
+# --------------------------------------------------------------------------
+# These dataclasses carry everything the new inspector widgets need to render
+# without re-parsing the raw snapshot. The inspector.py Qt layer just reads
+# these fields; all bounding/normalization lives here so it is unit-testable.
+
+MAX_ACTIVITY_STEPS = 50
+MAX_DEPENDENCIES = 128
+MAX_PARM_VALUE_LEN = 64
+
+_RUN_STATUS_TONES = {
+    "Completed": "ok",
+    "Cancelled": "warn",
+    "Failed": "error",
+    "StopRequested": "warn",
+    "Stopping": "warn",
+    "Retrying": "warn",
+    "Created": "normal",
+    "PreparingContext": "normal",
+    "Planning": "normal",
+    "Finalizing": "normal",
+}
+
+_RECEIPT_TONES = {
+    "Applied": "ok",
+    "AlreadyApplied": "ok",
+    "RolledBack": "error",
+    "Partial": "warn",
+    "CriticalRecovery": "warn",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ActivityStep:
+    """One tool step in the activity list."""
+    kind: str   # "tool.started" | "tool.completed"
+    name: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class ApplyOutcomeView:
+    """A single receipt outcome rendered in the Run tab."""
+    change_id: str
+    receipt_status: str
+    tone: str
+    error_code: str
+    error_message: str
+    applied_op_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentView:
+    """The runtime environment block (extracted from model_snapshot_json)."""
+    eee_agent: str
+    python: str
+    platform: str
+    houdini_build: str
+    kb_schema_version: str
+    knowledge_status: str
+
+
+@dataclass(frozen=True, slots=True)
+class RunView:
+    """Structured Run-tab data; replaces the old key:value text dump."""
+    run_id: str
+    run_id_short: str
+    status: str
+    status_tone: str
+    started_at: str
+    finished_at: str
+    duration_seconds: float | None
+    environment: EnvironmentView | None
+    dependencies: tuple[tuple[str, str], ...]   # (package, version) pairs
+    activity: tuple[ActivityStep, ...]
+    apply_outcome: ApplyOutcomeView | None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceRow:
+    key: str
+    value: str
+    tone: str
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactRow:
+    state: str
+    tone: str
+    relative_path: str
+    size_text: str
+
+
+@dataclass(frozen=True, slots=True)
+class VisionRow:
+    status: str
+    accepted: bool
+    tone: str
+    report_summary: str
+
+
+def _short_run_id(run_id: str) -> str:
+    # run_0123456789abcdef... -> run_01234567
+    if len(run_id) >= 12:
+        return run_id[:12]
+    return run_id
+
+
+def _parse_iso_duration(started: str, finished: str) -> float | None:
+    """Return the run duration in seconds, or None if not computable."""
+    from datetime import datetime
+    try:
+        start = datetime.fromisoformat(started)
+        end = datetime.fromisoformat(finished)
+    except (ValueError, TypeError):
+        return None
+    if start.tzinfo is None or end.tzinfo is None:
+        return None
+    delta = (end - start).total_seconds()
+    return delta if delta >= 0 else None
+
+
+def _environment_from_snapshot(model_snapshot: object) -> EnvironmentView | None:
+    """Extract a bounded environment view from the run's model_snapshot_json."""
+    if type(model_snapshot) is not dict:
+        return None
+
+    def _str_field(key: str) -> str:
+        value = model_snapshot.get(key)
+        return str(value) if value is not None else "-"
+
+    return EnvironmentView(
+        eee_agent=_str_field("eee_agent"),
+        python=_str_field("python"),
+        platform=_str_field("platform"),
+        houdini_build=_str_field("houdini_build"),
+        kb_schema_version=_str_field("kb_schema_version"),
+        knowledge_status=_str_field("knowledge_status"),
+    )
+
+
+def _dependencies_from_snapshot(model_snapshot: object) -> tuple[tuple[str, str], ...]:
+    """Extract a bounded (package, version) list from model_snapshot_json."""
+    if type(model_snapshot) is not dict:
+        return ()
+    deps = model_snapshot.get("dependencies")
+    if type(deps) is not dict:
+        return ()
+    pairs: list[tuple[str, str]] = []
+    for name in sorted(deps):
+        version = deps[name]
+        if type(version) is not str:
+            continue
+        pairs.append((str(name), version))
+        if len(pairs) >= MAX_DEPENDENCIES:
+            break
+    return tuple(pairs)
+
+
+def _activity_steps(activity: object) -> tuple[ActivityStep, ...]:
+    """Normalize a panel-state activity list into ActivityStep records."""
+    if not isinstance(activity, (list, tuple)):
+        return ()
+    steps: list[ActivityStep] = []
+    for item in activity:
+        if type(item) is not dict:
+            continue
+        kind = item.get("type")
+        name = item.get("name")
+        detail = item.get("detail") or ""
+        if type(kind) is not str or type(name) is not str:
+            continue
+        steps.append(ActivityStep(
+            kind=kind,
+            name=_bounded(name, MAX_TITLE_CHARS),
+            detail=_bounded(detail, MAX_BODY_CHARS),
+        ))
+        if len(steps) >= MAX_ACTIVITY_STEPS:
+            break
+    return tuple(steps)
+
+
+def _apply_outcome_view(outcomes: object) -> ApplyOutcomeView | None:
+    """Pick the latest apply outcome (if any) and render it as a view."""
+    if not isinstance(outcomes, (list, tuple)):
+        return None
+    if not outcomes:
+        return None
+    latest = outcomes[-1]
+    if type(latest) is not dict:
+        return None
+    change_id = latest.get("change_id")
+    if type(change_id) is not str or not change_id:
+        return None
+    receipt_status = latest.get("receipt_status")
+    receipt_text = receipt_status if type(receipt_status) is str else "?"
+    error_code = latest.get("error_code")
+    error_message = latest.get("error_message")
+    applied = latest.get("applied_op_ids")
+    applied_count = len(applied) if isinstance(applied, (list, tuple)) else 0
+    return ApplyOutcomeView(
+        change_id=change_id,
+        receipt_status=receipt_text,
+        tone=_RECEIPT_TONES.get(receipt_text, "warn"),
+        error_code=_bounded(error_code, MAX_TITLE_CHARS) if type(error_code) is str else "",
+        error_message=_bounded(error_message, MAX_BODY_CHARS) if type(error_message) is str else "",
+        applied_op_count=applied_count,
+    )
+
+
+def run_view(
+    snapshot: object,
+    activity: object = (),
+    apply_outcomes: object = (),
+) -> RunView | None:
+    """Build a structured RunView from a run snapshot dict.
+
+    Returns None when the snapshot is missing/invalid so the inspector can
+    show its empty state. Never raises: defensive .get with type checks so a
+    malformed snapshot cannot crash the right pane.
+    """
+    if type(snapshot) is not dict:
+        return None
+    run_id = snapshot.get("run_id")
+    if type(run_id) is not str or not run_id:
+        return None
+    status = snapshot.get("status")
+    status_text = status if type(status) is str else "-"
+    model_snapshot = snapshot.get("model_snapshot_json")
+    started = snapshot.get("started_at")
+    finished = snapshot.get("finished_at")
+    started_text = started if type(started) is str else "-"
+    finished_text = finished if type(finished) is str else "-"
+    duration = None
+    if type(started) is str and type(finished) is str:
+        duration = _parse_iso_duration(started, finished)
+    return RunView(
+        run_id=run_id,
+        run_id_short=_short_run_id(run_id),
+        status=status_text,
+        status_tone=_RUN_STATUS_TONES.get(status_text, "normal"),
+        started_at=started_text,
+        finished_at=finished_text,
+        duration_seconds=duration,
+        environment=_environment_from_snapshot(model_snapshot),
+        dependencies=_dependencies_from_snapshot(model_snapshot),
+        activity=_activity_steps(activity),
+        apply_outcome=_apply_outcome_view(apply_outcomes),
+    )
+
+
+def workspace_rows(facts: object) -> tuple[WorkspaceRow, ...]:
+    """Render a workspace facts dict as bounded (key, value, tone) rows."""
+    if type(facts) is not dict:
+        return ()
+    rows: list[WorkspaceRow] = []
+    for key in sorted(facts):
+        value = facts[key]
+        value_text = str(value) if value is not None else "-"
+        tone = "normal"
+        if type(value) is str:
+            value_lower = value.lower()
+            if value_lower in {"healthy", "ready", "available", "applied"}:
+                tone = "ok"
+            elif value_lower in {"stale", "expired", "missing"}:
+                tone = "warn"
+            elif value_lower in {"failed", "error", "unavailable"}:
+                tone = "error"
+        rows.append(WorkspaceRow(
+            key=_bounded(key, MAX_TITLE_CHARS),
+            value=_bounded(value_text, MAX_BODY_CHARS),
+            tone=tone,
+        ))
+    return tuple(rows)
+
+
+def artifact_rows(artifacts: object) -> tuple[ArtifactRow, ...]:
+    """Render an artifact summaries tuple as bounded ArtifactRow records."""
+    if not isinstance(artifacts, (list, tuple)):
+        return ()
+    rows: list[ArtifactRow] = []
+    for summary in artifacts:
+        if type(summary) is not dict:
+            continue
+        state = summary.get("state")
+        state_text = state if type(state) is str else "unknown"
+        size = summary.get("size_bytes")
+        size_text = f"{size} bytes" if type(size) is int else "size unknown"
+        path = summary.get("relative_path")
+        path_text = path if type(path) is str else "artifact"
+        tone = "ok" if state_text == "available" else (
+            "error" if state_text in {"failed", "missing"} else "normal")
+        rows.append(ArtifactRow(
+            state=state_text,
+            tone=tone,
+            relative_path=_bounded(path_text, MAX_TITLE_CHARS),
+            size_text=size_text,
+        ))
+    return tuple(rows)
+
+
+def vision_rows(visions: object) -> tuple[VisionRow, ...]:
+    """Render vision evaluation summaries as bounded VisionRow records."""
+    if not isinstance(visions, (list, tuple)):
+        return ()
+    rows: list[VisionRow] = []
+    for summary in visions:
+        if type(summary) is not dict:
+            continue
+        status = summary.get("status")
+        status_text = status if type(status) is str else "unknown"
+        accepted = summary.get("accepted") is True
+        tone = "ok" if status_text == "completed" and accepted else "warn"
+        report = summary.get("report_summary")
+        report_text = report if type(report) is str else ""
+        rows.append(VisionRow(
+            status=status_text,
+            accepted=accepted,
+            tone=tone,
+            report_summary=_bounded(report_text, MAX_BODY_CHARS),
+        ))
+    return tuple(rows)

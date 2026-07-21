@@ -95,3 +95,156 @@ def test_context_status_aggregates() -> None:
     assert status.runtime == "online"
     assert status.workspace == "no workspace"
     assert status.run_state == "Planning"
+
+
+# --------------------------------------------------------------------------
+# Stage A: structured Run/Workspace/Artifacts view models (Qt-free)
+# --------------------------------------------------------------------------
+
+
+def _full_snapshot(**overrides):
+    """A snapshot mirroring the reported run_441a83009b shape."""
+    snap = {
+        "run_id": "run_0123456789abcdef0123456789abcdef",
+        "status": "Completed",
+        "started_at": "2026-07-21T13:33:52.336248+00:00",
+        "finished_at": "2026-07-21T13:34:23.760368+00:00",
+        "model_snapshot_json": {
+            "eee_agent": "0.1.0",
+            "python": "3.11.7",
+            "platform": "Windows-10-10.0.26200-SP0",
+            "houdini_build": None,
+            "kb_schema_version": None,
+            "knowledge_status": "missing",
+            "dependencies": {"langchain": "1.3.13", "openai": "2.45.0"},
+        },
+    }
+    snap.update(overrides)
+    return snap
+
+
+def test_run_view_returns_none_for_missing_or_invalid_snapshot() -> None:
+    assert vm.run_view(None) is None
+    assert vm.run_view("not a dict") is None
+    assert vm.run_view({}) is None
+    assert vm.run_view({"status": "Completed"}) is None  # no run_id
+
+
+def test_run_view_does_not_stringify_model_snapshot_dict() -> None:
+    # The reported bug: model: {'dependencies': {...}} was the dict str()'d
+    # by the legacy f-string. The structured view must NOT contain any dict
+    # repr; environment fields are individual strings.
+    rv = vm.run_view(_full_snapshot())
+    assert rv is not None
+    assert rv.environment is not None
+    assert rv.environment.eee_agent == "0.1.0"
+    assert rv.environment.python == "3.11.7"
+    assert rv.environment.houdini_build == "-"  # None -> "-"
+    assert rv.environment.knowledge_status == "missing"
+    assert rv.dependencies == (("langchain", "1.3.13"), ("openai", "2.45.0"))
+
+
+def test_run_view_short_id_is_bounded() -> None:
+    rv = vm.run_view(_full_snapshot())
+    assert rv.run_id_short == "run_01234567"
+    assert len(rv.run_id_short) <= 12
+
+
+def test_run_view_maps_status_to_tone() -> None:
+    for status, tone in [
+        ("Completed", "ok"),
+        ("Failed", "error"),
+        ("Cancelled", "warn"),
+        ("Planning", "normal"),
+        ("Stopping", "warn"),
+    ]:
+        rv = vm.run_view(_full_snapshot(status=status))
+        assert rv.status_tone == tone, (status, rv.status_tone)
+
+
+def test_run_view_duration_is_computed_in_seconds() -> None:
+    rv = vm.run_view(_full_snapshot())
+    assert rv.duration_seconds is not None
+    assert abs(rv.duration_seconds - 31.42) < 0.1
+
+
+def test_run_view_duration_none_when_timestamps_missing() -> None:
+    rv = vm.run_view(_full_snapshot(started_at=None, finished_at=None))
+    assert rv.duration_seconds is None
+
+
+def test_run_view_captures_activity_steps_in_order() -> None:
+    activity = [
+        {"type": "tool.started", "name": "scene_status", "detail": ""},
+        {"type": "tool.completed", "name": "scene_status", "detail": "healthy"},
+        {"type": "tool.started", "name": "propose_modeling", "detail": ""},
+    ]
+    rv = vm.run_view(_full_snapshot(), activity=activity)
+    assert len(rv.activity) == 3
+    assert rv.activity[0].name == "scene_status"
+    assert rv.activity[1].kind == "tool.completed"
+    assert rv.activity[1].detail == "healthy"
+    assert rv.activity[2].name == "propose_modeling"
+
+
+def test_run_view_picks_latest_apply_outcome_and_maps_tone() -> None:
+    outcomes = [
+        {"change_id": "chg_a", "receipt_status": "Applied",
+         "applied_op_ids": ["op1"], "scene_may_have_changed": False},
+        {"change_id": "chg_b", "receipt_status": "RolledBack",
+         "applied_op_ids": [],
+         "error_code": "houdini.operation_failed",
+         "error_message": "Cannot create node 'copytopoints::2.0'",
+         "scene_may_have_changed": False},
+    ]
+    rv = vm.run_view(_full_snapshot(), apply_outcomes=outcomes)
+    assert rv.apply_outcome is not None
+    # Latest only.
+    assert rv.apply_outcome.change_id == "chg_b"
+    assert rv.apply_outcome.tone == "error"
+    assert rv.apply_outcome.error_code == "houdini.operation_failed"
+    assert rv.apply_outcome.applied_op_count == 0
+
+
+def test_run_view_no_apply_outcome_when_list_empty() -> None:
+    rv = vm.run_view(_full_snapshot(), apply_outcomes=[])
+    assert rv.apply_outcome is None
+
+
+def test_workspace_rows_map_value_tones() -> None:
+    rows = vm.workspace_rows({
+        "status": "healthy",
+        "state": "stale",
+        "workspace_id": "ws_12345678",
+        "error": "failed",
+    })
+    tones = {r.key: r.tone for r in rows}
+    assert tones["status"] == "ok"
+    assert tones["state"] == "warn"
+    assert tones["error"] == "error"
+    assert tones["workspace_id"] == "normal"
+
+
+def test_workspace_rows_handle_non_dict() -> None:
+    assert vm.workspace_rows(None) == ()
+    assert vm.workspace_rows("junk") == ()
+
+
+def test_artifact_rows_map_state_to_tone() -> None:
+    rows = vm.artifact_rows([
+        {"state": "available", "relative_path": "a.png", "size_bytes": 100},
+        {"state": "failed", "relative_path": "b.png", "size_bytes": 200},
+        {"state": "missing", "relative_path": "c.png"},
+    ])
+    assert [r.tone for r in rows] == ["ok", "error", "error"]
+    assert rows[2].size_text == "size unknown"
+
+
+def test_vision_rows_decide_tone_by_status_and_acceptance() -> None:
+    rows = vm.vision_rows([
+        {"status": "completed", "accepted": True, "report_summary": "ok"},
+        {"status": "completed", "accepted": False, "report_summary": "no"},
+        {"status": "failed", "accepted": False, "report_summary": None},
+    ])
+    assert [r.tone for r in rows] == ["ok", "warn", "warn"]
+    assert rows[2].report_summary == ""

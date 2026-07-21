@@ -128,6 +128,29 @@ def test_inspector_contract() -> None:
     assert "def render_visions(self, summaries)" in source
 
 
+def test_inspector_uses_structured_widgets_not_plain_text() -> None:
+    # Stage A: the inspector must no longer be a QPlainTextEdit key:value dump.
+    # It builds QFrame/QTableWidget/QFormLayout structures from view_models.
+    source = _source("inspector.py")
+    # The legacy helper and its plain-text view are gone.
+    assert "_text_view" not in source
+    assert "_dump" not in source
+    assert "setPlainText" not in source
+    # The new renderer builds from view_models.run_view (Qt-free, unit-tested).
+    assert "from houdini_side.runtime_panel import theme, view_models as vm" in source
+    assert "vm.run_view(" in source
+    assert "vm.workspace_rows(" in source
+    assert "vm.artifact_rows(" in source
+    assert "vm.vision_rows(" in source
+    # A structured Run-tab widget class replaces the key:value text view.
+    assert "class _RunViewWidget" in source
+    # Dependencies use a real table, not a stringified dict.
+    assert "QTableWidget" in source
+    # Status badge tone is derived from theme tokens, never hex literals.
+    assert "STATUS_OK" in source or "theme.STATUS_OK" in source
+    assert "STATUS_ERROR" in source or "theme.STATUS_ERROR" in source
+
+
 def test_main_window_contract() -> None:
     source = _source("main_window.py")
     assert "class RuntimePanel(QtWidgets.QWidget)" in source
