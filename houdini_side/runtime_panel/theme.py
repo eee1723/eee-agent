@@ -144,11 +144,23 @@ def register_fonts() -> None:
 
 
 def ui_font_family() -> str:
-    return f"{UI_FONT}, {UI_FONT_FALLBACK}"
+    """Primary UI font family name (Qt does not honor CSS fallback lists).
+
+    ``register_fonts()`` makes the SideFX fonts available inside Houdini.
+    Outside Houdini, or if registration fails, callers should pass the
+    fallback via ``QFont.insertSubstitution(UI_FONT, [UI_FONT_FALLBACK])``
+    or accept Qt's automatic matching.
+    """
+    return UI_FONT
 
 
 def mono_font_family() -> str:
-    return f"{MONO_FONT}, {MONO_FONT_FALLBACK}"
+    """Primary monospace font family name (no CSS-style fallback list).
+
+    See ``ui_font_family()`` — use ``MONO_FONT_FALLBACK`` with
+    ``QFont.insertSubstitution`` when the primary family is unavailable.
+    """
+    return MONO_FONT
 
 
 def icon(name: str):

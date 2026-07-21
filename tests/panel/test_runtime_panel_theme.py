@@ -36,7 +36,7 @@ def test_qss_contains_tokens_and_no_unresolved_placeholders() -> None:
     assert "#fdba00" in qss
     assert "QTabBar::tab" in qss
     assert "QPushButton" in qss
-    assert not re.search(r"@[A-Za-z]+@", qss), "unresolved @Token@ placeholder"
+    assert not re.search(r"\{[a-z_0-9]+\}", qss), "unresolved {token} placeholder"
 
 
 def test_all_tokens_are_hex_colors() -> None:
