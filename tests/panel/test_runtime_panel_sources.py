@@ -65,3 +65,11 @@ def test_no_hex_colors_outside_theme() -> None:
             continue
         for match in re.finditer(r"#[0-9a-fA-F]{6}\b", path.read_text("utf-8")):
             raise AssertionError(f"hex color {match.group()} in {path.name}")
+
+
+def test_session_sidebar_contract() -> None:
+    source = _source("session_sidebar.py")
+    assert "sessionChosen = QtCore.Signal(str)" in source
+    assert "newSessionRequested = QtCore.Signal()" in source
+    assert "def set_sessions(self, sessions" in source
+    assert "SessionTitleDialog" in source  # session naming reuses proven dialog
