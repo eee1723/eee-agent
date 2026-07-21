@@ -73,3 +73,15 @@ def test_session_sidebar_contract() -> None:
     assert "newSessionRequested = QtCore.Signal()" in source
     assert "def set_sessions(self, sessions" in source
     assert "SessionTitleDialog" in source  # session naming reuses proven dialog
+
+
+def test_conversation_contract() -> None:
+    source = _source("conversation.py")
+    assert "sendRequested = QtCore.Signal(str)" in source
+    assert "stopRequested = QtCore.Signal()" in source
+    assert "def append_item(self, item: MessageItem)" in source
+    assert "def set_composer_state(self, state: str)" in source
+    assert "RunRequestEdit" in source          # IME-safe composer input
+    assert "MAX_MESSAGES" in source            # bounded flow enforced
+    assert "_TONE_COLORS" in source            # tones come from theme tokens
+    assert "returnPressed.connect" not in source  # send only from the button
