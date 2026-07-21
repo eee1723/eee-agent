@@ -871,6 +871,27 @@ class RuntimeObserverClient(QtCore.QObject):
             purpose,
         )
 
+    def _apply_renamed_session(self, payload: object) -> None:
+        # Update the cached Session title from a session.renamed event so the
+        # sidebar reflects an auto-generated title without an extra list call.
+        if type(payload) is not dict:
+            return
+        sid = payload.get("session_id")
+        title = payload.get("title")
+        if type(sid) is not str or type(title) is not str or not title:
+            return
+        cached = self._sessions.get(sid)
+        if type(cached) is dict:
+            cached["title"] = title
+        if sid == self._current_session_id:
+            self._current_session_title = title
+            self.sessionChanged.emit(
+                sid, title, self._cursors.last_seq(sid))
+        self.sessionsChanged.emit(
+            tuple(self._sessions.values()),
+            self._current_session_id or "",
+        )
+
     def _schedule_changeset_refresh(self) -> None:
         if not self._changeset_timer.isActive():
             self._changeset_timer.start(80)
@@ -910,6 +931,10 @@ class RuntimeObserverClient(QtCore.QObject):
                 self.runtimeSnapshotChanged.emit(
                     self._runtime_state.snapshot()
                 )
+            # A renamed Session (e.g. auto-titled after the first run) updates
+            # the cached title and the sidebar in place — no extra round-trip.
+            if message.get("type") == "session.renamed":
+                self._apply_renamed_session(message.get("payload"))
             if changeset_refresh_required(message):
                 self._schedule_changeset_refresh()
             if artifact_refresh_required(message):

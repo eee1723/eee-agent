@@ -74,3 +74,14 @@ def test_client_auto_creates_session_when_none_active() -> None:
     # A failed auto-create clears the stash so it isn't silently swallowed.
     assert 'purpose == "session.create"' in source
     assert "self._pending_run_input = None" in source
+
+
+def test_client_refreshes_sidebar_on_session_renamed() -> None:
+    # An auto-titled Session emits session.renamed; the client must update the
+    # cached title and re-emit sessionsChanged so the sidebar refreshes in
+    # place (no extra session.list round-trip).
+    source = (PKG / "client.py").read_text(encoding="utf-8")
+    assert '"session.renamed"' in source
+    assert "def _apply_renamed_session" in source
+    assert 'cached["title"] = title' in source
+    assert "self.sessionsChanged.emit" in source
