@@ -25,11 +25,12 @@ def test_proposal_card_summarizes_operations() -> None:
 
 
 def test_vision_card_maps_status_to_tone() -> None:
-    ok = vm.vision_card({"vision_status": "completed", "decision": "accepted",
+    # Summaries follow parse_vision_event: status / accepted / report_summary.
+    ok = vm.vision_card({"status": "completed", "accepted": True,
                          "report_summary": "matches brief"})
     assert ok.tone == "ok"
-    failed = vm.vision_card({"vision_status": "unavailable",
-                             "decision": "unavailable",
+    failed = vm.vision_card({"status": "failed",
+                             "accepted": False,
                              "report_summary": None})
     assert failed.tone == "warn"
     assert failed.body  # bounded fallback text, never empty

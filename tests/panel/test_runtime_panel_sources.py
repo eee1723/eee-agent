@@ -108,3 +108,25 @@ def test_inspector_contract() -> None:
     assert "def set_validation_report(self, report)" in source
     assert "def render_artifacts(self, summaries)" in source
     assert "def render_visions(self, summaries)" in source
+
+
+def test_main_window_contract() -> None:
+    source = _source("main_window.py")
+    assert "class RuntimePanel(QtWidgets.QWidget)" in source
+    assert "QSplitter" in source
+    assert "_WIDE_MIN_WIDTH = 900" in source
+    assert "_MEDIUM_MIN_WIDTH = 700" in source
+    assert "def resizeEvent(self, event)" in source
+    assert "ensure_runtime" in source           # backend auto-start
+    assert "backend_launcher.terminate" in source  # who spawns, reaps
+    assert "context_bar.set_status" in source
+    assert "conversation.append_item" in source
+    assert "approval_drawer.show_changeset" in source
+    assert 'def create_panel()' not in source  # factory stays in __init__
+
+
+def test_package_init_exposes_create_panel() -> None:
+    source = _source("__init__.py")
+    assert "from houdini_side.runtime_panel.main_window import RuntimePanel" in source
+    assert "def create_panel()" in source
+    assert "theme.register_fonts()" in source

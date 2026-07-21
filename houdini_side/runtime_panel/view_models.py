@@ -93,10 +93,12 @@ def validation_card(report: Mapping[str, object]) -> MessageItem:
 
 
 def vision_card(summary: Mapping[str, object]) -> MessageItem:
-    status = _bounded(summary.get("vision_status"), 40) or "unknown"
-    decision = _bounded(summary.get("decision"), 40) or "unknown"
+    # Keys follow parse_vision_event: status / accepted / report_summary.
+    status = _bounded(summary.get("status"), 40) or "unknown"
+    accepted = summary.get("accepted") is True
+    decision = "accepted" if accepted else "rejected"
     text = _bounded(summary.get("report_summary"), MAX_BODY_CHARS)
-    tone = "ok" if status == "completed" and decision == "accepted" else "warn"
+    tone = "ok" if status == "completed" and accepted else "warn"
     body = f"Status: {status}\nDecision: {decision}"
     if text:
         body += f"\n{text}"
