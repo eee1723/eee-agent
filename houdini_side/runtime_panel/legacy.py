@@ -49,6 +49,10 @@ from houdini_side.secure_bridge_host import (  # noqa: E402
 )
 
 from houdini_side.runtime_panel.client import (  # noqa: E402
+    AMBER,
+    CYAN,
+    DIM,
+    RED,
     RunRequestEdit,
     RuntimeObserverClient,
     SelectionQueryWorker,

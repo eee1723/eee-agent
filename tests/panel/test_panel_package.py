@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+import builtins
+import symtable
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -121,6 +123,32 @@ def test_runtime_panel_bootstraps_snapshot_before_live_subscription() -> None:
     bootstrap_index = handler_source.index("session.bootstrap_snapshot")
     subscribe_index = handler_source.index('"session.subscribe"', bootstrap_index)
     assert subscribe_index > bootstrap_index
+
+
+def test_legacy_panel_defines_every_module_global_it_references() -> None:
+    source = (ROOT / "houdini_side" / "runtime_panel" / "legacy.py").read_text(
+        encoding="utf-8"
+    )
+    table = symtable.symtable(source, "legacy.py", "exec")
+    defined = {symbol.get_name() for symbol in table.get_symbols()}
+    undefined: set[str] = set()
+
+    def scan(scope: symtable.SymbolTable) -> None:
+        for symbol in scope.get_symbols():
+            if (
+                symbol.is_referenced()
+                and symbol.is_global()
+                and not symbol.is_declared_global()
+            ):
+                name = symbol.get_name()
+                if name not in defined and not hasattr(builtins, name):
+                    undefined.add(name)
+        for child in scope.get_children():
+            scan(child)
+
+    for child in table.get_children():
+        scan(child)
+    assert not undefined, f"undefined module globals: {sorted(undefined)}"
 
 
 def test_legacy_chat_panel_is_not_a_formal_runtime_entrypoint() -> None:
