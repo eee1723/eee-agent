@@ -82,6 +82,46 @@ def _tool_completed_event(message: ToolMessage) -> RunnerEvent:
     )
 
 
+# D-1: maximum number of todo items we are willing to forward to the UI.
+# deepagents does not bound TodoListMiddleware; a misbehaving model could
+# otherwise flood the event stream. 64 is generous for any realistic plan.
+_MAX_TODOS = 64
+_MAX_TODO_CONTENT_CHARS = 512
+_VALID_TODO_STATUSES = frozenset({"pending", "in_progress", "completed"})
+
+
+def _normalize_todos(value: object) -> list[dict[str, object]] | None:
+    """Validate and bound a deepagents todos list.
+
+    Accepts the list shape emitted by ``TodoListMiddleware`` via
+    ``stream_mode='updates'``: ``[{content: str, status: str}, ...]``.
+    Returns a clean list of dicts (or None when the value is missing/invalid)
+    so the caller can skip emitting the event entirely on no-op updates.
+    """
+    if not isinstance(value, list):
+        return None
+    if not value:
+        # An empty list is a valid 'cleared todos' signal; forward it.
+        return []
+    cleaned: list[dict[str, object]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        status = item.get("status")
+        if not isinstance(content, str) or not content:
+            continue
+        if not isinstance(status, str) or status not in _VALID_TODO_STATUSES:
+            continue
+        cleaned.append({
+            "content": content[:_MAX_TODO_CONTENT_CHARS],
+            "status": status,
+        })
+        if len(cleaned) >= _MAX_TODOS:
+            break
+    return cleaned
+
+
 class AgentRunner:
     """Provider-neutral streaming adapter over a compiled Deep Agents graph.
 
@@ -206,6 +246,18 @@ class AgentRunner:
                             for msg in messages:
                                 if isinstance(msg, AIMessage):
                                     final_message = msg
+                        # D-1: deepagents' TodoListMiddleware publishes the
+                        # current todo list on the 'todos' state key whenever
+                        # write_todos runs. Surface it as a bounded
+                        # todos.updated event so the UI can render progress
+                        # and the agent's plan is visible to the user.
+                        todos_payload = _normalize_todos(upd.get("todos"))
+                        if todos_payload is not None:
+                            yield RunnerEvent(
+                                event_type="todos.updated",
+                                payload={"todos": todos_payload},
+                                retention_class=RetentionClass.OPERATIONAL,
+                            )
         finally:
             # Detect an in-flight exception BEFORE attempting cleanup: a cleanup
             # failure must propagate only on the normal path (so it is not hidden

@@ -707,3 +707,133 @@ def test_agent_runner_builds_only_secure_tools(monkeypatch) -> None:
     assert names == {*EXPECTED_READ_ONLY, "propose_modeling"}
     assert not names & {"create_node", "set_parms", "scene_reset", "save_hip"}
     assert captured["context_schema"].__name__ == "RuntimeToolContext"
+
+
+# --------------------------------------------------------------------------
+# D-1: deepagents todos surface as todos.updated events
+# --------------------------------------------------------------------------
+
+
+def test_d1_normalize_todos_returns_none_for_non_list() -> None:
+    from eee_agent.runtime.agent_runner import _normalize_todos
+    assert _normalize_todos(None) is None
+    assert _normalize_todos("foo") is None
+    assert _normalize_todos({"a": 1}) is None
+
+
+def test_d1_normalize_todos_empty_list_signals_cleared() -> None:
+    from eee_agent.runtime.agent_runner import _normalize_todos
+    # An empty list is a valid 'cleared' signal and must be forwarded.
+    assert _normalize_todos([]) == []
+
+
+def test_d1_normalize_todos_filters_invalid_items() -> None:
+    from eee_agent.runtime.agent_runner import _normalize_todos
+    cleaned = _normalize_todos([
+        {"content": "good", "status": "pending"},
+        {"content": "", "status": "pending"},        # empty content
+        {"content": "bad", "status": "WRONG"},        # bad status
+        {"content": "no status"},                     # missing status
+        "not a dict",                                 # non-dict
+        {"content": "also good", "status": "completed"},
+    ])
+    assert len(cleaned) == 2
+    assert cleaned[0]["content"] == "good"
+    assert cleaned[1]["status"] == "completed"
+
+
+def test_d1_normalize_todos_bounds_content_and_list_length() -> None:
+    from eee_agent.runtime.agent_runner import _MAX_TODOS, _normalize_todos
+    long = _normalize_todos([{"content": "x" * 1000, "status": "pending"}])
+    assert len(long[0]["content"]) <= 512
+    many = _normalize_todos(
+        [{"content": f"item {i}", "status": "pending"} for i in range(200)]
+    )
+    assert len(many) == _MAX_TODOS
+
+
+def test_d1_todos_key_in_updates_emits_todos_updated_event() -> None:
+    """When deepagents' TodoListMiddleware publishes a 'todos' state update,
+    the runner emits a bounded todos.updated event with OPERATIONAL retention.
+    """
+    async def scenario() -> None:
+        graph = _FakeGraph([
+            ("updates", {"tools": {"todos": [
+                {"content": "Plan", "status": "completed"},
+                {"content": "Apply", "status": "in_progress"},
+            ]}}),
+        ])
+        runner = AgentRunner(graph)
+        events = await _drain(runner, session_id="ses_x", user_input="hi")
+        todos_events = [
+            e for e in events
+            if isinstance(e, RunnerEvent) and e.event_type == "todos.updated"
+        ]
+        assert len(todos_events) == 1
+        ev = todos_events[0]
+        assert ev.retention_class is RetentionClass.OPERATIONAL
+        todos = ev.payload["todos"]
+        assert isinstance(todos, list)
+        assert len(todos) == 2
+        assert todos[0] == {"content": "Plan", "status": "completed"}
+        assert todos[1] == {"content": "Apply", "status": "in_progress"}
+
+    _run(scenario())
+
+
+def test_d1_missing_todos_key_emits_no_event() -> None:
+    """Updates without a 'todos' key must not emit a todos.updated event."""
+    async def scenario() -> None:
+        graph = _FakeGraph([
+            ("updates", {"tools": {"messages": [AIMessage(content="hi")]}}),
+        ])
+        runner = AgentRunner(graph)
+        events = await _drain(runner, session_id="ses_x", user_input="hi")
+        todos_events = [
+            e for e in events
+            if isinstance(e, RunnerEvent) and e.event_type == "todos.updated"
+        ]
+        assert todos_events == []
+
+    _run(scenario())
+
+
+def test_d1_empty_todos_list_emits_cleared_event() -> None:
+    """An explicit empty list (model cleared its plan) must still surface."""
+    async def scenario() -> None:
+        graph = _FakeGraph([
+            ("updates", {"tools": {"todos": []}}),
+        ])
+        runner = AgentRunner(graph)
+        events = await _drain(runner, session_id="ses_x", user_input="hi")
+        todos_events = [
+            e for e in events
+            if isinstance(e, RunnerEvent) and e.event_type == "todos.updated"
+        ]
+        assert len(todos_events) == 1
+        assert todos_events[0].payload["todos"] == []
+
+    _run(scenario())
+
+
+def test_d1_invalid_todos_items_emits_filtered_event() -> None:
+    """If only some items are valid, the event still fires with the clean subset."""
+    async def scenario() -> None:
+        graph = _FakeGraph([
+            ("updates", {"tools": {"todos": [
+                {"content": "good", "status": "pending"},
+                {"content": "bad", "status": "NOPE"},
+                "junk",
+            ]}}),
+        ])
+        runner = AgentRunner(graph)
+        events = await _drain(runner, session_id="ses_x", user_input="hi")
+        todos_events = [
+            e for e in events
+            if isinstance(e, RunnerEvent) and e.event_type == "todos.updated"
+        ]
+        assert len(todos_events) == 1
+        todos = todos_events[0].payload["todos"]
+        assert todos == [{"content": "good", "status": "pending"}]
+
+    _run(scenario())
