@@ -42,38 +42,54 @@ class ApprovalDrawer(QtWidgets.QFrame):
         buttons = QtWidgets.QHBoxLayout()
         self.reject_button = QtWidgets.QPushButton("Reject")
         self.reject_button.setAutoDefault(False)
-        self.reject_button.clicked.connect(self.rejected)
+        self.reject_button.clicked.connect(
+            lambda: self._emit_if_actionable(self.rejected))
         self.approve_button = QtWidgets.QPushButton("Approve and build")
         self.approve_button.setObjectName("GateApprove")
         self.approve_button.setAutoDefault(False)
-        self.approve_button.clicked.connect(self.approved)
+        self.approve_button.clicked.connect(
+            lambda: self._emit_if_actionable(self.approved))
         buttons.addWidget(self.reject_button)
         buttons.addStretch(1)
         buttons.addWidget(self.approve_button)
         layout.addLayout(buttons)
         self._actionable = False
+        self._summary = None
         self.hide()
 
     def show_changeset(self, summary) -> None:
         """Render one actionable ChangeSet summary from the client."""
+        self._summary = summary
         self._actionable = approval_is_actionable(summary)
+        risk = summary.get("risk") or {}
         title = summary.get("title") or "ChangeSet"
-        count = summary.get("operation_count")
-        mode = summary.get("permission_mode") or "unknown"
+        count = risk.get("operation_count")
+        mode = summary.get("required_permission") or "unknown"
         self.summary.setText(f"{title} · {count} operations · {mode}")
-        paths = summary.get("paths") or []
+        paths = list(risk.get("affected_paths") or [])
         rows = [str(p) for p in paths[:_MAX_PATH_ROWS]]
-        extra = len(paths) - len(rows)
-        if extra > 0:
-            rows.append(f"+ {extra} more paths")
+        if risk.get("affected_paths_truncated"):
+            rows.append(
+                f"+ {risk.get('affected_path_count', 0) - len(paths)} more paths")
         self.paths.setText("\n".join(rows))
         self.approve_button.setEnabled(self._actionable)
+        self.reject_button.setEnabled(self._actionable)
         self.show()
         self.raise_()
 
     def hide_drawer(self) -> None:
         self._actionable = False
+        self._summary = None
         self.hide()
+
+    def _emit_if_actionable(self, signal) -> None:
+        """Re-check the stored summary at click time before emitting."""
+        summary = self._summary
+        if not self._actionable or summary is None:
+            return
+        if not approval_is_actionable(summary):
+            return
+        signal.emit()
 
     @property
     def actionable(self) -> bool:
