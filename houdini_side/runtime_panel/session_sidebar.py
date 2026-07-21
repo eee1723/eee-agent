@@ -11,10 +11,9 @@ class SessionSidebar(QtWidgets.QWidget):
     sessionChosen = QtCore.Signal(str)
     newSessionRequested = QtCore.Signal()
 
-    def __init__(self, client, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("SessionSidebar")
-        self._client = client  # RuntimeObserverClient, for SessionTitleDialog
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         header = QtWidgets.QLabel("Sessions")

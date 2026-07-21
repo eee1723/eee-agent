@@ -42,7 +42,6 @@ BUTTON_HOVER = "#777f95"
 PRESSED = "#313f71"
 PRESSED_FG = "#f7f9ff"
 PRIMARY = "#7082b9"
-SECONDARY = "#7c849a"
 CHECKED_SURFACE = "#47578b"
 CHECKED_FG = "#e3ebff"
 
@@ -143,28 +142,10 @@ def register_fonts() -> None:
             QtGui.QFontDatabase.addApplicationFont(os.path.join(fonts_dir, name))
 
 
-def ui_font_family() -> str:
-    """Primary UI font family name (Qt does not honor CSS fallback lists).
-
-    ``register_fonts()`` makes the SideFX fonts available inside Houdini.
-    Outside Houdini, or if registration fails, callers should pass the
-    fallback via ``QFont.insertSubstitution(UI_FONT, [UI_FONT_FALLBACK])``
-    or accept Qt's automatic matching.
-    """
-    return UI_FONT
-
-
 def mono_font_family() -> str:
     """Primary monospace font family name (no CSS-style fallback list).
 
-    See ``ui_font_family()`` — use ``MONO_FONT_FALLBACK`` with
-    ``QFont.insertSubstitution`` when the primary family is unavailable.
+    Use ``MONO_FONT_FALLBACK`` with ``QFont.insertSubstitution`` when the
+    primary family is unavailable.
     """
     return MONO_FONT
-
-
-def icon(name: str):
-    """Resolve a built-in Houdini icon, e.g. icon("BUTTONS_add.svg")."""
-    import hou  # type: ignore
-
-    return hou.qt.Icon(name, None)

@@ -36,6 +36,15 @@ def test_vision_card_maps_status_to_tone() -> None:
     assert failed.body  # bounded fallback text, never empty
 
 
+def test_vision_card_body_respects_hard_cap() -> None:
+    # The status/decision prefix is structural; report_summary must take the
+    # remainder so the whole body never exceeds MAX_BODY_CHARS.
+    item = vm.vision_card({"status": "completed", "accepted": True,
+                           "report_summary": "x" * 5000})
+    assert len(item.body) == vm.MAX_BODY_CHARS
+    assert item.body.startswith("Status: completed\nDecision: accepted\n")
+
+
 def test_artifact_card_lists_state() -> None:
     item = vm.artifact_card(
         {"artifact_id": "art_" + "0" * 32, "relative_path": "shots/apply.png",

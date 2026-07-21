@@ -61,7 +61,10 @@ def test_no_hex_colors_outside_theme() -> None:
     import re
 
     for path in PKG.glob("*.py"):
-        if path.name in {"theme.py", "legacy.py", "client.py"}:
+        # theme.py owns all tokens; client.py still carries the legacy
+        # SessionTitleDialog palette (tracked for Pluto migration in the
+        # handoff doc), every other module must reference colors via theme.
+        if path.name in {"theme.py", "client.py"}:
             continue
         for match in re.finditer(r"#[0-9a-fA-F]{6}\b", path.read_text("utf-8")):
             raise AssertionError(f"hex color {match.group()} in {path.name}")
@@ -72,7 +75,10 @@ def test_session_sidebar_contract() -> None:
     assert "sessionChosen = QtCore.Signal(str)" in source
     assert "newSessionRequested = QtCore.Signal()" in source
     assert "def set_sessions(self, sessions" in source
-    assert "SessionTitleDialog" in source  # session naming reuses proven dialog
+    # Session naming is delegated to the main window via newSessionRequested;
+    # the sidebar itself does not open the SessionTitleDialog.
+    assert "SessionTitleDialog" not in source
+    assert "def __init__(self, parent" in source  # no client param
 
 
 def test_conversation_contract() -> None:
@@ -101,11 +107,11 @@ def test_approval_drawer_contract() -> None:
 
 def test_inspector_contract() -> None:
     source = _source("inspector.py")
-    for tab in ('"RUN"', '"WORKSPACE"', '"VALIDATION"', '"ARTIFACTS"'):
+    for tab in ('"RUN"', '"WORKSPACE"', '"ARTIFACTS"'):
         assert tab in source
+    assert '"VALIDATION"' not in source  # no data channel in the Runtime protocol
     assert "def set_run_snapshot(self, snapshot)" in source
     assert "def set_workspace_facts(self, facts)" in source
-    assert "def set_validation_report(self, report)" in source
     assert "def render_artifacts(self, summaries)" in source
     assert "def render_visions(self, summaries)" in source
 

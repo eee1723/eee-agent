@@ -456,7 +456,6 @@ class RuntimeObserverClient(QtCore.QObject):
     changesetsChanged = QtCore.Signal(object)
     commandSucceeded = QtCore.Signal(str, object)
     commandFailed = QtCore.Signal(str, str, str, bool, bool)
-    eventObserved = QtCore.Signal(str, int)
     artifactObserved = QtCore.Signal(object)
     visionObserved = QtCore.Signal(object)
 
@@ -586,33 +585,6 @@ class RuntimeObserverClient(QtCore.QObject):
                 "expected_scene_epoch": expected_scene_epoch,
             },
             "workspace.create",
-        )
-
-    def bind_workspace(
-        self,
-        workspace_id: str,
-        expected_manifest_revision: str,
-        expected_scene_epoch: int | None = None,
-    ) -> None:
-        session_id = self._current_session_id
-        if session_id is None:
-            self.commandFailed.emit(
-                "workspace.bind",
-                "runtime.session_required",
-                "Create or select a Session before binding a Workspace.",
-                True,
-                False,
-            )
-            return
-        self._send(
-            "workspace.bind",
-            {
-                "session_id": session_id,
-                "workspace_id": workspace_id,
-                "expected_manifest_revision": expected_manifest_revision,
-                "expected_scene_epoch": expected_scene_epoch,
-            },
-            "workspace.bind",
         )
 
     def inspect_workspace(self, workspace_id: str | None = None) -> None:
@@ -932,7 +904,6 @@ class RuntimeObserverClient(QtCore.QObject):
                     self.connectionChanged.emit("error", str(exc))
                     return
                 self.visionObserved.emit(vision_summary)
-            self.eventObserved.emit(message["type"], seq)
             if session_id == self._current_session_id:
                 self.sessionChanged.emit(
                     session_id, self._current_session_title, seq

@@ -77,7 +77,7 @@ class RuntimePanel(QtWidgets.QWidget):
         layout.addWidget(self.context_bar)
 
         self.splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        self.session_sidebar = SessionSidebar(self._client, self)
+        self.session_sidebar = SessionSidebar(self)
         self.conversation = ConversationView(self)
         self.inspector = InspectorPane(self)
         self.splitter.addWidget(self.session_sidebar)

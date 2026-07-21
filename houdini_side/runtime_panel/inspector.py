@@ -1,4 +1,4 @@
-"""Inspector pane: Run / Workspace / Validation / Artifacts tabs."""
+"""Inspector pane: Run / Workspace / Artifacts tabs."""
 
 from __future__ import annotations
 
@@ -51,8 +51,6 @@ class InspectorPane(QtWidgets.QWidget):
         workspace_layout.addLayout(actions)
         workspace_layout.addWidget(self.workspace_view, 1)
         self.tabs.addTab(workspace_tab, "WORKSPACE")
-        self.validation_view = _text_view(self)
-        self.tabs.addTab(self.validation_view, "VALIDATION")
         self.artifacts_view = _text_view(self)
         self.tabs.addTab(self.artifacts_view, "ARTIFACTS")
 
@@ -81,15 +79,6 @@ class InspectorPane(QtWidgets.QWidget):
             return
         rows = [f"{key}: {value}" for key, value in sorted(facts.items())]
         self._dump(self.workspace_view, rows)
-
-    def set_validation_report(self, report) -> None:
-        if not report:
-            self._dump(self.validation_view, [])
-            return
-        rows = [f"accepted: {report.get('accepted', '-')}"]
-        for failure in report.get("failures") or []:
-            rows.append(f"- {failure}")
-        self._dump(self.validation_view, rows)
 
     def render_artifacts(self, summaries) -> None:
         rows = [

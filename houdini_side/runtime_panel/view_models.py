@@ -80,28 +80,18 @@ def approval_result_card(approved: bool, *, expired: bool = False) -> MessageIte
                        "ChangeSet rejected by the user.", "error")
 
 
-def validation_card(report: Mapping[str, object]) -> MessageItem:
-    accepted = report.get("accepted") is True
-    summary = _bounded(report.get("summary") or report.get("report_summary"),
-                       MAX_BODY_CHARS)
-    return MessageItem(
-        kind="validation",
-        title="Validation passed" if accepted else "Validation failed",
-        body=summary or "No summary reported.",
-        tone="ok" if accepted else "error",
-    )
-
-
 def vision_card(summary: Mapping[str, object]) -> MessageItem:
     # Keys follow parse_vision_event: status / accepted / report_summary.
     status = _bounded(summary.get("status"), 40) or "unknown"
     accepted = summary.get("accepted") is True
     decision = "accepted" if accepted else "rejected"
-    text = _bounded(summary.get("report_summary"), MAX_BODY_CHARS)
     tone = "ok" if status == "completed" and accepted else "warn"
-    body = f"Status: {status}\nDecision: {decision}"
-    if text:
-        body += f"\n{text}"
+    # Hard cap: the status/decision prefix is structural and must stay whole,
+    # so report_summary takes whatever of MAX_BODY_CHARS remains after it.
+    prefix = f"Status: {status}\nDecision: {decision}"
+    remaining = max(0, MAX_BODY_CHARS - len(prefix) - 1)
+    text = _bounded(summary.get("report_summary"), remaining)
+    body = prefix + f"\n{text}" if text else prefix
     return MessageItem(kind="vision", title="Vision evaluation",
                        body=body, tone=tone)
 
