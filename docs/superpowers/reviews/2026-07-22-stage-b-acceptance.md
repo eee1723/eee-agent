@@ -16,11 +16,11 @@ after the exact candidate and its redacted evidence have been verified.
 | ID | Exact commit | Environment | Command or action | Expected | Result | Redacted evidence digest | Finding |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | B-01 | `4db806d` | Git | Verify Stage A PASS; create B branch; create isolated evidence root | Clean B branch at accepted A tip | PASS | Stage A decision present; four local evidence subdirectories created | — |
-| B-02 | NOT SET | Offline Python 3.11 | Provider-neutral Vision configuration and adapter tests | Explicit opt-in; bounded verified Artifact bytes; no direct SDK import | NOT RUN | — | RN-005 |
-| B-03 | NOT SET | Offline Python 3.11 | Vision FAILED/UNAVAILABLE contract and delivery tests | Pre-invocation gaps unavailable; attempted evaluation failures failed | NOT RUN | — | RN-006 |
-| B-04 | NOT SET | Offline Python 3.11 | Frozen lock, Ruff, Mypy, compileall, full pytest | All pass; zero unexpected warnings; skips enumerated | NOT RUN | — | — |
-| B-05 | NOT SET | Houdini 21.0.440 / hython 3.11 | Opt-in HFS knowledge contracts | 11 pass | NOT RUN | — | — |
-| B-06 | NOT SET | Disposable hython | Bridge, ChangeSet, capture, sensitivity, bootstrap, golden smokes | All pass; owned state cleaned; no saved HIP | NOT RUN | — | — |
+| B-02 | `bef4fe4` | Offline Python 3.11 | Provider-neutral Vision configuration and adapter tests; target Ruff | Explicit opt-in; bounded verified Artifact bytes; no direct SDK import | PASS | 53 focused tests passed; target Ruff passed; target Mypy passed | RN-005 |
+| B-03 | `f88ab39` | Offline Python 3.11 | Vision FAILED/UNAVAILABLE contract and delivery tests | Pre-invocation gaps unavailable; attempted evaluation failures failed | PASS | 183 focused Vision/delivery/panel tests passed; 29-file Mypy passed | RN-006 |
+| B-04 | `f88ab39` | Offline Python 3.11 | Frozen lock, Ruff, Mypy, compileall, full pytest | All pass; zero unexpected warnings; skips enumerated | PASS | 3,225 passed; 12 known skips; zero warnings; lock/Ruff/Mypy/compileall/diff all exit 0 | — |
+| B-05 | `f88ab39` | Houdini 21.0.440 / hython 3.11.7 | Opt-in HFS knowledge contracts with clean process-local package boundary | 11 pass | PASS | 11 passed in 10.46s; HFS 21.0.440; no user package output in the isolated boundary | RN-013 |
+| B-06 | `f88ab39` | Disposable hython 21.0.440 | Bridge, ChangeSet, capture, sensitivity, bootstrap, golden smokes | All pass; owned state cleaned; no saved HIP | PASS | 20 + 21 + 25 checks passed; bootstrap and golden cases passed; owned temp state empty | RN-013 |
 | B-07 | NOT SET | Interactive Houdini panel | Complete GUI and lifecycle checklist | Every required item PASS with user-observed evidence | NOT RUN | Installed package does not yet target B worktree | RN-012 |
 | B-08 | NOT SET | Explicit real Vision provider | Real provider + exact ArtifactStore byte journey | Completed normalized advisory result; digest match; cleanup | NOT RUN | — | RN-005, RN-006 |
 | B-09 | NOT SET | Final committed candidate | Repeat full gates and Codex evidence/code review | Clean tree; no blocker/high finding; every required B gate PASS | NOT RUN | — | — |
