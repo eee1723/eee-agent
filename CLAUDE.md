@@ -8,13 +8,13 @@ Runtime Control panel.
 ## Current development handoff
 
 The source of truth is
-`docs/handoffs/2026-07-20-runtime-development-transfer.md`. The active delivery
-line is `feature/runtime` (pushed to origin on 2026-07-20 for cross-machine
-development). Runtime MVP and advisory Vision are offline-complete and wired
-into the production post-Apply flow; the real provider journey passed on
-2026-07-20 (`tests/runtime/provider_journey.py` + harness, DeepSeek + Houdini
-21.0.440). The remaining gates are the interactive Houdini GUI checklist, the
-Vision real-provider journey, and the release-candidate tag.
+`docs/handoffs/2026-07-23-runtime-stage-b-pause-handoff.md`. Stage A is accepted
+on `feature/a-stability`; the active delivery line is
+`feature/b-release-acceptance`. Stage B's deterministic offline, HFS, and
+disposable hython gates pass. The exact B candidate still needs the interactive
+Houdini GUI checklist and a newly verified real Vision-provider journey before
+the final release-readiness decision. A provider result from an older candidate
+does not satisfy this gate.
 Offline tests and disposable Houdini 21.0.440 `hython` are the default
 verification path until
 the documented GUI gate is required.
