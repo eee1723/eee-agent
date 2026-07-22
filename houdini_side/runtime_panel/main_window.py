@@ -339,11 +339,14 @@ class RuntimePanel(QtWidgets.QWidget):
                 # it in place instead of appending a duplicate.
                 self.conversation.update_streaming("", thinking="")
                 continue
-            if final_text or is_terminal:
-                # Terminal run: emit its final reply. Empty replies still
-                # produce a card so the user sees the run completed.
-                self.conversation.append_item(
-                    view_models.assistant_message(final_text))
+            if is_terminal:
+                # Terminal run: delegate every Completed / Cancelled / Failed
+                # rendering decision to the unified selector so history and
+                # live settling share one path. Only an exact str final_response
+                # is treated as visible output; otherwise the selector emits a
+                # status notice / error card instead of an empty assistant.
+                for item in view_models.terminal_result_items(run, final_text):
+                    self.conversation.append_item(item)
         # After replay, mark the active run (if any) as the shown output so
         # _maybe_render_output does not double-emit it on the same snapshot.
         if type(active_run_id) is str:
@@ -388,11 +391,20 @@ class RuntimePanel(QtWidgets.QWidget):
         if (not is_terminal or type(run_id) is not str
                 or run_id == self._shown_output_run_id):
             return
-        # Run terminated: swap the streaming card for the final reply exactly
-        # once. If there was no streamed output, still emit a final card so the
-        # user sees the run produced something (or an explicit empty marker).
-        self.conversation.replace_last_assistant(
-            view_models.assistant_message(output))
+        # Run terminated: delegate every Completed / Cancelled / Failed
+        # rendering decision to the unified selector so live settling and
+        # history replay share one path. The first item reuses the streaming
+        # card if one exists (replace_last_assistant semantics); any further
+        # items (e.g. Failed + partial output -> error card) append after it.
+        # An empty result (defensive; should not happen for a terminal status)
+        # still consumes the idempotency marker so repeated snapshots cannot
+        # retry and duplicate.
+        items = view_models.terminal_result_items(shown, output)
+        for index, item in enumerate(items):
+            if index == 0:
+                self.conversation.replace_last_assistant(item)
+            else:
+                self.conversation.append_item(item)
         self._shown_output_run_id = run_id
 
     def _on_changesets(self, changesets) -> None:

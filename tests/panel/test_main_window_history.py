@@ -73,8 +73,12 @@ def test_replay_history_iterates_runs_in_order() -> None:
     assert "for run in runs:" in src
     # ...and append a user_message card for each run's user_input.
     assert "view_models.user_message(user_input)" in src
-    # ...and an assistant_message for each terminal/final run.
-    assert "view_models.assistant_message(final_text)" in src
+    # A-3: terminal runs delegate to the unified selector instead of building
+    # a card inline. The selector decides Completed/Cancelled/Failed shape and
+    # returns the items in render order; replay appends each one.
+    assert "view_models.terminal_result_items(run, final_text)" in src
+    # Replay must NOT re-implement the terminal business rules itself.
+    assert "view_models.assistant_message(final_text)" not in src
 
 
 def test_replay_history_skips_active_non_terminal_run() -> None:
@@ -90,6 +94,30 @@ def test_replay_history_skips_active_non_terminal_run() -> None:
     assert "active_run_id" in src
     assert "is_terminal" in src
     assert "continue" in src  # the skip branch
+
+
+def test_maybe_render_output_uses_unified_terminal_selector() -> None:
+    # A-3: the live settling path must delegate terminal rendering to the same
+    # selector as history replay, render the returned items in order (first
+    # via replace_last_assistant, the rest appended), and set the idempotency
+    # marker afterwards. It must not build an assistant_message inline.
+    tree = ast.parse(MAIN_WINDOW)
+    methods = {
+        n.name: n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef)
+    }
+    render = methods.get("_maybe_render_output")
+    assert render is not None, "_maybe_render_output method must exist"
+    src = ast.get_source_segment(MAIN_WINDOW, render) or ""
+    assert "view_models.terminal_result_items(shown, output)" in src
+    assert "view_models.assistant_message(output)" not in src
+    # Non-terminal runs still stream; the selector is only for terminal runs.
+    assert "update_streaming(output" in src
+    # The idempotency guard and marker set are preserved.
+    assert "self._shown_output_run_id" in src
+    # First item reuses the streaming slot; later items append.
+    assert "replace_last_assistant(item)" in src
+    assert "append_item(item)" in src
 
 
 def test_first_activation_also_clears_flow_and_requests_replay() -> None:
