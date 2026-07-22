@@ -2,7 +2,7 @@ from langchain_anthropic import ChatAnthropic
 from langchain_openai import ChatOpenAI
 import pytest
 
-from eee_agent.config import _env_bool, llm_config
+from eee_agent.config import _env_bool, llm_config, vision_config
 from eee_agent.core.errors import AgentException
 from eee_agent.model import build_model
 
@@ -17,6 +17,16 @@ def clear_model_env(monkeypatch) -> None:
         "DEEPSEEK_API_KEY",
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def clear_vision_env(monkeypatch) -> None:
+    for name in (
+        "EEE_VISION_PROVIDER",
+        "EEE_VISION_MODEL",
+        "EEE_VISION_MAX_IMAGE_BYTES",
+        "EEE_VISION_TIMEOUT_SECONDS",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -184,3 +194,64 @@ def test_build_model_openai_propagates_max_tokens(monkeypatch) -> None:
     model = build_model()
     assert isinstance(model, ChatOpenAI)
     assert model.max_tokens == 1234
+
+
+# --- Stage B: explicit provider-neutral Vision configuration ---------------
+
+
+def test_vision_config_is_disabled_by_default(monkeypatch) -> None:
+    clear_vision_env(monkeypatch)
+    monkeypatch.setenv("EEE_LLM_PROVIDER", "openai")
+    assert vision_config() is None
+
+
+def test_vision_config_reuses_supported_provider_identifiers(monkeypatch) -> None:
+    clear_vision_env(monkeypatch)
+    monkeypatch.setenv("EEE_VISION_PROVIDER", " openai ")
+    monkeypatch.setenv("EEE_VISION_MODEL", " gpt-4.1 ")
+    config = vision_config()
+    assert config is not None
+    assert config.provider == "openai"
+    assert config.model == "gpt-4.1"
+    assert config.max_image_bytes == 8 * 1024 * 1024
+    assert config.timeout_seconds == 30.0
+
+
+def test_vision_config_rejects_unknown_provider(monkeypatch) -> None:
+    clear_vision_env(monkeypatch)
+    monkeypatch.setenv("EEE_VISION_PROVIDER", "deepseek")
+    with pytest.raises(ValueError, match="EEE_VISION_PROVIDER"):
+        vision_config()
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("EEE_VISION_MAX_IMAGE_BYTES", "not-an-int", "must be an integer"),
+        ("EEE_VISION_MAX_IMAGE_BYTES", "0", "must be between"),
+        ("EEE_VISION_MAX_IMAGE_BYTES", "16777217", "must be between"),
+        ("EEE_VISION_TIMEOUT_SECONDS", "not-a-float", "must be a number"),
+        ("EEE_VISION_TIMEOUT_SECONDS", "0", "must be between"),
+        ("EEE_VISION_TIMEOUT_SECONDS", "120.1", "must be between"),
+    ],
+)
+def test_vision_config_rejects_invalid_bounds(
+    monkeypatch, name: str, value: str, message: str
+) -> None:
+    clear_vision_env(monkeypatch)
+    monkeypatch.setenv("EEE_VISION_PROVIDER", "anthropic")
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match=message):
+        vision_config()
+
+
+def test_vision_config_accepts_explicit_bounds(monkeypatch) -> None:
+    clear_vision_env(monkeypatch)
+    monkeypatch.setenv("EEE_VISION_PROVIDER", "anthropic")
+    monkeypatch.setenv("EEE_VISION_MAX_IMAGE_BYTES", "16777216")
+    monkeypatch.setenv("EEE_VISION_TIMEOUT_SECONDS", "0.1")
+    config = vision_config()
+    assert config is not None
+    assert config.model == "claude-sonnet-5"
+    assert config.max_image_bytes == 16_777_216
+    assert config.timeout_seconds == 0.1

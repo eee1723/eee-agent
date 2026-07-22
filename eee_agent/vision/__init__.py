@@ -10,6 +10,7 @@ from .contracts import (
     VisionUnavailable,
 )
 from .router import VisionOutcome, VisionProvider, VisionRouter
+from .provider import LangChainVisionProvider, build_vision_provider
 from .evaluation import DeliveryEvaluation
 
 __all__ = [
@@ -24,4 +25,6 @@ __all__ = [
     "VisionOutcome",
     "VisionProvider",
     "VisionRouter",
+    "LangChainVisionProvider",
+    "build_vision_provider",
 ]

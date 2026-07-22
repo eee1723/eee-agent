@@ -454,6 +454,7 @@ class RuntimeService:
         read_only_provider: ReadOnlyProvider | None = None,
         knowledge_runtime: KnowledgeRuntime | None = None,
         vision_provider: VisionProvider | None = None,
+        vision_timeout_seconds: float = 30.0,
         title_model_provider: Callable[[], BaseChatModel] | None = None,
     ) -> None:
         self._database = database
@@ -526,7 +527,11 @@ class RuntimeService:
         # Advisory Vision seam. The router resolves only ArtifactStore-
         # registered refs and hands providers the exact verified bytes; with
         # no provider it still records truthful unavailable evidence.
-        self._vision_router = VisionRouter(self._artifacts, vision_provider)
+        self._vision_router = VisionRouter(
+            self._artifacts,
+            vision_provider,
+            timeout_seconds=vision_timeout_seconds,
+        )
         # Optional seam for auto-titling placeholder Sessions after the first
         # run completes. None disables it (tests / no-LLM contexts).
         self._title_model_provider = title_model_provider
@@ -564,6 +569,7 @@ class RuntimeService:
         read_only_provider: ReadOnlyProvider | None = None,
         knowledge_runtime: KnowledgeRuntime | None = None,
         vision_provider: VisionProvider | None = None,
+        vision_timeout_seconds: float = 30.0,
         title_model_provider: Callable[[], BaseChatModel] | None = None,
     ) -> AsyncIterator["RuntimeService"]:
         """Open a service in the approved order and close it in reverse.
@@ -596,6 +602,7 @@ class RuntimeService:
                 read_only_provider=read_only_provider,
                 knowledge_runtime=knowledge_runtime,
                 vision_provider=vision_provider,
+                vision_timeout_seconds=vision_timeout_seconds,
                 title_model_provider=title_model_provider,
             )
             await service._reconcile()

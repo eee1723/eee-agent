@@ -129,6 +129,10 @@ def _hermetic_provider_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEEPSEEK_API_KEY", "unit-test-key")
     monkeypatch.setenv("EEE_COMPACT_TOOL", "false")
     monkeypatch.delenv("EEE_TRACING", raising=False)
+    monkeypatch.delenv("EEE_VISION_PROVIDER", raising=False)
+    monkeypatch.delenv("EEE_VISION_MODEL", raising=False)
+    monkeypatch.delenv("EEE_VISION_MAX_IMAGE_BYTES", raising=False)
+    monkeypatch.delenv("EEE_VISION_TIMEOUT_SECONDS", raising=False)
 
 
 def test_async_main_serves_then_releases_resources_on_cancel(
@@ -256,6 +260,73 @@ def test_async_main_passes_graceful_timeout_to_service(
 
     asyncio.run(scenario())
     assert captured.get("graceful_timeout") == 7.0
+
+
+def test_async_main_passes_vision_timeout_to_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import eee_agent.runtime.__main__ as main_mod
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("EEE_RUNTIME_HOME", str(home))
+    _hermetic_provider_env(monkeypatch)
+    captured: dict[str, object] = {}
+    original_open = main_mod.RuntimeService.open
+
+    monkeypatch.setattr(main_mod, "_vision_settings", lambda: (None, 12.5))
+
+    def spying_open(*args, **kwargs):
+        captured["vision_timeout_seconds"] = kwargs.get(
+            "vision_timeout_seconds", "MISSING"
+        )
+        return original_open(*args, **kwargs)
+
+    monkeypatch.setattr(main_mod.RuntimeService, "open", spying_open)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(async_main(["serve"]))
+        try:
+            discovery = home / "state" / "runtime.json"
+            for _ in range(200):
+                if discovery.exists():
+                    break
+                await asyncio.sleep(0.05)
+            assert discovery.exists(), "Runtime did not start"
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(task, timeout=15)
+
+    asyncio.run(scenario())
+    assert captured["vision_timeout_seconds"] == 12.5
+
+
+def test_vision_provider_is_disabled_without_explicit_config(monkeypatch) -> None:
+    import eee_agent.config as config_module
+    import eee_agent.runtime.__main__ as main_mod
+
+    monkeypatch.setattr(config_module, "vision_config", lambda: None)
+    assert main_mod._vision_provider() is None
+    assert main_mod._vision_settings() == (None, 30.0)
+
+
+def test_vision_provider_uses_explicit_config_and_registry(monkeypatch) -> None:
+    import eee_agent.config as config_module
+    import eee_agent.runtime.__main__ as main_mod
+    import eee_agent.vision.provider as provider_module
+    from eee_agent.config import VisionConfig
+
+    config = VisionConfig("openai", "gpt-4.1", 4096, 17.5)
+    sentinel = object()
+    seen: list[VisionConfig] = []
+    monkeypatch.setattr(config_module, "vision_config", lambda: config)
+    monkeypatch.setattr(
+        provider_module,
+        "build_vision_provider",
+        lambda value: seen.append(value) or sentinel,
+    )
+    assert main_mod._vision_settings() == (sentinel, 17.5)
+    assert seen == [config]
 
 
 def test_async_main_constructs_workspace_provider_from_state_dir(

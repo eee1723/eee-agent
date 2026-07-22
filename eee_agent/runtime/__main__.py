@@ -180,16 +180,21 @@ async def _serve_until_shutdown(
         cleanup_identity_files(identity, state_dir)
 
 
-def _vision_provider() -> VisionProvider | None:
-    """Production advisory Vision provider seam.
+def _vision_settings() -> tuple[VisionProvider | None, float]:
+    """Resolve one consistent provider/timeout snapshot from the environment."""
+    from eee_agent.config import vision_config
+    from eee_agent.vision.provider import build_vision_provider
 
-    No visual provider has passed the real-provider credential/journey gate
-    yet, so production wires ``None``: the router then records truthful
-    ``vision.provider_unavailable`` evidence for every captured delivery. The
-    approved provider adapter plugs in here; provider SDKs and credentials
-    must never be imported into Houdini-side modules.
-    """
-    return None
+    config = vision_config()
+    if config is None:
+        return None, 30.0
+    return build_vision_provider(config), config.timeout_seconds
+
+
+def _vision_provider() -> VisionProvider | None:
+    """Build Vision only from its explicit provider-neutral configuration."""
+    provider, _timeout = _vision_settings()
+    return provider
 
 
 def _title_model_provider():
@@ -228,6 +233,7 @@ async def async_main(argv: Sequence[str] | None = None) -> int:
 
     paths = RuntimePaths.from_environment()
     paths.create_used_directories()
+    vision_provider, vision_timeout_seconds = _vision_settings()
 
     with RuntimeLock(paths.lock_file):
         identity = create_identity()
@@ -244,7 +250,8 @@ async def async_main(argv: Sequence[str] | None = None) -> int:
             workspace_fact_provider=workspace_fact_provider,
             modeling_catalog_provider=houdini_21_minimal_catalog,
             read_only_provider=read_only_provider,
-            vision_provider=_vision_provider(),
+            vision_provider=vision_provider,
+            vision_timeout_seconds=vision_timeout_seconds,
             title_model_provider=_title_model_provider,
         ) as service:
             server = RuntimeWebSocketServer(

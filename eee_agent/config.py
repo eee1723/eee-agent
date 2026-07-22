@@ -20,6 +20,14 @@ class LlmConfig:
     max_output_tokens: int
 
 
+@dataclass(frozen=True, slots=True)
+class VisionConfig:
+    provider: str
+    model: str
+    max_image_bytes: int
+    timeout_seconds: float
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -59,6 +67,47 @@ def llm_config() -> LlmConfig:
         thinking_enabled=thinking_enabled,
         effort=effort,
         max_output_tokens=max_output_tokens,
+    )
+
+
+def vision_config() -> VisionConfig | None:
+    """Return explicit advisory-Vision configuration, or keep it disabled.
+
+    Vision never inherits ``EEE_LLM_PROVIDER``. Only providers already
+    supported by the project registry and known to accept image input through
+    their LangChain chat adapter are accepted here.
+    """
+    provider = (os.getenv("EEE_VISION_PROVIDER") or "").strip().lower()
+    if not provider:
+        return None
+    defaults = {
+        "anthropic": "claude-sonnet-5",
+        "openai": "gpt-4.1",
+    }
+    if provider not in defaults:
+        raise ValueError(f"unknown EEE_VISION_PROVIDER: {provider!r}")
+    model = (os.getenv("EEE_VISION_MODEL") or defaults[provider]).strip()
+    if not model:
+        raise ValueError("EEE_VISION_MODEL must not be empty")
+    try:
+        max_image_bytes = int(
+            os.getenv("EEE_VISION_MAX_IMAGE_BYTES", str(8 * 1024 * 1024))
+        )
+    except ValueError:
+        raise ValueError("EEE_VISION_MAX_IMAGE_BYTES must be an integer") from None
+    if not 1 <= max_image_bytes <= 16_777_216:
+        raise ValueError("EEE_VISION_MAX_IMAGE_BYTES must be between 1 and 16777216")
+    try:
+        timeout_seconds = float(os.getenv("EEE_VISION_TIMEOUT_SECONDS", "30"))
+    except ValueError:
+        raise ValueError("EEE_VISION_TIMEOUT_SECONDS must be a number") from None
+    if not 0.1 <= timeout_seconds <= 120.0:
+        raise ValueError("EEE_VISION_TIMEOUT_SECONDS must be between 0.1 and 120")
+    return VisionConfig(
+        provider=provider,
+        model=model,
+        max_image_bytes=max_image_bytes,
+        timeout_seconds=timeout_seconds,
     )
 
 
