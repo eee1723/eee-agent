@@ -4,10 +4,10 @@ import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
 from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass
+from typing import Protocol, runtime_checkable
 
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.graph.state import CompiledStateGraph
 
 from eee_agent.app import build_agent
 from eee_agent.config import recursion_limit
@@ -26,6 +26,20 @@ from eee_agent.runtime.agent_tools import build_read_only_tools
 
 # Tool-result preview cap, matching the existing CLI preview behavior.
 TOOL_RESULT_PREVIEW_CHARS = 600
+
+
+@runtime_checkable
+class _StreamingGraph(Protocol):
+    """The graph stream surface consumed by :class:`AgentRunner`."""
+
+    def astream(
+        self,
+        input: dict[str, list[dict[str, str]]],
+        *,
+        config: dict[str, object],
+        stream_mode: list[str],
+        context: object | None = None,
+    ) -> AsyncIterator[tuple[str, object]]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +104,7 @@ _MAX_TODO_CONTENT_CHARS = 512
 _VALID_TODO_STATUSES = frozenset({"pending", "in_progress", "completed"})
 
 
-def _normalize_todos(value: object) -> list[dict[str, object]] | None:
+def _normalize_todos(value: object) -> list[JsonValue] | None:
     """Validate and bound a deepagents todos list.
 
     Accepts the list shape emitted by ``TodoListMiddleware`` via
@@ -103,7 +117,7 @@ def _normalize_todos(value: object) -> list[dict[str, object]] | None:
     if not value:
         # An empty list is a valid 'cleared todos' signal; forward it.
         return []
-    cleaned: list[dict[str, object]] = []
+    cleaned: list[JsonValue] = []
     for item in value:
         if not isinstance(item, dict):
             continue
@@ -133,7 +147,7 @@ class AgentRunner:
     ``model.failed`` or an ``AgentError``.
     """
 
-    def __init__(self, graph: CompiledStateGraph) -> None:
+    def __init__(self, graph: object) -> None:
         self._graph = graph
         self._context_factory: (
             Callable[[str, str], object | Awaitable[object | None]] | None
@@ -163,21 +177,20 @@ class AgentRunner:
         if self._context_factory is not None:
             if run_id is None:
                 raise ValueError("run_id is required when a context factory is set")
-            context = self._context_factory(session_id, run_id)
-            if hasattr(context, "__await__"):
-                context = await context  # type: ignore[assignment]
-        stream_kwargs: dict[str, object] = {
-            "config": {
-                "configurable": {"thread_id": session_id},
-                "recursion_limit": recursion_limit(),
-            },
-            "stream_mode": ["messages", "updates"],
+            candidate = self._context_factory(session_id, run_id)
+            context = await candidate if isinstance(candidate, Awaitable) else candidate
+        config: dict[str, object] = {
+            "configurable": {"thread_id": session_id},
+            "recursion_limit": recursion_limit(),
         }
-        if context is not None:
-            stream_kwargs["context"] = context
-        stream = self._graph.astream(
+        graph = self._graph
+        if not isinstance(graph, _StreamingGraph):
+            raise TypeError("graph must expose the Runtime streaming interface")
+        stream = graph.astream(
             {"messages": [{"role": "user", "content": user_input}]},
-            **stream_kwargs,
+            config=config,
+            stream_mode=["messages", "updates"],
+            context=context,
         )
         try:
             async for mode, data in stream:

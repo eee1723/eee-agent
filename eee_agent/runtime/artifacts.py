@@ -223,6 +223,8 @@ class ArtifactStore:
     async def _evict_over_caps(self, *, where: str, params: tuple[object, ...], max_count: int, max_bytes: int, keep_id: str) -> bool:
         rows = await self._database.fetchall(f"SELECT artifact_id, relative_path, size_bytes FROM artifacts WHERE {where} AND artifact_state='available' AND artifact_id != ? ORDER BY created_at ASC, artifact_id ASC", (*params, keep_id))
         totals = await self._database.fetchone(f"SELECT COUNT(*) AS c, COALESCE(SUM(size_bytes),0) AS b FROM artifacts WHERE {where} AND artifact_state='available'", params)
+        if totals is None:
+            raise RuntimeError("artifact retention totals query returned no row")
         count = int(totals["c"])
         total_bytes = int(totals["b"])
         candidates: list[sqlite3.Row] = []

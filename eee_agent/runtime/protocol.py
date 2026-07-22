@@ -240,7 +240,7 @@ def success_response(request_id: str, result: object) -> dict[str, object]:
     }
 
 
-def error_response(request_id: str, error: AgentError) -> dict[str, object]:
+def error_response(request_id: str | None, error: AgentError) -> dict[str, object]:
     """Build a fresh error response envelope.
 
     The ``error`` field is exactly ``error.to_dict()`` (a fresh dict).

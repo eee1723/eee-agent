@@ -107,6 +107,12 @@ def _validate_final_response(value: object) -> str | None:
     return value
 
 
+def _require_exact_mapping(value: object, name: str) -> dict[str, object]:
+    if type(value) is not dict:
+        raise TypeError(f"{name} must be an exact dict")
+    return value
+
+
 def _session_not_found() -> AgentException:
     return AgentException(
         AgentError(
@@ -169,6 +175,16 @@ def _row_to_run(row) -> RunRecord:
         thawed = canonical_json_loads(todos_text)
         if isinstance(thawed, list):
             todos = tuple(item for item in thawed if isinstance(item, Mapping))
+    failure_value = (
+        _require_exact_mapping(
+            canonical_json_loads(row["failure_json"]), "stored run failure"
+        )
+        if row["failure_json"]
+        else None
+    )
+    model_snapshot = _require_exact_mapping(
+        canonical_json_loads(row["model_snapshot_json"]), "stored model snapshot"
+    )
     return RunRecord(
         run_id=row["run_id"],
         session_id=row["session_id"],
@@ -182,10 +198,8 @@ def _row_to_run(row) -> RunRecord:
         finished_at=(
             datetime.fromisoformat(row["finished_at"]) if row["finished_at"] else None
         ),
-        failure_json=(
-            canonical_json_loads(row["failure_json"]) if row["failure_json"] else None
-        ),
-        model_snapshot_json=canonical_json_loads(row["model_snapshot_json"]),
+        failure_json=failure_value,
+        model_snapshot_json=model_snapshot,
         todos=todos,
     )
 
@@ -218,7 +232,9 @@ class RunRepository:
         # cannot make them diverge. The original model_snapshot is never read
         # again after this point.
         snapshot_text = canonical_json_dumps(model_snapshot)
-        snapshot_value = canonical_json_loads(snapshot_text)
+        snapshot_value = _require_exact_mapping(
+            canonical_json_loads(snapshot_text), "model snapshot"
+        )
 
         run_id = new_id(IdKind.RUN)
         now = datetime.now(timezone.utc)

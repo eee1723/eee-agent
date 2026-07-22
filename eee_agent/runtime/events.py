@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -63,6 +64,12 @@ def _require_int(value: object, name: str) -> int:
     return value
 
 
+def _require_exact_mapping(value: object, name: str) -> dict[str, object]:
+    if type(value) is not dict:
+        raise TypeError(f"{name} must be an exact dict")
+    return value
+
+
 def _require_aware_datetime(value: object, name: str) -> datetime:
     if type(value) is not datetime:
         raise TypeError(f"{name} must be a datetime")
@@ -116,7 +123,7 @@ class _PreparedEvent:
     """A validated, frozen event ready to insert on an open transaction."""
 
     domain: DomainEvent
-    payload_value: object
+    payload_value: Mapping[str, object]
     payload_text: str
     timestamp: datetime
     timestamp_iso: str
@@ -140,7 +147,9 @@ def _prepare_event(
     if type(retention_class) is not RetentionClass:
         raise TypeError("retention_class must be an exact RetentionClass")
     domain = DomainEvent.create(event_type=event_type, payload=payload)
-    payload_value = domain.to_dict()["payload"]
+    payload_value = _require_exact_mapping(
+        domain.to_dict()["payload"], "event payload"
+    )
     payload_text = canonical_json_dumps(payload_value)
     if len(payload_text.encode("utf-8")) > _MAX_PAYLOAD_BYTES:
         raise _payload_too_large()
@@ -163,7 +172,9 @@ def _row_to_event(row) -> EventRecord:
         seq=row["seq"],
         event_type=row["event_type"],
         timestamp=datetime.fromisoformat(row["timestamp"]),
-        payload=canonical_json_loads(row["payload_json"]),
+        payload=_require_exact_mapping(
+            canonical_json_loads(row["payload_json"]), "stored event payload"
+        ),
         retention_class=RetentionClass(row["retention_class"]),
         schema_version=row["schema_version"],
     )
@@ -357,7 +368,7 @@ class EventStore:
             elig_cursor = await conn.execute(
                 f"SELECT seq FROM events WHERE {_PRUNE_ELIGIBLE}", params
             )
-            elig_rows = await elig_cursor.fetchall()
+            elig_rows = list(await elig_cursor.fetchall())
             if not elig_rows:
                 return 0
             greatest = max(row["seq"] for row in elig_rows)
@@ -389,7 +400,7 @@ class EventStore:
                 "ORDER BY created_at DESC, run_id DESC LIMIT 101",
                 (sid,),
             )
-            run_rows = await runs_cursor.fetchall()
+            run_rows = list(await runs_cursor.fetchall())
             has_earlier = len(run_rows) > 100
             newest = list(run_rows[:100])
             newest.reverse()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import AbstractAsyncContextManager
 import os
 from pathlib import Path
 from types import TracebackType
@@ -17,7 +18,7 @@ class CheckpointManager:
 
     def __init__(self, path: Path) -> None:
         self._path = path
-        self._context = None
+        self._context: AbstractAsyncContextManager[AsyncSqliteSaver] | None = None
         self.saver: AsyncSqliteSaver | None = None
 
     def require_saver(self) -> AsyncSqliteSaver:

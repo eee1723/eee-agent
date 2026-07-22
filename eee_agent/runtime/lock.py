@@ -10,8 +10,10 @@ propagated unchanged. The OS releases the lock if the process dies.
 from __future__ import annotations
 
 import errno
+from importlib import import_module
 import os
 from pathlib import Path
+from typing import BinaryIO, Protocol, runtime_checkable
 
 from eee_agent.core import AgentError, AgentException, ErrorCategory
 
@@ -25,6 +27,24 @@ _CONTENTION_ERRNOS = frozenset(
         errno.EWOULDBLOCK,
     }
 )
+
+
+@runtime_checkable
+class _FcntlModule(Protocol):
+    """The small POSIX ``fcntl`` surface used by :class:`RuntimeLock`."""
+
+    LOCK_EX: int
+    LOCK_NB: int
+    LOCK_UN: int
+
+    def flock(self, fd: int, operation: int) -> None: ...
+
+
+def _fcntl_module() -> _FcntlModule:
+    module = import_module("fcntl")
+    if not isinstance(module, _FcntlModule):
+        raise RuntimeError("fcntl does not expose the required lock API")
+    return module
 
 
 def _already_running() -> AgentException:
@@ -46,7 +66,7 @@ class RuntimeLock:
 
     def __init__(self, path: Path | str) -> None:
         self._path = Path(path)
-        self._fh: object | None = None
+        self._fh: BinaryIO | None = None
         self._acquired = False
 
     @property
@@ -72,7 +92,7 @@ class RuntimeLock:
         self._acquired = True
         return self
 
-    def _acquire(self, fh) -> None:
+    def _acquire(self, fh: BinaryIO) -> None:
         # Ensure the file has at least one byte (msvcrt.locking locks a byte
         # range; a zero-byte file cannot be locked).
         fh.seek(0, os.SEEK_END)
@@ -93,15 +113,14 @@ class RuntimeLock:
             raise
 
     @staticmethod
-    def _lock_windows(fh) -> None:
+    def _lock_windows(fh: BinaryIO) -> None:
         import msvcrt
 
         msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
 
     @staticmethod
-    def _lock_posix(fh) -> None:
-        import fcntl
-
+    def _lock_posix(fh: BinaryIO) -> None:
+        fcntl = _fcntl_module()
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -123,8 +142,7 @@ class RuntimeLock:
 
                     msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
                 else:
-                    import fcntl
-
+                    fcntl = _fcntl_module()
                     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
             except OSError:
                 # Closing the handle releases the OS lock regardless.

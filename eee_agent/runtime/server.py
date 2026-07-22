@@ -15,9 +15,10 @@ import re
 from datetime import datetime, timezone
 from http import HTTPStatus
 
-from websockets.asyncio.server import serve
+from websockets.asyncio.server import Server, serve
 
 from eee_agent.core import AgentError, AgentException, ErrorCategory
+from eee_agent.core.events import JsonValue
 from eee_agent.runtime.auth import RuntimeIdentity, validate_bearer
 from eee_agent.runtime.models import thaw_json
 from eee_agent.runtime.protocol import (
@@ -142,6 +143,12 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _require_event_payload(value: object) -> dict[str, JsonValue]:
+    if type(value) is not dict:
+        raise TypeError("stored event payload must be an exact dict")
+    return value
+
+
 def _event_envelope_from_record(record) -> dict:
     return event_envelope(
         event_id=record.event_id,
@@ -150,7 +157,7 @@ def _event_envelope_from_record(record) -> dict:
         seq=record.seq,
         timestamp=record.timestamp.isoformat(),
         event_type=record.event_type,
-        payload=thaw_json(record.payload),
+        payload=_require_event_payload(thaw_json(record.payload)),
         schema_version=record.schema_version,
     )
 
@@ -254,8 +261,8 @@ class RuntimeWebSocketServer:
         self._identity = identity
         self._requested_port = port
         self._port: int | None = None
-        self._serve_cm = None
-        self._server = None
+        self._serve_cm: serve | None = None
+        self._server: Server | None = None
         self._clients: set[_ClientContext] = set()
 
     @property
@@ -278,7 +285,11 @@ class RuntimeWebSocketServer:
             server_header=None,
         )
         self._server = await self._serve_cm.__aenter__()
-        self._port = self._server.sockets[0].getsockname()[1]
+        sockets = list(self._server.sockets)
+        if not sockets:
+            await self.__aexit__(None, None, None)
+            raise RuntimeError("Runtime server started without a listening socket")
+        self._port = sockets[0].getsockname()[1]
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
