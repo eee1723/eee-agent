@@ -220,6 +220,17 @@ def _load_strict_json(raw: object, label: str) -> object:
         raise ValueError(f"{label} is not strict JSON") from exc
 
 
+def _load_strict_dict(raw: object, label: str) -> dict[str, object]:
+    """Strict-JSON load a top-level wire envelope that must be an exact dict.
+
+    A list/scalar top level is rejected here (rather than deep in a DTO) so the
+    envelope boundary is a single, auditable check shared by every ``parse_*``
+    entrypoint: strict JSON, duplicate-key rejection, UTF-8, size cap, and an
+    exact ``dict`` root.
+    """
+    return _require_exact_dict(_load_strict_json(raw, label), label)
+
+
 def _require_exact_dict(value: object, label: str) -> dict[str, object]:
     if type(value) is not dict:
         raise TypeError(f"{label} must be an exact dict")
@@ -233,36 +244,58 @@ def _require_exact_keys(
         raise ValueError(f"{label} must have exactly the required fields")
 
 
-def _require_exact_bool(value: object, label: str) -> None:
+def _require_exact_bool(value: object, label: str) -> bool:
     if type(value) is not bool:
         raise TypeError(f"{label} must be a bool")
+    return value
 
 
-def _require_exact_int(value: object, label: str) -> None:
+def _require_exact_int(value: object, label: str) -> int:
+    # ``type(value) is not int`` already rejects bool because this is an
+    # exact-type boundary. Keep the explicit bool branch to provide a more
+    # precise error message and to make the bool/int distinction obvious.
+    if type(value) is bool:
+        raise TypeError(f"{label} must be an integer, not a bool")
     if type(value) is not int:
         raise TypeError(f"{label} must be an integer")
+    return value
 
 
-def _require_request_id(value: object, label: str) -> None:
+def _require_exact_list(value: object, label: str) -> list[object]:
+    if type(value) is not list:
+        raise TypeError(f"{label} must be a list")
+    return value
+
+
+def _require_request_id(value: object, label: str) -> str:
     if type(value) is not str:
         raise TypeError(f"{label} must be a string")
     if not value or len(value) > _MAX_REQUEST_ID_LEN:
         raise ValueError(f"{label} must be a non-empty string (<=128 chars)")
+    return value
 
 
-def _require_sha256(value: object, label: str) -> None:
+def _require_sha256(value: object, label: str) -> str:
     if type(value) is not str or _SHA256_RE.fullmatch(value) is None:
         raise ValueError(f"{label} must contain exactly 64 lowercase hex characters")
+    return value
 
 
-def _require_identifier(value: object, label: str) -> None:
+def _require_sha256_or_none(value: object, label: str) -> str | None:
+    if value is None:
+        return None
+    return _require_sha256(value, label)
+
+
+def _require_identifier(value: object, label: str) -> str:
     if type(value) is not str or _IDENTIFIER_RE.fullmatch(value) is None:
         raise ValueError(f"{label} must be a non-empty identifier")
     if len(value) > _MAX_IDENTIFIER_LEN:
         raise ValueError(f"{label} exceeds the maximum identifier length")
+    return value
 
 
-def _require_bounded_text(value: object, label: str, max_len: int) -> None:
+def _require_bounded_text(value: object, label: str, max_len: int) -> str:
     if type(value) is not str:
         raise TypeError(f"{label} must be a string")
     if not value:
@@ -271,18 +304,19 @@ def _require_bounded_text(value: object, label: str, max_len: int) -> None:
         raise ValueError(f"{label} must not contain control characters")
     if len(value) > max_len:
         raise ValueError(f"{label} exceeds the maximum length")
+    return value
 
 
-def _require_optional_text(value: object, label: str, max_len: int) -> None:
+def _require_optional_text(value: object, label: str, max_len: int) -> str | None:
     if value is None:
-        return
-    _require_bounded_text(value, label, max_len)
+        return None
+    return _require_bounded_text(value, label, max_len)
 
 
-def _require_optional_identifier(value: object, label: str) -> None:
+def _require_optional_identifier(value: object, label: str) -> str | None:
     if value is None:
-        return
-    _require_identifier(value, label)
+        return None
+    return _require_identifier(value, label)
 
 
 def _decode_dt(value: object, label: str) -> datetime:
@@ -512,11 +546,19 @@ class PreflightRequest:
             None if payload["workspace"] is None else _decode_manifest(payload["workspace"])
         )
         return cls(
-            request_id=envelope["request_id"],
-            deadline_ms=envelope["deadline_ms"],
-            scene_epoch=envelope["scene_epoch"],
+            request_id=_require_request_id(
+                envelope["request_id"], "PreflightRequest.request_id"
+            ),
+            deadline_ms=_require_exact_int(
+                envelope["deadline_ms"], "PreflightRequest.deadline_ms"
+            ),
+            scene_epoch=_require_exact_int(
+                envelope["scene_epoch"], "PreflightRequest.scene_epoch"
+            ),
             changeset=changeset,
-            changeset_digest=payload["changeset_digest"],
+            changeset_digest=_require_sha256(
+                payload["changeset_digest"], "PreflightRequest.changeset_digest"
+            ),
             workspace=workspace,
         )
 
@@ -569,15 +611,27 @@ class PreflightNodeFact:
         _require_exact_keys(value, _NODE_FACT_FIELDS, "PreflightNodeFact")
         return cls(
             requested=_decode_noderef(value["requested"]),
-            exists=value["exists"],
-            actual_path=value["actual_path"],
-            actual_type=value["actual_type"],
-            parent_path=value["parent_path"],
-            workspace_id=value["workspace_id"],
-            node_id=value["node_id"],
-            capability=value["capability"],
-            role=value["role"],
-            is_locked=value["is_locked"],
+            exists=_require_exact_bool(value["exists"], "PreflightNodeFact.exists"),
+            actual_path=_require_optional_text(
+                value["actual_path"], "PreflightNodeFact.actual_path", _MAX_NODE_PATH_LEN
+            ),
+            actual_type=_require_optional_text(
+                value["actual_type"], "PreflightNodeFact.actual_type", _MAX_NODE_TYPE_LEN
+            ),
+            parent_path=_require_optional_text(
+                value["parent_path"], "PreflightNodeFact.parent_path", _MAX_NODE_PATH_LEN
+            ),
+            workspace_id=_require_optional_identifier(
+                value["workspace_id"], "PreflightNodeFact.workspace_id"
+            ),
+            node_id=_require_optional_identifier(
+                value["node_id"], "PreflightNodeFact.node_id"
+            ),
+            capability=_require_optional_identifier(
+                value["capability"], "PreflightNodeFact.capability"
+            ),
+            role=_require_optional_identifier(value["role"], "PreflightNodeFact.role"),
+            is_locked=_require_exact_bool(value["is_locked"], "PreflightNodeFact.is_locked"),
         )
 
 
@@ -616,8 +670,8 @@ class PreflightParmFact:
         _require_exact_keys(value, _PARM_FACT_FIELDS, "PreflightParmFact")
         return cls(
             target=_decode_noderef(value["target"]),
-            parm_name=value["parm_name"],
-            exists=value["exists"],
+            parm_name=_require_identifier(value["parm_name"], "PreflightParmFact.parm_name"),
+            exists=_require_exact_bool(value["exists"], "PreflightParmFact.exists"),
             value=value["value"],
         )
 
@@ -653,7 +707,7 @@ class PreflightWireFact:
         source = value["source"]
         return cls(
             target=_decode_noderef(value["target"]),
-            input_index=value["input_index"],
+            input_index=_require_exact_int(value["input_index"], "PreflightWireFact.input_index"),
             source=None if source is None else _decode_wiref(source),
         )
 
@@ -670,10 +724,42 @@ def _freeze_facts(value: object, allowed: type, label: str) -> tuple[object, ...
     return items
 
 
-def _require_sha256_or_none(value: object) -> None:
-    if value is None:
-        return
-    _require_sha256(value, "PreflightResult.workspace_revision")
+def _decode_node_facts(value: object, label: str) -> tuple[PreflightNodeFact, ...]:
+    """Decode an exact-list of node facts, narrowing each entry to an exact dict.
+
+    ``PreflightResult`` tuple collection fields are built here so mypy sees a
+    real ``tuple[PreflightNodeFact, ...]`` and each wire entry is a single
+    auditable exact-dict boundary (a nested non-dict is rejected with the
+    canonical "must be an exact dict" error before reaching the fact decoder).
+    """
+    items = _require_exact_list(value, label)
+    return tuple(
+        PreflightNodeFact.from_dict(_require_exact_dict(item, label))
+        for item in items
+    )
+
+
+def _decode_parm_facts(value: object, label: str) -> tuple[PreflightParmFact, ...]:
+    items = _require_exact_list(value, label)
+    return tuple(
+        PreflightParmFact.from_dict(_require_exact_dict(item, label))
+        for item in items
+    )
+
+
+def _decode_wire_facts(value: object, label: str) -> tuple[PreflightWireFact, ...]:
+    items = _require_exact_list(value, label)
+    return tuple(
+        PreflightWireFact.from_dict(_require_exact_dict(item, label))
+        for item in items
+    )
+
+
+def _decode_condition_results(
+    value: object, label: str
+) -> tuple[ConditionResult, ...]:
+    items = _require_exact_list(value, label)
+    return tuple(_decode_condition_result(item) for item in items)
 
 
 @dataclass(frozen=True, slots=True)
@@ -699,7 +785,7 @@ class PreflightResult:
         if type(self.binding) is not SceneBinding:
             raise TypeError("PreflightResult.binding must be an exact SceneBinding")
         _require_optional_identifier(self.workspace_id, "PreflightResult.workspace_id")
-        _require_sha256_or_none(self.workspace_revision)
+        _require_sha256_or_none(self.workspace_revision, "PreflightResult.workspace_revision")
         object.__setattr__(
             self, "node_facts", _freeze_facts(self.node_facts, PreflightNodeFact, "node_facts")
         )
@@ -739,17 +825,27 @@ class PreflightResult:
         value = _require_exact_dict(data, "PreflightResult")
         _require_exact_keys(value, _RESULT_FIELDS, "PreflightResult")
         return cls(
-            binding=SceneBinding.from_dict(value["binding"]),
-            workspace_id=value["workspace_id"],
-            workspace_revision=value["workspace_revision"],
-            node_facts=[PreflightNodeFact.from_dict(f) for f in value["node_facts"]],
-            parm_facts=[PreflightParmFact.from_dict(f) for f in value["parm_facts"]],
-            wire_facts=[PreflightWireFact.from_dict(f) for f in value["wire_facts"]],
-            condition_results=[
-                _decode_condition_result(r) for r in value["condition_results"]
-            ],
-            all_preconditions_hold=value["all_preconditions_hold"],
-            scene_may_have_changed=value["scene_may_have_changed"],
+            binding=SceneBinding.from_dict(
+                _require_exact_dict(value["binding"], "PreflightResult.binding")
+            ),
+            workspace_id=_require_optional_identifier(
+                value["workspace_id"], "PreflightResult.workspace_id"
+            ),
+            workspace_revision=_require_sha256_or_none(
+                value["workspace_revision"], "PreflightResult.workspace_revision"
+            ),
+            node_facts=_decode_node_facts(value["node_facts"], "PreflightResult.node_facts"),
+            parm_facts=_decode_parm_facts(value["parm_facts"], "PreflightResult.parm_facts"),
+            wire_facts=_decode_wire_facts(value["wire_facts"], "PreflightResult.wire_facts"),
+            condition_results=_decode_condition_results(
+                value["condition_results"], "PreflightResult.condition_results"
+            ),
+            all_preconditions_hold=_require_exact_bool(
+                value["all_preconditions_hold"], "PreflightResult.all_preconditions_hold"
+            ),
+            scene_may_have_changed=_require_exact_bool(
+                value["scene_may_have_changed"], "PreflightResult.scene_may_have_changed"
+            ),
         )
 
 
@@ -802,16 +898,20 @@ class PreflightResponse:
             raise ValueError("PreflightResponse protocol must be eee.bridge/1")
         if envelope["kind"] != "response":
             raise ValueError("PreflightResponse kind must be response")
-        ok = envelope["ok"]
-        _require_exact_bool(ok, "PreflightResponse.ok")
+        ok = _require_exact_bool(envelope["ok"], "PreflightResponse.ok")
+        request_id = _require_request_id(
+            envelope["request_id"], "PreflightResponse.request_id"
+        )
         if ok is True:
             result = envelope.get("result")
             error = envelope.get("error")
             if result is None or error is not None:
                 raise ValueError("PreflightResponse ok=true requires result and no error")
             return cls(
-                request_id=envelope["request_id"],
-                result=PreflightResult.from_dict(result),
+                request_id=request_id,
+                result=PreflightResult.from_dict(
+                    _require_exact_dict(result, "PreflightResponse.result")
+                ),
                 error=None,
             )
         error = envelope.get("error")
@@ -819,9 +919,11 @@ class PreflightResponse:
         if error is None or result is not None:
             raise ValueError("PreflightResponse ok=false requires error and no result")
         return cls(
-            request_id=envelope["request_id"],
+            request_id=request_id,
             result=None,
-            error=BridgeError.from_dict(error),
+            error=BridgeError.from_dict(
+                _require_exact_dict(error, "PreflightResponse.error")
+            ),
         )
 
 
@@ -925,11 +1027,17 @@ class ApplyRequest:
             None if payload["workspace"] is None else _decode_manifest(payload["workspace"])
         )
         return cls(
-            request_id=envelope["request_id"],
-            deadline_ms=envelope["deadline_ms"],
-            scene_epoch=envelope["scene_epoch"],
+            request_id=_require_request_id(envelope["request_id"], "ApplyRequest.request_id"),
+            deadline_ms=_require_exact_int(
+                envelope["deadline_ms"], "ApplyRequest.deadline_ms"
+            ),
+            scene_epoch=_require_exact_int(
+                envelope["scene_epoch"], "ApplyRequest.scene_epoch"
+            ),
             changeset=changeset,
-            changeset_digest=payload["changeset_digest"],
+            changeset_digest=_require_sha256(
+                payload["changeset_digest"], "ApplyRequest.changeset_digest"
+            ),
             workspace=workspace,
         )
 
@@ -988,16 +1096,16 @@ class ApplyResponse:
             raise ValueError("ApplyResponse protocol must be eee.bridge/1")
         if envelope["kind"] != "response":
             raise ValueError("ApplyResponse kind must be response")
-        ok = envelope["ok"]
-        _require_exact_bool(ok, "ApplyResponse.ok")
+        ok = _require_exact_bool(envelope["ok"], "ApplyResponse.ok")
+        request_id = _require_request_id(envelope["request_id"], "ApplyResponse.request_id")
         if ok is True:
             result = envelope.get("result")
             error = envelope.get("error")
             if result is None or error is not None:
                 raise ValueError("ApplyResponse ok=true requires result and no error")
             return cls(
-                request_id=envelope["request_id"],
-                result=_decode_receipt(result),
+                request_id=request_id,
+                result=_decode_receipt(_require_exact_dict(result, "ApplyResponse.result")),
                 error=None,
             )
         error = envelope.get("error")
@@ -1005,9 +1113,11 @@ class ApplyResponse:
         if error is None or result is not None:
             raise ValueError("ApplyResponse ok=false requires error and no result")
         return cls(
-            request_id=envelope["request_id"],
+            request_id=request_id,
             result=None,
-            error=BridgeError.from_dict(error),
+            error=BridgeError.from_dict(
+                _require_exact_dict(error, "ApplyResponse.error")
+            ),
         )
 
 
@@ -1085,11 +1195,19 @@ class ReceiptRequest:
         payload = _require_exact_dict(envelope["payload"], "ReceiptRequest payload")
         _require_exact_keys(payload, _RECEIPT_PAYLOAD_FIELDS, "ReceiptRequest payload")
         return cls(
-            request_id=envelope["request_id"],
-            deadline_ms=envelope["deadline_ms"],
-            scene_epoch=envelope["scene_epoch"],
-            change_id=payload["change_id"],
-            changeset_digest=payload["changeset_digest"],
+            request_id=_require_request_id(
+                envelope["request_id"], "ReceiptRequest.request_id"
+            ),
+            deadline_ms=_require_exact_int(
+                envelope["deadline_ms"], "ReceiptRequest.deadline_ms"
+            ),
+            scene_epoch=_require_exact_int(
+                envelope["scene_epoch"], "ReceiptRequest.scene_epoch"
+            ),
+            change_id=_require_request_id(payload["change_id"], "ReceiptRequest.change_id"),
+            changeset_digest=_require_sha256(
+                payload["changeset_digest"], "ReceiptRequest.changeset_digest"
+            ),
         )
 
 
@@ -1142,16 +1260,18 @@ class ReceiptResponse:
             raise ValueError("ReceiptResponse protocol must be eee.bridge/1")
         if envelope["kind"] != "response":
             raise ValueError("ReceiptResponse kind must be response")
-        ok = envelope["ok"]
-        _require_exact_bool(ok, "ReceiptResponse.ok")
+        ok = _require_exact_bool(envelope["ok"], "ReceiptResponse.ok")
+        request_id = _require_request_id(envelope["request_id"], "ReceiptResponse.request_id")
         if ok is True:
             result = envelope.get("result")
             error = envelope.get("error")
             if result is None or error is not None:
                 raise ValueError("ReceiptResponse ok=true requires result and no error")
             return cls(
-                request_id=envelope["request_id"],
-                result=_decode_receipt(result),
+                request_id=request_id,
+                result=_decode_receipt(
+                    _require_exact_dict(result, "ReceiptResponse.result")
+                ),
                 error=None,
             )
         error = envelope.get("error")
@@ -1159,9 +1279,11 @@ class ReceiptResponse:
         if error is None or result is not None:
             raise ValueError("ReceiptResponse ok=false requires error and no result")
         return cls(
-            request_id=envelope["request_id"],
+            request_id=request_id,
             result=None,
-            error=BridgeError.from_dict(error),
+            error=BridgeError.from_dict(
+                _require_exact_dict(error, "ReceiptResponse.error")
+            ),
         )
 
 
@@ -1172,29 +1294,29 @@ class ReceiptResponse:
 
 def parse_preflight_request(raw: str | bytes) -> PreflightRequest:
     """Parse a ``changeset.preflight`` request from strict JSON text."""
-    return PreflightRequest.from_dict(_load_strict_json(raw, "Preflight request"))
+    return PreflightRequest.from_dict(_load_strict_dict(raw, "Preflight request"))
 
 
 def parse_preflight_response(raw: str | bytes) -> PreflightResponse:
     """Parse a ``changeset.preflight`` response from strict JSON text."""
-    return PreflightResponse.from_dict(_load_strict_json(raw, "Preflight response"))
+    return PreflightResponse.from_dict(_load_strict_dict(raw, "Preflight response"))
 
 
 def parse_apply_request(raw: str | bytes) -> ApplyRequest:
     """Parse a ``changeset.apply`` request from strict JSON text."""
-    return ApplyRequest.from_dict(_load_strict_json(raw, "Apply request"))
+    return ApplyRequest.from_dict(_load_strict_dict(raw, "Apply request"))
 
 
 def parse_apply_response(raw: str | bytes) -> ApplyResponse:
     """Parse a ``changeset.apply`` response from strict JSON text."""
-    return ApplyResponse.from_dict(_load_strict_json(raw, "Apply response"))
+    return ApplyResponse.from_dict(_load_strict_dict(raw, "Apply response"))
 
 
 def parse_receipt_request(raw: str | bytes) -> ReceiptRequest:
     """Parse a ``changeset.receipt`` request from strict JSON text."""
-    return ReceiptRequest.from_dict(_load_strict_json(raw, "Receipt request"))
+    return ReceiptRequest.from_dict(_load_strict_dict(raw, "Receipt request"))
 
 
 def parse_receipt_response(raw: str | bytes) -> ReceiptResponse:
     """Parse a ``changeset.receipt`` response from strict JSON text."""
-    return ReceiptResponse.from_dict(_load_strict_json(raw, "Receipt response"))
+    return ReceiptResponse.from_dict(_load_strict_dict(raw, "Receipt response"))

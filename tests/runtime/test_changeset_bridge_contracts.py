@@ -15,11 +15,13 @@ from datetime import datetime, timezone
 import pytest
 
 from eee_agent.changesets import (
+    ChangeReceipt,
     ChangeSet,
     CheckpointPlan,
     NodeRef,
     OwnedNodeRef,
     PermissionMode,
+    ReceiptStatus,
     RiskSummary,
     SetParm,
     WireRef,
@@ -27,12 +29,16 @@ from eee_agent.changesets import (
 )
 from eee_agent.houdini_bridge.changesets import (
     CHANGESET_V1,
+    ApplyRequest,
+    ApplyResponse,
     PreflightNodeFact,
     PreflightParmFact,
     PreflightRequest,
     PreflightResponse,
     PreflightResult,
     PreflightWireFact,
+    ReceiptRequest,
+    ReceiptResponse,
     validate_capabilities,
 )
 from eee_agent.houdini_bridge.contracts import (
@@ -585,6 +591,356 @@ def test_parse_response_strict() -> None:
     )
     with pytest.raises(ValueError):
         parse_preflight_response(dup)
+
+
+# ==========================================================================
+# Task A-5M3: wire decode boundary — exact primitive narrowing, bool-as-int,
+# wrong-type optionals, nested non-dict facts, top-level list/scalar rejection,
+# tuple collection fields, and apply/receipt round-trips. These pin the typed
+# helpers that make from_dict() pass precise values to each DTO constructor.
+# ==========================================================================
+
+
+def _receipt() -> ChangeReceipt:
+    return ChangeReceipt(
+        change_id=CHG,
+        status=ReceiptStatus.APPLIED,
+        instance_id=INSTANCE,
+        scene_epoch=1,
+        before_revision=REVISION,
+        after_revision="b" * 64,
+        applied_op_ids=("op_parm",),
+        postcondition_results=(),
+        rollback_results=(),
+        scene_may_have_changed=False,
+        completed_at=NOW,
+    )
+
+
+def _apply_request() -> ApplyRequest:
+    return ApplyRequest.build(
+        request_id="req_apply_1",
+        deadline_ms=5000,
+        scene_epoch=1,
+        changeset=_changeset(),
+        workspace=_manifest(),
+    )
+
+
+def _receipt_request() -> ReceiptRequest:
+    return ReceiptRequest.build(
+        request_id="req_receipt_1",
+        deadline_ms=5000,
+        scene_epoch=1,
+        change_id=CHG,
+        changeset_digest=_changeset().digest,
+    )
+
+
+# --- every request/response legal round-trip (preflight shown above) --------
+
+
+def test_apply_request_round_trip_from_dict() -> None:
+    req = _apply_request()
+    assert ApplyRequest.from_dict(req.to_dict()) == req
+
+
+def test_receipt_request_round_trip_from_dict() -> None:
+    req = _receipt_request()
+    assert ReceiptRequest.from_dict(req.to_dict()) == req
+
+
+def test_apply_request_round_trip_json_parse() -> None:
+    from eee_agent.houdini_bridge.changesets import parse_apply_request
+
+    req = _apply_request()
+    revived = parse_apply_request(req.to_json())
+    assert revived == req
+
+
+def test_receipt_request_round_trip_json_parse() -> None:
+    from eee_agent.houdini_bridge.changesets import parse_receipt_request
+
+    req = _receipt_request()
+    revived = parse_receipt_request(req.to_json())
+    assert revived == req
+
+
+def test_apply_response_success_round_trip() -> None:
+    resp = ApplyResponse(request_id="req_apply_1", result=_receipt(), error=None)
+    revived = ApplyResponse.from_dict(resp.to_dict())
+    assert revived.result is not None
+    assert revived.result.change_id == CHG
+    assert revived.error is None
+
+
+def test_apply_response_error_round_trip() -> None:
+    resp = ApplyResponse(request_id="req_apply_1", result=None, error=_bridge_error())
+    revived = ApplyResponse.from_dict(resp.to_dict())
+    assert revived.error is not None
+    assert revived.error.code == "changeset.stale"
+
+
+def test_receipt_response_success_and_error_round_trip() -> None:
+    ok = ReceiptResponse(request_id="req_receipt_1", result=_receipt(), error=None)
+    assert ReceiptResponse.from_dict(ok.to_dict()).result is not None
+    bad = ReceiptResponse(request_id="req_receipt_1", result=None, error=_bridge_error())
+    assert ReceiptResponse.from_dict(bad.to_dict()).error is not None
+
+
+# --- bool must not enter integer wire fields --------------------------------
+
+
+@pytest.mark.parametrize("as_bool", [True, False])
+def test_preflight_request_rejects_bool_deadline(as_bool: bool) -> None:
+    data = _preflight().to_dict()
+    data["deadline_ms"] = as_bool
+    with pytest.raises(TypeError):
+        PreflightRequest.from_dict(data)
+
+
+@pytest.mark.parametrize("as_bool", [True, False])
+def test_preflight_request_rejects_bool_scene_epoch(as_bool: bool) -> None:
+    data = _preflight().to_dict()
+    data["scene_epoch"] = as_bool
+    with pytest.raises(TypeError):
+        PreflightRequest.from_dict(data)
+
+
+@pytest.mark.parametrize("as_bool", [True, False])
+def test_wire_fact_rejects_bool_input_index(as_bool: bool) -> None:
+    fact = _result().wire_facts[0]
+    data = fact.to_dict()
+    data["input_index"] = as_bool
+    with pytest.raises(TypeError):
+        PreflightWireFact.from_dict(data)
+
+
+@pytest.mark.parametrize("as_bool", [True, False])
+def test_apply_request_rejects_bool_deadline(as_bool: bool) -> None:
+    data = _apply_request().to_dict()
+    data["deadline_ms"] = as_bool
+    with pytest.raises(TypeError):
+        ApplyRequest.from_dict(data)
+
+
+@pytest.mark.parametrize("as_bool", [True, False])
+def test_receipt_request_rejects_bool_deadline(as_bool: bool) -> None:
+    data = _receipt_request().to_dict()
+    data["deadline_ms"] = as_bool
+    with pytest.raises(TypeError):
+        ReceiptRequest.from_dict(data)
+
+
+# --- wrong type on NodeFact optional / boolean fields -----------------------
+
+
+@pytest.mark.parametrize(
+    "field,bad",
+    [
+        ("actual_path", 7),
+        ("actual_type", []),
+        ("parent_path", {}),
+        ("workspace_id", 3),
+        ("node_id", 1.5),
+        ("capability", True),
+        ("role", False),
+        ("exists", "yes"),
+        ("is_locked", 1),
+    ],
+)
+def test_node_fact_wrong_type_rejected(field: str, bad: object) -> None:
+    fact = _result().node_facts[0]
+    data = fact.to_dict()
+    data[field] = bad
+    with pytest.raises((TypeError, ValueError)):
+        PreflightNodeFact.from_dict(data)
+
+
+# --- facts collection must be an exact list, nested fact must be exact dict --
+
+
+def test_node_facts_collection_must_be_list() -> None:
+    data = _result().to_dict()
+    data["node_facts"] = _result().node_facts[0].to_dict()  # a dict, not a list
+    with pytest.raises((TypeError, ValueError)):
+        PreflightResult.from_dict(data)
+
+
+def test_parm_facts_collection_must_be_list() -> None:
+    data = _result().to_dict()
+    data["parm_facts"] = "not-a-list"
+    with pytest.raises((TypeError, ValueError)):
+        PreflightResult.from_dict(data)
+
+
+def test_nested_node_fact_must_be_exact_dict() -> None:
+    data = _result().to_dict()
+    data["node_facts"] = [42]  # non-dict entry
+    with pytest.raises((TypeError, ValueError)):
+        PreflightResult.from_dict(data)
+
+
+def test_nested_wire_fact_must_be_exact_dict() -> None:
+    data = _result().to_dict()
+    data["wire_facts"] = ["scalar"]  # non-dict entry
+    with pytest.raises((TypeError, ValueError)):
+        PreflightResult.from_dict(data)
+
+
+# --- tuple collection fields round-trip as real tuples ----------------------
+
+
+def test_result_facts_are_tuples_after_from_dict() -> None:
+    revived = PreflightResult.from_dict(_result().to_dict())
+    assert type(revived.node_facts) is tuple
+    assert type(revived.parm_facts) is tuple
+    assert type(revived.wire_facts) is tuple
+    assert type(revived.condition_results) is tuple
+
+
+# --- result/error mutual exclusion + nested non-dict rejection --------------
+
+
+@pytest.mark.parametrize(
+    "ok_value,result_field,error_field",
+    [(True, "result", None), (False, None, "error")],
+)
+def test_response_nested_non_dict_rejected(
+    ok_value: bool, result_field: object, error_field: object
+) -> None:
+    resp = PreflightResponse(request_id="req_preflight_1", result=_result(), error=None)
+    data = resp.to_dict()
+    if ok_value is True:
+        data["result"] = ["not-a-dict"]  # nested result must be exact dict
+    else:
+        data["ok"] = False
+        data.pop("result")
+        data["error"] = "not-a-dict"
+    with pytest.raises((TypeError, ValueError)):
+        PreflightResponse.from_dict(data)
+
+
+def test_apply_response_nested_error_must_be_dict() -> None:
+    resp = ApplyResponse(request_id="req_apply_1", result=None, error=_bridge_error())
+    data = resp.to_dict()
+    data["error"] = ["nope"]
+    with pytest.raises((TypeError, ValueError)):
+        ApplyResponse.from_dict(data)
+
+
+def test_receipt_response_nested_result_must_be_dict() -> None:
+    resp = ReceiptResponse(request_id="req_receipt_1", result=_receipt(), error=None)
+    data = resp.to_dict()
+    data["result"] = 123
+    with pytest.raises((TypeError, ValueError)):
+        ReceiptResponse.from_dict(data)
+
+
+# --- parse_* top-level list / scalar rejected (envelope must be exact dict) --
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["[1,2,3]", "42", "\"a-string\"", "true", "null"],
+)
+def test_parse_preflight_request_rejects_non_dict_top_level(raw: str) -> None:
+    from eee_agent.houdini_bridge.changesets import parse_preflight_request
+
+    with pytest.raises((TypeError, ValueError)):
+        parse_preflight_request(raw)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["[1,2,3]", "5", "false", "null"],
+)
+def test_parse_apply_request_rejects_non_dict_top_level(raw: str) -> None:
+    from eee_agent.houdini_bridge.changesets import parse_apply_request
+
+    with pytest.raises((TypeError, ValueError)):
+        parse_apply_request(raw)
+
+
+@pytest.mark.parametrize("raw", ["[]", "17"])
+def test_parse_receipt_request_rejects_non_dict_top_level(raw: str) -> None:
+    from eee_agent.houdini_bridge.changesets import parse_receipt_request
+
+    with pytest.raises((TypeError, ValueError)):
+        parse_receipt_request(raw)
+
+
+@pytest.mark.parametrize("raw", ["[]", "\"s\"", "3.0"])
+def test_parse_preflight_response_rejects_non_dict_top_level(raw: str) -> None:
+    from eee_agent.houdini_bridge.changesets import parse_preflight_response
+
+    with pytest.raises((TypeError, ValueError)):
+        parse_preflight_response(raw)
+
+
+@pytest.mark.parametrize("raw", ["[]", "{}", "7"])
+def test_parse_apply_response_rejects_non_dict_top_level(raw: str) -> None:
+    from eee_agent.houdini_bridge.changesets import parse_apply_response
+
+    with pytest.raises((TypeError, ValueError)):
+        parse_apply_response(raw)
+
+
+@pytest.mark.parametrize("raw", ["[1]", "11"])
+def test_parse_receipt_response_rejects_non_dict_top_level(raw: str) -> None:
+    from eee_agent.houdini_bridge.changesets import parse_receipt_response
+
+    with pytest.raises((TypeError, ValueError)):
+        parse_receipt_response(raw)
+
+
+# --- duplicate key + oversized message still rejected for apply/receipt -----
+
+
+def test_apply_request_duplicate_keys_rejected() -> None:
+    from eee_agent.houdini_bridge.changesets import parse_apply_request
+
+    dup = _apply_request().to_json().replace(
+        '"request_id":"req_apply_1",', '"request_id":"req_apply_1","request_id":"x",'
+    )
+    with pytest.raises(ValueError):
+        parse_apply_request(dup)
+
+
+def test_apply_request_oversized_raw_rejected() -> None:
+    from eee_agent.houdini_bridge.changesets import parse_apply_request
+
+    with pytest.raises(ValueError):
+        parse_apply_request("x" * (MAX_MESSAGE_BYTES + 1))
+
+
+def test_receipt_request_duplicate_keys_rejected() -> None:
+    from eee_agent.houdini_bridge.changesets import parse_receipt_request
+
+    dup = _receipt_request().to_json().replace(
+        '"request_id":"req_receipt_1",', '"request_id":"req_receipt_1","request_id":"x",'
+    )
+    with pytest.raises(ValueError):
+        parse_receipt_request(dup)
+
+
+def test_receipt_request_oversized_raw_rejected() -> None:
+    from eee_agent.houdini_bridge.changesets import parse_receipt_request
+
+    with pytest.raises(ValueError):
+        parse_receipt_request("x" * (MAX_MESSAGE_BYTES + 1))
+
+
+# --- error envelope must not leak a raw token/secret into a surface string --
+
+
+def test_bridge_error_round_trip_keeps_message_off_wire() -> None:
+    resp = ApplyResponse(request_id="req_apply_1", result=None, error=_bridge_error())
+    revived = ApplyResponse.from_dict(resp.to_dict())
+    assert revived.error is not None
+    assert revived.error.technical_detail_ref is None
+    # The error round-trips without surfacing anything beyond its declared fields.
+    assert set(revived.error.to_dict().keys()) >= {"code", "category", "message_for_user"}
 
 
 # ==========================================================================
