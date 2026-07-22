@@ -1122,8 +1122,8 @@ class RuntimeService:
 
         Runs only after the deterministic validation event is durable and
         only over the ArtifactStore-registered capture (never the Bridge
-        source path). Expected provider/artifact failures are already
-        bounded unavailable evidence inside the router outcome; any
+        source path). Expected provider/artifact failures are already bounded
+        typed evidence inside the router outcome; any
         unexpected error is swallowed so advisory evaluation can never
         replay, undo, or fail the already-durable Apply.
         """

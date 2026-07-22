@@ -5,6 +5,8 @@ import hashlib
 from pathlib import Path
 from typing import Mapping
 
+import pytest
+
 from eee_agent.runtime.artifacts import ArtifactStore
 from eee_agent.runtime.database import RuntimeDatabase
 from eee_agent.runtime.events import EventStore
@@ -16,7 +18,10 @@ from eee_agent.vision import (
     ProviderCapability,
     VisionRequest,
     VisionRouter,
+    VisionFailure,
+    VisionOutcome,
     VisionStatus,
+    VisionUnavailable,
 )
 from eee_agent.runtime.service import RuntimeService
 
@@ -38,12 +43,13 @@ class FakeProvider:
             "confidence": 0.9,
             "advisory_passed": True,
         }
-        self.delay = 0.0
+        self.capability_delay = 0.0
+        self.evaluate_delay = 0.0
         self.received: list[bytes] = []
 
     async def capability(self) -> ProviderCapability:
-        if self.delay:
-            await asyncio.sleep(self.delay)
+        if self.capability_delay:
+            await asyncio.sleep(self.capability_delay)
         if isinstance(self.capability_result, BaseException):
             raise self.capability_result
         return self.capability_result  # type: ignore[return-value]
@@ -51,8 +57,8 @@ class FakeProvider:
     async def evaluate(
         self, request: VisionRequest, image_bytes: bytes
     ) -> Mapping[str, object]:
-        if self.delay:
-            await asyncio.sleep(self.delay)
+        if self.evaluate_delay:
+            await asyncio.sleep(self.evaluate_delay)
         self.received.append(image_bytes)
         if isinstance(self.response, BaseException):
             raise self.response
@@ -128,30 +134,91 @@ def test_provider_unavailable_and_api_key_missing_are_explicit(tmp_path: Path) -
     asyncio.run(scenario())
 
 
-def test_timeout_and_schema_invalid_response_fail_closed(tmp_path: Path) -> None:
+def test_capability_timeout_remains_unavailable(tmp_path: Path) -> None:
     async def scenario() -> None:
         db, store, ref = await _store(tmp_path)
         request = VisionRequest("vision-1", ref, "check")
         try:
             slow = FakeProvider()
-            slow.delay = 0.2
+            slow.capability_delay = 0.2
             timeout = await VisionRouter(store, slow, timeout_seconds=0.1).evaluate(
                 request, deterministic_valid=True
             )
             assert timeout.unavailable is not None
             assert timeout.unavailable.reason_code == "vision.provider_timeout"
 
+            assert timeout.failure is None
+        finally:
+            await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_attempted_evaluation_failures_are_typed_failed(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        db, store, ref = await _store(tmp_path)
+        request = VisionRequest("vision-1", ref, "check")
+        try:
+            slow = FakeProvider()
+            slow.evaluate_delay = 0.2
+            timeout = await VisionRouter(store, slow, timeout_seconds=0.1).evaluate(
+                request, deterministic_valid=True
+            )
+            assert timeout.decision.status is VisionStatus.FAILED
+            assert timeout.decision.accepted is False
+            assert timeout.decision.deterministic_valid is True
+            assert timeout.report is None and timeout.unavailable is None
+            assert timeout.failure is not None
+            assert timeout.failure.reason_code == "vision.provider_timeout"
+
             malformed = FakeProvider()
             malformed.response = {"summary": "unbounded schema"}
             invalid = await VisionRouter(store, malformed).evaluate(
                 request, deterministic_valid=True
             )
-            assert invalid.unavailable is not None
-            assert invalid.unavailable.reason_code == "vision.response_invalid"
+            assert invalid.failure is not None
+            assert invalid.failure.reason_code == "vision.response_invalid"
+            assert invalid.decision.status is VisionStatus.FAILED
+            assert invalid.decision.accepted is False
+
+            exploded = FakeProvider()
+            exploded.response = RuntimeError("provider secret must not persist")
+            failed = await VisionRouter(store, exploded).evaluate(
+                request, deterministic_valid=False
+            )
+            assert failed.failure is not None
+            assert failed.failure.reason_code == "vision.provider_failed"
+            assert failed.failure.message == "Visual evaluation provider failed."
+            assert failed.decision.status is VisionStatus.FAILED
+            assert failed.decision.accepted is False
+            assert failed.decision.deterministic_valid is False
         finally:
             await db.close()
 
     asyncio.run(scenario())
+
+
+def test_vision_outcome_requires_evidence_matching_its_status() -> None:
+    failure = VisionFailure(
+        VisionStatus.FAILED,
+        "vision.provider_failed",
+        "Visual evaluation provider failed.",
+    )
+    decision = FinalVisionDecision(
+        VisionStatus.FAILED,
+        False,
+        True,
+        failure.message,
+    )
+    assert VisionOutcome(decision=decision, failure=failure).failure == failure
+    with pytest.raises(ValueError):
+        VisionOutcome(decision=decision)
+    with pytest.raises(ValueError):
+        VisionOutcome(decision=decision, unavailable=VisionUnavailable(
+            VisionStatus.UNAVAILABLE,
+            "vision.provider_unavailable",
+            "unavailable",
+        ))
 
 
 def test_waiver_does_not_call_provider(tmp_path: Path) -> None:

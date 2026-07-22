@@ -111,7 +111,12 @@ def vision_card(summary: Mapping[str, object]) -> MessageItem:
     status = _bounded(summary.get("status"), 40) or "unknown"
     accepted = summary.get("accepted") is True
     decision = "accepted" if accepted else "rejected"
-    tone = "ok" if status == "completed" and accepted else "warn"
+    if status == "completed" and accepted:
+        tone = "ok"
+    elif status == "failed":
+        tone = "error"
+    else:
+        tone = "warn"
     # Hard cap: the status/decision prefix is structural and must stay whole,
     # so report_summary takes whatever of MAX_BODY_CHARS remains after it.
     prefix = f"Status: {status}\nDecision: {decision}"

@@ -261,11 +261,13 @@ def test_vision_provider_failure_never_fails_apply(
             replay = await events.replay(result.changeset.session_id, after_seq=0, limit=100)
             (vision_event,) = _vision_events(replay)
             payload = vision_event.payload
-            assert payload["vision_status"] == "unavailable"
+            assert payload["vision_status"] == "failed"
             assert payload["vision_report"] is None
             decision = payload["final_decision"]
+            assert decision["status"] == "failed"
             assert decision["deterministic_valid"] is True
-            assert decision["accepted"] is True
+            assert decision["accepted"] is False
+            assert decision["summary"] == "Visual evaluation provider failed."
         finally:
             await runtime._shutdown()
             await db.close()

@@ -12,6 +12,7 @@ from eee_agent.vision import (
     ProviderCapability,
     RedactedRawResponseRef,
     VisionRequest,
+    VisionFailure,
     VisionStatus,
     VisionUnavailable,
 )
@@ -73,6 +74,23 @@ def test_report_and_unavailable_payloads_are_bounded() -> None:
         VisionUnavailable(VisionStatus.COMPLETED, "provider_missing", "missing")
     with pytest.raises(ValueError):
         VisionUnavailable("unavailable", "provider_missing", "missing")  # type: ignore[arg-type]
+
+
+def test_failed_payload_is_typed_bounded_and_strict() -> None:
+    failure = VisionFailure(
+        VisionStatus.FAILED,
+        "vision.provider_failed",
+        "Visual evaluation provider failed.",
+    )
+    assert VisionFailure.from_dict(failure.to_dict()) == failure
+    with pytest.raises(ValueError):
+        VisionFailure(VisionStatus.UNAVAILABLE, "vision.failed", "failed")
+    with pytest.raises(ValueError):
+        VisionFailure(VisionStatus.FAILED, "x" * 65, "failed")
+    payload = failure.to_dict()
+    payload["raw_response"] = "must not pass"
+    with pytest.raises(ValueError):
+        VisionFailure.from_dict(payload)
 
 
 def test_request_rejects_oversized_relative_artifact_path() -> None:

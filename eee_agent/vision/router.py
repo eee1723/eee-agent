@@ -14,6 +14,7 @@ from eee_agent.vision.contracts import (
     NormalizedVisualReport,
     ProviderCapability,
     VisionRequest,
+    VisionFailure,
     VisionStatus,
     VisionUnavailable,
 )
@@ -33,6 +34,7 @@ class VisionOutcome:
     decision: FinalVisionDecision
     report: NormalizedVisualReport | None = None
     unavailable: VisionUnavailable | None = None
+    failure: VisionFailure | None = None
 
     def __post_init__(self) -> None:
         if type(self.decision) is not FinalVisionDecision:
@@ -41,8 +43,29 @@ class VisionOutcome:
             raise ValueError("report must be an exact NormalizedVisualReport")
         if self.unavailable is not None and type(self.unavailable) is not VisionUnavailable:
             raise ValueError("unavailable must be an exact VisionUnavailable")
-        if self.report is not None and self.unavailable is not None:
-            raise ValueError("outcome cannot contain both report and unavailable")
+        if self.failure is not None and type(self.failure) is not VisionFailure:
+            raise ValueError("failure must be an exact VisionFailure")
+        status = self.decision.status
+        if status is VisionStatus.COMPLETED:
+            valid = self.report is not None and self.unavailable is None and self.failure is None
+        elif status in {VisionStatus.UNAVAILABLE, VisionStatus.WAIVED}:
+            valid = (
+                self.report is None
+                and self.unavailable is not None
+                and self.unavailable.status is status
+                and self.failure is None
+            )
+        elif status is VisionStatus.FAILED:
+            valid = (
+                self.report is None
+                and self.unavailable is None
+                and self.failure is not None
+                and self.failure.status is status
+            )
+        else:  # pragma: no cover - VisionStatus is exhaustive
+            valid = False
+        if not valid:
+            raise ValueError("vision outcome evidence does not match its status")
 
 
 def _unavailable(
@@ -58,6 +81,24 @@ def _unavailable(
             message,
         ),
         unavailable=unavailable,
+    )
+
+
+def _failed(
+    code: str,
+    message: str,
+    *,
+    deterministic_valid: bool,
+) -> VisionOutcome:
+    failure = VisionFailure(VisionStatus.FAILED, code, message)
+    return VisionOutcome(
+        decision=FinalVisionDecision(
+            VisionStatus.FAILED,
+            False,
+            deterministic_valid,
+            message,
+        ),
+        failure=failure,
     )
 
 
@@ -189,19 +230,19 @@ class VisionRouter:
             )
             report = NormalizedVisualReport.from_dict(payload)
         except asyncio.TimeoutError:
-            return _unavailable(
+            return _failed(
                 "vision.provider_timeout",
                 "Visual evaluation provider timed out.",
                 deterministic_valid=deterministic_valid,
             )
         except (TypeError, ValueError):
-            return _unavailable(
+            return _failed(
                 "vision.response_invalid",
                 "Visual evaluation provider response is invalid.",
                 deterministic_valid=deterministic_valid,
             )
         except Exception:
-            return _unavailable(
+            return _failed(
                 "vision.provider_failed",
                 "Visual evaluation provider failed.",
                 deterministic_valid=deterministic_valid,

@@ -168,6 +168,37 @@ class VisionUnavailable(_StrictContract):
 
 
 @dataclass(frozen=True, slots=True)
+class VisionFailure(_StrictContract):
+    status: VisionStatus
+    reason_code: str
+    message: str
+
+    _FIELDS = frozenset({"status", "reason_code", "message"})
+
+    def __post_init__(self) -> None:
+        if type(self.status) is not VisionStatus or self.status is not VisionStatus.FAILED:
+            raise ValueError("failure status must be failed")
+        _text(self.reason_code, "reason_code", maximum=64)
+        _text(self.message, "message", maximum=512)
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> "VisionFailure":
+        data = cls._payload(payload)
+        try:
+            status = VisionStatus(data["status"])
+        except (TypeError, ValueError):
+            raise ValueError("vision status is invalid") from None
+        return cls(status, data["reason_code"], data["message"])  # type: ignore[arg-type]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "status": self.status.value,
+            "reason_code": self.reason_code,
+            "message": self.message,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class NormalizedVisualReport(_StrictContract):
     summary: str
     observations: tuple[str, ...]
@@ -250,6 +281,8 @@ class FinalVisionDecision(_StrictContract):
         _text(self.summary, "summary", maximum=1024)
         if not self.deterministic_valid and self.accepted:
             raise ValueError("advisory vision cannot override deterministic failure")
+        if self.status is VisionStatus.FAILED and self.accepted:
+            raise ValueError("failed vision evaluation cannot be accepted")
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object]) -> "FinalVisionDecision":

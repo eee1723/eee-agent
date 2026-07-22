@@ -58,7 +58,7 @@ def test_vision_card_maps_status_to_tone() -> None:
     failed = vm.vision_card({"status": "failed",
                              "accepted": False,
                              "report_summary": None})
-    assert failed.tone == "warn"
+    assert failed.tone == "error"
     assert failed.body  # bounded fallback text, never empty
 
 

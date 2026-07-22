@@ -533,6 +533,20 @@ def _unavailable_vision_message() -> dict[str, object]:
     return message
 
 
+def _failed_vision_message() -> dict[str, object]:
+    message = _vision_message()
+    payload = message["payload"]  # type: ignore[index]
+    payload["vision_status"] = "failed"
+    payload["vision_report"] = None
+    payload["final_decision"] = {
+        "status": "failed",
+        "accepted": False,
+        "deterministic_valid": True,
+        "summary": "Visual evaluation provider failed.",
+    }
+    return message
+
+
 def test_vision_events_require_authoritative_refresh() -> None:
     assert vision_refresh_required(
         {"kind": "event", "type": "vision.evaluation_completed"}
@@ -569,6 +583,15 @@ def test_parse_vision_unavailable_event_has_no_report() -> None:
     assert summary["report_summary"] is None
     assert summary["observation_count"] == 0
     assert summary["artifact_count"] == 1
+
+
+def test_parse_vision_failed_event_is_not_accepted() -> None:
+    summary = parse_vision_event(_failed_vision_message())
+    assert summary["status"] == "failed"
+    assert summary["accepted"] is False
+    assert summary["deterministic_valid"] is True
+    assert summary["report_summary"] is None
+    assert summary["summary"] == "Visual evaluation provider failed."
 
 
 def test_parse_vision_event_rejects_non_vision_types() -> None:

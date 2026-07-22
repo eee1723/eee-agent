@@ -6,6 +6,7 @@ from .contracts import (
     ProviderCapability,
     RedactedRawResponseRef,
     VisionRequest,
+    VisionFailure,
     VisionStatus,
     VisionUnavailable,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "ProviderCapability",
     "RedactedRawResponseRef",
     "VisionRequest",
+    "VisionFailure",
     "VisionStatus",
     "VisionUnavailable",
     "VisionOutcome",
