@@ -297,3 +297,151 @@ def test_contract_module_has_no_write_or_framework_imports() -> None:
     assert imported.isdisjoint(
         {"hou", "rpyc", "langchain", "langgraph", "subprocess", "sqlite3"}
     )
+
+
+# ---------------------------------------------------------------------------
+# Exception-direction regression: from_dict must preserve the original
+# ValueError vs TypeError direction that each field's __post_init__ defines.
+# These exercises the parse_*/from_dict boundary (the real data entry point).
+# ---------------------------------------------------------------------------
+
+
+def _brief_dict(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "schema_version": 1,
+        "brief_key": "table",
+        "title": "Parametric table",
+        "asset_family": "furniture",
+        "goal": "Build a stable component-based table.",
+        "units": UnitSystem.CENTIMETERS.value,
+        "up_axis": Axis.Y.value,
+        "front_axis": FrontAxis.NEGATIVE_Z.value,
+        "constraints": (
+            BriefConstraint(
+                code="semantic.four_legs",
+                statement="The table must have four supporting legs.",
+            ).to_dict(),
+        ),
+    }
+    values.update(overrides)
+    return values
+
+
+def _profile_dict(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "schema_version": 1,
+        "profile_id": "strict_sop_v1",
+        "validators": [v.value for v in ValidatorKind],
+        "max_compiled_nodes": 64,
+        "max_parameter_samples": 32,
+        "max_repairs_per_stage": 2,
+        "allow_vex_source": False,
+    }
+    values.update(overrides)
+    return values
+
+
+def _attempt_dict(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "validator": ValidatorKind.GRAPH.value,
+        "count": 1,
+    }
+    values.update(overrides)
+    return values
+
+
+def _node_dict(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "node_key": "box",
+        "node_type": "box",
+        "node_name": "tabletop",
+        "parent_node": None,
+        "parameters": (
+            ParmAssignment(parm_name="size", value=(100.0, 5.0, 60.0)).to_dict(),
+        ),
+        "inputs": [],
+    }
+    values.update(overrides)
+    return values
+
+
+def _binding_dict(**overrides: object) -> dict[str, object]:
+    values: dict[str, object] = {
+        "input_index": 0,
+        "source_node": "body.source",
+        "source_output_index": 0,
+    }
+    values.update(overrides)
+    return values
+
+
+def test_brief_units_int_rejected_as_value_error() -> None:
+    with pytest.raises(ValueError, match="units"):
+        parse_modeling_brief(json.dumps(_brief_dict(units=123)))
+
+
+def test_brief_up_axis_int_rejected_as_value_error() -> None:
+    with pytest.raises(ValueError, match="up_axis"):
+        parse_modeling_brief(json.dumps(_brief_dict(up_axis=123)))
+
+
+def test_brief_front_axis_int_rejected_as_value_error() -> None:
+    with pytest.raises(ValueError, match="front_axis"):
+        parse_modeling_brief(json.dumps(_brief_dict(front_axis=123)))
+
+
+def test_brief_schema_version_bool_rejected_as_value_error() -> None:
+    with pytest.raises(ValueError, match="schema_version"):
+        parse_modeling_brief(json.dumps(_brief_dict(schema_version=True)))
+
+
+def test_brief_brief_key_int_rejected_as_value_error() -> None:
+    with pytest.raises(ValueError, match="brief_key"):
+        parse_modeling_brief(json.dumps(_brief_dict(brief_key=123)))
+
+
+def test_profile_validators_non_str_rejected_as_value_error() -> None:
+    with pytest.raises(ValueError, match="validators"):
+        parse_quality_profile(json.dumps(_profile_dict(validators=[123])))
+
+
+def test_profile_profile_id_int_rejected_as_value_error() -> None:
+    with pytest.raises(ValueError, match="profile_id"):
+        parse_quality_profile(json.dumps(_profile_dict(profile_id=123)))
+
+
+def test_profile_max_compiled_nodes_bool_rejected_as_type_error() -> None:
+    with pytest.raises(TypeError, match="max_compiled_nodes"):
+        parse_quality_profile(
+            json.dumps(_profile_dict(max_compiled_nodes=True))
+        )
+
+
+def test_attempt_validator_int_rejected_as_value_error() -> None:
+    with pytest.raises(ValueError, match="validator"):
+        RepairAttempt.from_dict(_attempt_dict(validator=123))
+
+
+def test_attempt_count_bool_rejected_as_type_error() -> None:
+    with pytest.raises(TypeError, match="count"):
+        RepairAttempt.from_dict(_attempt_dict(count=True))
+
+
+def test_node_parent_node_int_rejected_as_value_error() -> None:
+    with pytest.raises(ValueError, match="parent_node"):
+        NodeSpec.from_dict(_node_dict(parent_node=123))
+
+
+def test_node_node_key_int_rejected_as_value_error() -> None:
+    with pytest.raises(ValueError, match="node_key"):
+        NodeSpec.from_dict(_node_dict(node_key=123))
+
+
+def test_binding_source_node_int_rejected_as_value_error() -> None:
+    with pytest.raises(ValueError, match="source_node"):
+        InputBinding.from_dict(_binding_dict(source_node=123))
+
+
+def test_binding_input_index_bool_rejected_as_type_error() -> None:
+    with pytest.raises(TypeError, match="input_index"):
+        InputBinding.from_dict(_binding_dict(input_index=True))

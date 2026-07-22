@@ -14,6 +14,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import TypeVar
 
 from eee_agent.runtime.models import canonical_json_dumps
 
@@ -119,10 +120,46 @@ def _require_exact_bool(value: object, label: str) -> bool:
     return value
 
 
+def _require_exact_mapping(value: object, label: str) -> dict[str, object]:
+    if type(value) is not dict:
+        raise TypeError(f"{label} must be an exact dict")
+    return value
+
+
+def _require_code(value: object, label: str) -> str:
+    if type(value) is not str or _CODE_RE.fullmatch(value) is None:
+        raise ValueError(f"{label} must be a namespaced code")
+    return value
+
+
+def _require_schema_version(value: object, label: str) -> int:
+    if type(value) is not int or value != 1:
+        raise ValueError(f"{label} must be 1")
+    return value
+
+
 def _require_sha256(value: object, label: str) -> str:
     if type(value) is not str or _SHA256_RE.fullmatch(value) is None:
         raise ValueError(f"{label} must contain exactly 64 lowercase hex characters")
     return value
+
+
+_EnumT = TypeVar("_EnumT", bound=StrEnum)
+
+
+def _decode_enum(enum_type: type[_EnumT], value: object, label: str) -> _EnumT:
+    if type(value) is not str:
+        raise ValueError(f"{label} must be a supported enum value")
+    try:
+        return enum_type(value)
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a supported enum value") from exc
+
+
+def _decode_optional_qualified_node(value: object, label: str) -> str | None:
+    if value is None:
+        return None
+    return _require_qualified_node(value, label)
 
 
 def _require_exact_keys(
@@ -165,28 +202,36 @@ def _json_parm_value(value: object) -> object:
     return value
 
 
+def _validate_parm_tuple(
+    items: tuple[object, ...], label: str
+) -> tuple[object, ...]:
+    if not items:
+        raise ValueError(f"{label} tuple must not be empty")
+    if len(items) > 16:
+        raise ValueError(f"{label} tuple exceeds the maximum length")
+    item_type = type(items[0])
+    if item_type not in (bool, int, float, str):
+        raise TypeError(f"{label} tuple entries must be JSON scalars")
+    for item in items:
+        if type(item) is not item_type:
+            raise ValueError(f"{label} tuple must be homogeneous")
+        if type(item) is float and not math.isfinite(item):
+            raise ValueError(f"{label} tuple must contain finite floats")
+    return items
+
+
 def _validate_parm_value(value: object, label: str) -> object:
-    if type(value) in (bool, int, str):
+    normalized: object
+    if type(value) is bool or type(value) is int or type(value) is str:
         normalized = value
     elif type(value) is float:
         if not math.isfinite(value):
             raise ValueError(f"{label} must be finite")
         normalized = value
-    elif type(value) in (list, tuple):
-        items = tuple(value)
-        if not items:
-            raise ValueError(f"{label} tuple must not be empty")
-        if len(items) > 16:
-            raise ValueError(f"{label} tuple exceeds the maximum length")
-        item_type = type(items[0])
-        if item_type not in (bool, int, float, str):
-            raise TypeError(f"{label} tuple entries must be JSON scalars")
-        for item in items:
-            if type(item) is not item_type:
-                raise ValueError(f"{label} tuple must be homogeneous")
-            if type(item) is float and not math.isfinite(item):
-                raise ValueError(f"{label} tuple must contain finite floats")
-        normalized = items
+    elif type(value) is list:
+        normalized = _validate_parm_tuple(tuple(value), label)
+    elif type(value) is tuple:
+        normalized = _validate_parm_tuple(value, label)
     else:
         raise TypeError(f"{label} must be a JSON scalar or homogeneous tuple")
     size = len(canonical_json_dumps(_json_parm_value(normalized)).encode("utf-8"))
@@ -220,7 +265,11 @@ class BriefConstraint:
         data = _require_exact_keys(
             value, frozenset({"code", "statement"}), "BriefConstraint"
         )
-        return cls(code=data["code"], statement=data["statement"])  # type: ignore[arg-type]
+        code = _require_code(data["code"], "BriefConstraint.code")
+        statement = _require_text(
+            data["statement"], "BriefConstraint.statement", _MAX_TEXT
+        )
+        return cls(code=code, statement=statement)
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,15 +355,28 @@ class ModelingBrief:
             data["constraints"], "ModelingBrief.constraints", _MAX_CONSTRAINTS
         )
         return cls(
-            schema_version=data["schema_version"],  # type: ignore[arg-type]
-            brief_key=data["brief_key"],  # type: ignore[arg-type]
-            title=data["title"],  # type: ignore[arg-type]
-            asset_family=data["asset_family"],  # type: ignore[arg-type]
-            goal=data["goal"],  # type: ignore[arg-type]
-            units=UnitSystem(data["units"]),
-            up_axis=Axis(data["up_axis"]),
-            front_axis=FrontAxis(data["front_axis"]),
-            constraints=tuple(BriefConstraint.from_dict(item) for item in constraints),
+            schema_version=_require_schema_version(
+                data["schema_version"], "ModelingBrief.schema_version"
+            ),
+            brief_key=_require_identifier(
+                data["brief_key"], "ModelingBrief.brief_key"
+            ),
+            title=_require_text(data["title"], "ModelingBrief.title", _MAX_TITLE),
+            asset_family=_require_identifier(
+                data["asset_family"], "ModelingBrief.asset_family"
+            ),
+            goal=_require_text(data["goal"], "ModelingBrief.goal", _MAX_TEXT),
+            units=_decode_enum(UnitSystem, data["units"], "ModelingBrief.units"),
+            up_axis=_decode_enum(Axis, data["up_axis"], "ModelingBrief.up_axis"),
+            front_axis=_decode_enum(
+                FrontAxis, data["front_axis"], "ModelingBrief.front_axis"
+            ),
+            constraints=tuple(
+                BriefConstraint.from_dict(
+                    _require_exact_mapping(item, "ModelingBrief.constraints")
+                )
+                for item in constraints
+            ),
         )
 
 
@@ -340,7 +402,10 @@ class ParmAssignment:
         data = _require_exact_keys(
             value, frozenset({"parm_name", "value"}), "ParmAssignment"
         )
-        return cls(data["parm_name"], data["value"])  # type: ignore[arg-type]
+        parm_name = _require_identifier(
+            data["parm_name"], "ParmAssignment.parm_name"
+        )
+        return cls(parm_name, data["value"])
 
 
 @dataclass(frozen=True, slots=True)
@@ -377,9 +442,14 @@ class InputBinding:
             "InputBinding",
         )
         return cls(
-            data["input_index"],  # type: ignore[arg-type]
-            data["source_node"],  # type: ignore[arg-type]
-            data["source_output_index"],  # type: ignore[arg-type]
+            _require_exact_int(data["input_index"], "InputBinding.input_index"),
+            _require_qualified_node(
+                data["source_node"], "InputBinding.source_node"
+            ),
+            _require_exact_int(
+                data["source_output_index"],
+                "InputBinding.source_output_index",
+            ),
         )
 
 
@@ -452,12 +522,24 @@ class NodeSpec:
         )
         inputs = _sequence(data["inputs"], "NodeSpec.inputs", _MAX_INPUTS_PER_NODE)
         return cls(
-            node_key=data["node_key"],  # type: ignore[arg-type]
-            node_type=data["node_type"],  # type: ignore[arg-type]
-            node_name=data["node_name"],  # type: ignore[arg-type]
-            parent_node=data["parent_node"],  # type: ignore[arg-type]
-            parameters=tuple(ParmAssignment.from_dict(item) for item in parameters),
-            inputs=tuple(InputBinding.from_dict(item) for item in inputs),
+            node_key=_require_identifier(data["node_key"], "NodeSpec.node_key"),
+            node_type=_require_identifier(data["node_type"], "NodeSpec.node_type"),
+            node_name=_require_identifier(data["node_name"], "NodeSpec.node_name"),
+            parent_node=_decode_optional_qualified_node(
+                data["parent_node"], "NodeSpec.parent_node"
+            ),
+            parameters=tuple(
+                ParmAssignment.from_dict(
+                    _require_exact_mapping(item, "NodeSpec.parameters")
+                )
+                for item in parameters
+            ),
+            inputs=tuple(
+                InputBinding.from_dict(
+                    _require_exact_mapping(item, "NodeSpec.inputs")
+                )
+                for item in inputs
+            ),
         )
 
 
@@ -514,10 +596,19 @@ class ComponentSpec:
             data["nodes"], "ComponentSpec.nodes", _MAX_NODES_PER_COMPONENT
         )
         return cls(
-            component_id=data["component_id"],  # type: ignore[arg-type]
-            role=data["role"],  # type: ignore[arg-type]
-            depends_on=data["depends_on"],  # type: ignore[arg-type]
-            nodes=tuple(NodeSpec.from_dict(item) for item in nodes),
+            component_id=_require_identifier(
+                data["component_id"], "ComponentSpec.component_id"
+            ),
+            role=_require_identifier(data["role"], "ComponentSpec.role"),
+            depends_on=_identifier_sequence(
+                data["depends_on"], "ComponentSpec.depends_on", _MAX_COMPONENTS
+            ),
+            nodes=tuple(
+                NodeSpec.from_dict(
+                    _require_exact_mapping(item, "ComponentSpec.nodes")
+                )
+                for item in nodes
+            ),
         )
 
 
@@ -582,6 +673,7 @@ class ProceduralSpec:
         by_id: dict[str, ComponentSpec] = {}
         qualified_nodes: set[str] = set()
         node_names: set[str] = set()
+        validated_components: list[ComponentSpec] = []
         for component in components:
             if type(component) is not ComponentSpec:
                 raise TypeError(
@@ -590,6 +682,7 @@ class ProceduralSpec:
             if component.component_id in by_id:
                 raise ValueError("ProceduralSpec.components contains duplicate IDs")
             by_id[component.component_id] = component
+            validated_components.append(component)
             for node in component.nodes:
                 qualified = f"{component.component_id}.{node.node_key}"
                 qualified_nodes.add(qualified)
@@ -598,16 +691,16 @@ class ProceduralSpec:
                         "ProceduralSpec contains duplicate node names under the Workspace root"
                     )
                 node_names.add(node.node_name)
-        closure = _component_dependency_closure(components)  # also cycle check
-        for component in components:
+        component_tuple: tuple[ComponentSpec, ...] = tuple(validated_components)
+        closure = _component_dependency_closure(component_tuple)  # also cycle check
+        for component in component_tuple:
             allowed_dependencies = closure[component.component_id]
             for node in component.nodes:
-                references = [
-                    *([node.parent_node] if node.parent_node is not None else []),
-                    *(binding.source_node for binding in node.inputs),
-                ]
+                references: list[str] = []
+                if node.parent_node is not None:
+                    references.append(node.parent_node)
+                references.extend(binding.source_node for binding in node.inputs)
                 for reference in references:
-                    assert reference is not None
                     if reference not in qualified_nodes:
                         raise ValueError(
                             f"ProceduralSpec references unknown qualified node {reference!r}"
@@ -621,7 +714,7 @@ class ProceduralSpec:
                             "ProceduralSpec contains a hidden dependency not declared "
                             "by ComponentSpec.depends_on"
                         )
-        object.__setattr__(self, "components", components)
+        object.__setattr__(self, "components", component_tuple)
 
     @property
     def digest(self) -> str:
@@ -659,12 +752,28 @@ class ProceduralSpec:
             data["components"], "ProceduralSpec.components", _MAX_COMPONENTS
         )
         return cls(
-            schema_version=data["schema_version"],  # type: ignore[arg-type]
-            spec_key=data["spec_key"],  # type: ignore[arg-type]
-            brief_digest=data["brief_digest"],  # type: ignore[arg-type]
-            quality_profile_id=data["quality_profile_id"],  # type: ignore[arg-type]
-            workspace_root_node_id=data["workspace_root_node_id"],  # type: ignore[arg-type]
-            components=tuple(ComponentSpec.from_dict(item) for item in components),
+            schema_version=_require_schema_version(
+                data["schema_version"], "ProceduralSpec.schema_version"
+            ),
+            spec_key=_require_identifier(
+                data["spec_key"], "ProceduralSpec.spec_key"
+            ),
+            brief_digest=_require_sha256(
+                data["brief_digest"], "ProceduralSpec.brief_digest"
+            ),
+            quality_profile_id=_require_identifier(
+                data["quality_profile_id"], "ProceduralSpec.quality_profile_id"
+            ),
+            workspace_root_node_id=_require_identifier(
+                data["workspace_root_node_id"],
+                "ProceduralSpec.workspace_root_node_id",
+            ),
+            components=tuple(
+                ComponentSpec.from_dict(
+                    _require_exact_mapping(item, "ProceduralSpec.components")
+                )
+                for item in components
+            ),
         )
 
 
@@ -745,13 +854,30 @@ class QualityProfile:
             data["validators"], "QualityProfile.validators", len(ValidatorKind)
         )
         return cls(
-            schema_version=data["schema_version"],  # type: ignore[arg-type]
-            profile_id=data["profile_id"],  # type: ignore[arg-type]
-            validators=tuple(ValidatorKind(item) for item in validators),
-            max_compiled_nodes=data["max_compiled_nodes"],  # type: ignore[arg-type]
-            max_parameter_samples=data["max_parameter_samples"],  # type: ignore[arg-type]
-            max_repairs_per_stage=data["max_repairs_per_stage"],  # type: ignore[arg-type]
-            allow_vex_source=data["allow_vex_source"],  # type: ignore[arg-type]
+            schema_version=_require_schema_version(
+                data["schema_version"], "QualityProfile.schema_version"
+            ),
+            profile_id=_require_identifier(
+                data["profile_id"], "QualityProfile.profile_id"
+            ),
+            validators=tuple(
+                _decode_enum(ValidatorKind, item, "QualityProfile.validators")
+                for item in validators
+            ),
+            max_compiled_nodes=_require_exact_int(
+                data["max_compiled_nodes"], "QualityProfile.max_compiled_nodes"
+            ),
+            max_parameter_samples=_require_exact_int(
+                data["max_parameter_samples"],
+                "QualityProfile.max_parameter_samples",
+            ),
+            max_repairs_per_stage=_require_exact_int(
+                data["max_repairs_per_stage"],
+                "QualityProfile.max_repairs_per_stage",
+            ),
+            allow_vex_source=_require_exact_bool(
+                data["allow_vex_source"], "QualityProfile.allow_vex_source"
+            ),
         )
 
 
@@ -776,8 +902,10 @@ class RepairAttempt:
             value, frozenset({"validator", "count"}), "RepairAttempt"
         )
         return cls(
-            validator=ValidatorKind(data["validator"]),
-            count=data["count"],  # type: ignore[arg-type]
+            validator=_decode_enum(
+                ValidatorKind, data["validator"], "RepairAttempt.validator"
+            ),
+            count=_require_exact_int(data["count"], "RepairAttempt.count"),
         )
 
 
@@ -857,9 +985,19 @@ class RepairBudget:
             data["attempts"], "RepairBudget.attempts", len(ValidatorKind)
         )
         return cls(
-            schema_version=data["schema_version"],  # type: ignore[arg-type]
-            max_attempts_per_stage=data["max_attempts_per_stage"],  # type: ignore[arg-type]
-            attempts=tuple(RepairAttempt.from_dict(item) for item in attempts),
+            schema_version=_require_schema_version(
+                data["schema_version"], "RepairBudget.schema_version"
+            ),
+            max_attempts_per_stage=_require_exact_int(
+                data["max_attempts_per_stage"],
+                "RepairBudget.max_attempts_per_stage",
+            ),
+            attempts=tuple(
+                RepairAttempt.from_dict(
+                    _require_exact_mapping(item, "RepairBudget.attempts")
+                )
+                for item in attempts
+            ),
         )
 
 
@@ -967,17 +1105,48 @@ class RepairTicket:
             ),
             "RepairTicket",
         )
+        evidence = _sequence(
+            data["evidence_digests"],
+            "RepairTicket.evidence_digests",
+            _MAX_EVIDENCE,
+        )
+        samples = _sequence(
+            data["failed_parameter_samples"],
+            "RepairTicket.failed_parameter_samples",
+            _MAX_FAILED_SAMPLES,
+        )
         return cls(
-            schema_version=data["schema_version"],  # type: ignore[arg-type]
-            ticket_id=data["ticket_id"],  # type: ignore[arg-type]
-            validator=ValidatorKind(data["validator"]),
-            failure_code=data["failure_code"],  # type: ignore[arg-type]
-            message=data["message"],  # type: ignore[arg-type]
-            evidence_digests=data["evidence_digests"],  # type: ignore[arg-type]
-            failed_parameter_samples=data["failed_parameter_samples"],  # type: ignore[arg-type]
-            replay_boundary_digest=data["replay_boundary_digest"],  # type: ignore[arg-type]
-            attempt=data["attempt"],  # type: ignore[arg-type]
-            status=RepairStatus(data["status"]),
+            schema_version=_require_schema_version(
+                data["schema_version"], "RepairTicket.schema_version"
+            ),
+            ticket_id=_require_identifier(
+                data["ticket_id"], "RepairTicket.ticket_id"
+            ),
+            validator=_decode_enum(
+                ValidatorKind, data["validator"], "RepairTicket.validator"
+            ),
+            failure_code=_require_code(
+                data["failure_code"], "RepairTicket.failure_code"
+            ),
+            message=_require_text(data["message"], "RepairTicket.message", _MAX_TEXT),
+            evidence_digests=tuple(
+                _require_sha256(item, "RepairTicket.evidence_digests")
+                for item in evidence
+            ),
+            failed_parameter_samples=tuple(
+                _require_text(
+                    item, "RepairTicket.failed_parameter_samples", _MAX_TITLE
+                )
+                for item in samples
+            ),
+            replay_boundary_digest=_require_sha256(
+                data["replay_boundary_digest"],
+                "RepairTicket.replay_boundary_digest",
+            ),
+            attempt=_require_exact_int(data["attempt"], "RepairTicket.attempt"),
+            status=_decode_enum(
+                RepairStatus, data["status"], "RepairTicket.status"
+            ),
         )
 
 
@@ -1012,24 +1181,29 @@ def _load_strict_json(raw: str | bytes, label: str) -> object:
         raise ValueError(f"{label} is not strict JSON") from exc
 
 
+def _load_strict_mapping(raw: str | bytes, label: str) -> dict[str, object]:
+    payload = _load_strict_json(raw, f"{label} JSON")
+    return _require_exact_mapping(payload, label)
+
+
 def parse_modeling_brief(raw: str | bytes) -> ModelingBrief:
-    return ModelingBrief.from_dict(_load_strict_json(raw, "ModelingBrief JSON"))
+    return ModelingBrief.from_dict(_load_strict_mapping(raw, "ModelingBrief"))
 
 
 def parse_procedural_spec(raw: str | bytes) -> ProceduralSpec:
-    return ProceduralSpec.from_dict(_load_strict_json(raw, "ProceduralSpec JSON"))
+    return ProceduralSpec.from_dict(_load_strict_mapping(raw, "ProceduralSpec"))
 
 
 def parse_quality_profile(raw: str | bytes) -> QualityProfile:
-    return QualityProfile.from_dict(_load_strict_json(raw, "QualityProfile JSON"))
+    return QualityProfile.from_dict(_load_strict_mapping(raw, "QualityProfile"))
 
 
 def parse_repair_budget(raw: str | bytes) -> RepairBudget:
-    return RepairBudget.from_dict(_load_strict_json(raw, "RepairBudget JSON"))
+    return RepairBudget.from_dict(_load_strict_mapping(raw, "RepairBudget"))
 
 
 def parse_repair_ticket(raw: str | bytes) -> RepairTicket:
-    return RepairTicket.from_dict(_load_strict_json(raw, "RepairTicket JSON"))
+    return RepairTicket.from_dict(_load_strict_mapping(raw, "RepairTicket"))
 
 
 __all__ = [
