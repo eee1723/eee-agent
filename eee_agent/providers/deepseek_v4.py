@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
+from pydantic import SecretStr
 
 from eee_agent.core.errors import AgentError, AgentException, ErrorCategory
 from eee_agent.providers.contracts import (
     ModelProfile,
     ProviderConnection,
     ProviderKind,
+    ThinkingEffort,
     Transport,
 )
 from eee_agent.providers.secrets import resolve_secret
@@ -45,19 +49,25 @@ class DeepSeekV4ProviderAdapter:
                 "provider.invalid_capability",
                 "DeepSeek V4 Anthropic transport does not support image input.",
             )
-        api_key = resolve_secret(connection.secret_ref)
+        api_key = SecretStr(resolve_secret(connection.secret_ref))
         thinking = {"type": "enabled" if profile.thinking_enabled else "disabled"}
-        effort = profile.effort.value if profile.thinking_enabled and profile.effort else None
+        effort: Literal["high", "max"] | None = None
+        if profile.thinking_enabled:
+            if profile.effort is ThinkingEffort.HIGH:
+                effort = "high"
+            elif profile.effort is ThinkingEffort.MAX:
+                effort = "max"
         return ChatAnthropic(
-            model=profile.model_name,
+            model_name=profile.model_name,
             base_url=DEEPSEEK_ANTHROPIC_URL,
             api_key=api_key,
-            max_tokens=profile.max_output_tokens,
+            max_tokens_to_sample=profile.max_output_tokens,
             thinking=thinking,
             effort=effort,
             output_version="v1",
             timeout=connection.timeout_seconds,
             max_retries=connection.max_retries,
+            stop=None,
             stream_usage=True,
         )
 
