@@ -512,6 +512,7 @@ def _vision_message(**overrides: object) -> dict[str, object]:
                 "deterministic_valid": True,
                 "summary": "silhouette matches",
             },
+            "vision_reason_code": "vision.completed",
             "recovery_evidence": [],
         },
     }
@@ -530,6 +531,7 @@ def _unavailable_vision_message() -> dict[str, object]:
         "deterministic_valid": True,
         "summary": "Visual evaluation provider is unavailable.",
     }
+    payload["vision_reason_code"] = "vision.provider_unavailable"
     return message
 
 
@@ -544,6 +546,7 @@ def _failed_vision_message() -> dict[str, object]:
         "deterministic_valid": True,
         "summary": "Visual evaluation provider failed.",
     }
+    payload["vision_reason_code"] = "vision.provider_failed"
     return message
 
 

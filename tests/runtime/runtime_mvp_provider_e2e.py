@@ -47,6 +47,10 @@ _EVIDENCE_FIELDS = frozenset(
         "receipt_status",
         "validation_status",
         "artifact_status",
+        "vision_status",
+        "vision_accepted",
+        "vision_reason_code",
+        "vision_artifact_digest_match",
         "replay_last_seq",
         "scene_cleanup",
     }
@@ -105,6 +109,11 @@ def _validate_evidence(path: Path) -> bool:
         and payload["receipt_status"] in {"applied", "already_applied"}
         and payload["validation_status"] == "passed"
         and payload["artifact_status"] == "available"
+        and payload["vision_status"] in {"completed", "unavailable", "failed"}
+        and type(payload["vision_accepted"]) is bool
+        and type(payload["vision_reason_code"]) is str
+        and 1 <= len(payload["vision_reason_code"]) <= 64
+        and type(payload["vision_artifact_digest_match"]) is bool
         and type(payload["replay_last_seq"]) is int
         and payload["replay_last_seq"] >= 1
         and payload["scene_cleanup"] == "completed"

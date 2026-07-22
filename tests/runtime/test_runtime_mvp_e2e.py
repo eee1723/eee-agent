@@ -300,12 +300,21 @@ def test_mvp_provider_evidence_is_strict_and_cannot_be_a_noop(tmp_path: Path) ->
         "receipt_status": "applied",
         "validation_status": "passed",
         "artifact_status": "available",
+        "vision_status": "completed",
+        "vision_accepted": True,
+        "vision_reason_code": "vision.completed",
+        "vision_artifact_digest_match": True,
         "replay_last_seq": 7,
         "scene_cleanup": "completed",
     }
     path.write_text(json.dumps(evidence), encoding="utf-8")
     assert _validate_evidence(path)
     path.write_text(json.dumps({**evidence, "provider_output": "unbounded"}), encoding="utf-8")
+    assert not _validate_evidence(path)
+    path.write_text(
+        json.dumps({**evidence, "vision_artifact_digest_match": "yes"}),
+        encoding="utf-8",
+    )
     assert not _validate_evidence(path)
     path.unlink()
     assert not _validate_evidence(path)

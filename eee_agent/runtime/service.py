@@ -1146,6 +1146,12 @@ class RuntimeService:
                 ),
                 deterministic_valid=deterministic_valid,
             )
+            if outcome.failure is not None:
+                vision_reason_code = outcome.failure.reason_code
+            elif outcome.unavailable is not None:
+                vision_reason_code = outcome.unavailable.reason_code
+            else:
+                vision_reason_code = "vision.completed"
             evaluation = DeliveryEvaluation(
                 brief=run.user_input[:4096],
                 spec=_changeset_delivery_spec(changeset),
@@ -1166,6 +1172,7 @@ class RuntimeService:
                 vision_report=outcome.report,
                 final_decision=outcome.decision,
                 recovery_evidence=(),
+                vision_reason_code=vision_reason_code,
             )
             await self.record_vision_evaluation(
                 changeset.session_id, changeset.run_id, evaluation

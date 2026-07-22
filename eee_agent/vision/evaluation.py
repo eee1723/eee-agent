@@ -43,6 +43,7 @@ class DeliveryEvaluation:
     vision_report: NormalizedVisualReport | None
     final_decision: FinalVisionDecision
     recovery_evidence: tuple[str, ...]
+    vision_reason_code: str | None = None
 
     def __post_init__(self) -> None:
         _text(self.brief, "brief", 4096)
@@ -78,6 +79,8 @@ class DeliveryEvaluation:
             raise ValueError("vision_report must be an exact NormalizedVisualReport")
         if type(self.final_decision) is not FinalVisionDecision:
             raise ValueError("final_decision must be an exact FinalVisionDecision")
+        if self.vision_reason_code is not None:
+            _text(self.vision_reason_code, "vision_reason_code", 64)
         if self.final_decision.status is not self.vision_status:
             raise ValueError("vision status and final decision must agree")
         if self.vision_status is VisionStatus.COMPLETED:
@@ -115,4 +118,5 @@ class DeliveryEvaluation:
             ),
             "final_decision": self.final_decision.to_dict(),
             "recovery_evidence": list(self.recovery_evidence),
+            "vision_reason_code": self.vision_reason_code,
         }

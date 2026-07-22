@@ -68,6 +68,10 @@ _EVIDENCE_FIELDS = frozenset(
         "receipt_status",
         "validation_status",
         "artifact_status",
+        "vision_status",
+        "vision_accepted",
+        "vision_reason_code",
+        "vision_artifact_digest_match",
         "replay_last_seq",
         "scene_cleanup",
     }
@@ -273,6 +277,9 @@ def _service_wiring(paths: object) -> dict[str, object]:
     )
     from eee_agent.modeling.catalog import houdini_21_minimal_catalog
     from eee_agent.runtime.agent_runner import build_agent_runner
+    from eee_agent.runtime.__main__ import _vision_settings
+
+    vision_provider, vision_timeout_seconds = _vision_settings()
 
     return {
         "runner_factory": lambda saver: build_agent_runner(saver, modeling=True),
@@ -280,7 +287,8 @@ def _service_wiring(paths: object) -> dict[str, object]:
         "workspace_fact_provider": BridgeWorkspaceFactProvider(paths.state_dir),
         "modeling_catalog_provider": houdini_21_minimal_catalog,
         "read_only_provider": BridgeReadOnlyProvider(paths.state_dir),
-        "vision_provider": None,
+        "vision_provider": vision_provider,
+        "vision_timeout_seconds": vision_timeout_seconds,
     }
 
 
@@ -347,6 +355,7 @@ async def _run_journey(paths: object) -> tuple[dict[str, object], str]:
                 raise _StepError("artifact", "no artifact capture event")
             artifact = captured.payload.get("artifact")
             artifact_id = artifact.get("artifact_id") if isinstance(artifact, Mapping) else None
+            artifact_digest = artifact.get("sha256") if isinstance(artifact, Mapping) else None
             if type(artifact_id) is not str:
                 raise _StepError("artifact", "artifact reference is invalid")
             # ArtifactStore.get resolves only rows whose state is 'available'
@@ -355,12 +364,48 @@ async def _run_journey(paths: object) -> tuple[dict[str, object], str]:
                 raise _StepError("artifact", "artifact is not available")
             _status("validation passed and artifact available")
 
+            vision = next(
+                (e for e in events if e.event_type == "vision.evaluation_completed"),
+                None,
+            )
+            if vision is None:
+                raise _StepError("vision", "no durable vision evaluation event")
+            vision_status = vision.payload.get("vision_status")
+            decision = vision.payload.get("final_decision")
+            refs = vision.payload.get("artifact_refs")
+            if (
+                type(vision_status) is not str
+                or type(decision) is not dict
+                or type(refs) is not list
+                or len(refs) != 1
+            ):
+                raise _StepError("vision", "vision evidence is malformed")
+            vision_accepted = decision.get("accepted")
+            reason_code = vision.payload.get("vision_reason_code")
+            vision_artifact_digest_match = (
+                type(refs[0]) is dict
+                and refs[0].get("artifact_id") == artifact_id
+                and refs[0].get("sha256") == artifact_digest
+            )
+            if (
+                vision_status != "completed"
+                or type(vision_accepted) is not bool
+                or type(reason_code) is not str
+                or not vision_artifact_digest_match
+            ):
+                raise _StepError("vision", "real visual evaluation did not complete")
+            _status("vision completed with exact artifact digest")
+
     evidence = {
         "proposal_digest": digest,
         "approval_event": "approved",
         "receipt_status": receipt_status,
         "validation_status": "passed",
         "artifact_status": "available",
+        "vision_status": vision_status,
+        "vision_accepted": vision_accepted,
+        "vision_reason_code": reason_code,
+        "vision_artifact_digest_match": vision_artifact_digest_match,
     }
     return evidence, session.session_id
 

@@ -120,6 +120,7 @@ _VISION_EVALUATION_FIELDS = frozenset(
         "vision_status",
         "vision_report",
         "final_decision",
+        "vision_reason_code",
         "recovery_evidence",
     }
 )
@@ -931,6 +932,9 @@ def parse_vision_event(message: Mapping[str, object]) -> Mapping[str, object]:
     status = payload["vision_status"]
     if type(status) is not str or status not in _VISION_STATUSES:
         raise PanelClientError("Runtime vision event is invalid.")
+    reason_code = payload["vision_reason_code"]
+    if reason_code is not None:
+        _bounded_vision_text(reason_code, 64)
     report = payload["vision_report"]
     if report is not None:
         if type(report) is not dict or set(report) != _VISION_REPORT_FIELDS:
@@ -988,6 +992,7 @@ def parse_vision_event(message: Mapping[str, object]) -> Mapping[str, object]:
             "deterministic_valid": decision["deterministic_valid"],
             "advisory_passed": None if report is None else report["advisory_passed"],
             "summary": decision["summary"],
+            "reason_code": reason_code,
             "report_summary": None if report is None else report["summary"],
             "observation_count": 0 if report is None else len(report["observations"]),
             "artifact_count": len(artifact_refs),
