@@ -17,8 +17,6 @@ import pytest
 from eee_agent.changesets import (
     ChangeSet,
     CheckpointPlan,
-    ConnectInput,
-    CreateNode,
     NodeRef,
     OwnedNodeRef,
     PermissionMode,

@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
-import json
 import threading
 import time
 from collections.abc import Awaitable, Callable
@@ -29,7 +28,6 @@ from eee_agent.changesets import (
     CheckpointPlan,
     NodeRef,
     OwnedNodeRef,
-    ParmValueEquals,
     PermissionMode,
     RiskSummary,
     SetParm,

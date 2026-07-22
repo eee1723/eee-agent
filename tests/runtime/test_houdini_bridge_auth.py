@@ -11,16 +11,27 @@ import hashlib
 import json
 import os
 import secrets
+import stat
 from pathlib import Path
 
 import pytest
 
 from eee_agent.houdini_bridge.auth import (
+    BRIDGE_DISCOVERY_FILENAME,
+    BRIDGE_TOKEN_FILENAME,
     BridgeIdentity,
+    BridgeIdentityError,
+    BridgeTokenError,
     create_bridge_identity,
     discovery_payload,
+    load_bridge_identity,
+    read_bridge_discovery,
+    read_bridge_token,
+    remove_bridge_identity_files,
     validate_bridge_token,
     write_bridge_discovery,
+    write_bridge_identity_files,
+    write_bridge_token,
 )
 
 PROTO = "eee.bridge/1"
@@ -264,22 +275,6 @@ def test_full_token_never_appears_in_repr_or_exceptions() -> None:
 # fingerprint-only. Files are published atomically and cleaned up idempotently.
 # No ``hou``/``rpyc``.
 # ==========================================================================
-
-import os
-import stat
-
-from eee_agent.houdini_bridge.auth import (
-    BRIDGE_DISCOVERY_FILENAME,
-    BRIDGE_TOKEN_FILENAME,
-    BridgeIdentityError,
-    BridgeTokenError,
-    load_bridge_identity,
-    read_bridge_discovery,
-    read_bridge_token,
-    remove_bridge_identity_files,
-    write_bridge_identity_files,
-    write_bridge_token,
-)
 
 
 # --- 1. atomic write -------------------------------------------------------

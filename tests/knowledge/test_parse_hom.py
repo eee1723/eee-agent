@@ -9,7 +9,6 @@ import pytest
 
 from eee_agent.knowledge.models import (
     Authority,
-    EdgeDraft,
     EntityKind,
     ParsedDocument,
 )

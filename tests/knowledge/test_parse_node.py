@@ -6,10 +6,7 @@ All fixtures are synthetic minimal text — no real SideFX document bodies.
 from __future__ import annotations
 
 from eee_agent.knowledge.models import (
-    AliasDraft,
     Authority,
-    EdgeDraft,
-    EntityDraft,
     EntityKind,
     OperatorTypeStatus,
     ParsedDocument,

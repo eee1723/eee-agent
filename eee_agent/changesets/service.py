@@ -45,7 +45,6 @@ from eee_agent.changesets.contracts import (
 from eee_agent.changesets.repository import (
     ApplyCompletionResult,
     ApplyRecoveryResult,
-    ApplyStartResult,
     ChangeSetRepository,
     ChangeSetState,
     ChangeSetView,

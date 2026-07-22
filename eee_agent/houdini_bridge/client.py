@@ -25,7 +25,6 @@ from typing import Protocol, runtime_checkable
 from eee_agent.houdini_bridge.auth import (
     BRIDGE_DISCOVERY_FILENAME,
     BridgeIdentity,
-    BridgeIdentityError,
     BridgeTokenError,
     load_bridge_identity,
     read_bridge_discovery,
@@ -39,11 +38,9 @@ from eee_agent.houdini_bridge.capture import (
 from eee_agent.houdini_bridge.changesets import (
     CHANGESET_V1,
     ApplyRequest,
-    ApplyResponse,
     PreflightRequest,
     PreflightResult,
     ReceiptRequest,
-    ReceiptResponse,
     parse_apply_response,
     parse_preflight_response,
     parse_receipt_response,

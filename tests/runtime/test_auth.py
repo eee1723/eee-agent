@@ -7,14 +7,12 @@ import hmac
 import json
 import os
 import secrets
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from eee_agent.runtime.auth import (
-    RuntimeIdentity,
     cleanup_identity_files,
     create_identity,
     validate_bearer,
@@ -48,7 +46,7 @@ def test_create_identity_uses_token_urlsafe_32(
         return real(nbytes)
 
     monkeypatch.setattr(secrets, "token_urlsafe", spy)
-    identity = create_identity()
+    create_identity()
     assert 32 in calls  # the token uses 32 random bytes
 
 

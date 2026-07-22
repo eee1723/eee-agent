@@ -22,10 +22,7 @@ from eee_agent.core import AgentException
 from eee_agent.core.artifacts import ArtifactRef
 from eee_agent.core.ids import IdKind, new_id
 from eee_agent.runtime.artifacts import (
-    MAX_ARTIFACTS_GLOBAL,
     MAX_ARTIFACTS_PER_SESSION,
-    MAX_GLOBAL_BYTES,
-    MAX_SESSION_BYTES,
     ArtifactStore,
 )
 from eee_agent.runtime.database import RuntimeDatabase

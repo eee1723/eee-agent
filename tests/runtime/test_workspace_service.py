@@ -354,7 +354,7 @@ def test_switch_rejects_bind_committed_after_live_verification(db_path: Path) ->
                 capability="modeling",
                 role="root",
             )
-            target = await repo.insert_workspace(
+            await repo.insert_workspace(
                 WorkspaceManifest.build(
                     workspace_id=target_ws,
                     session_id=SES,

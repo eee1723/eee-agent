@@ -1221,15 +1221,11 @@ def main() -> None:
         CheckpointPlan,
         ConnectInput,
         CreateNode,
-        NodeIdentityEquals,
         NodeRef,
         OwnedNodeRef,
-        ParmValueEquals,
         PermissionMode,
         RiskSummary,
         SetParm,
-        WireInputEquals,
-        WireRef,
         WorkspaceManifest,
     )
     from eee_agent.houdini_bridge.changesets import ApplyRequest

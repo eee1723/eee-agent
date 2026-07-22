@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-import pytest
-
 from eee_agent.modeling.contracts import RepairBudget, RepairStatus, ValidatorKind
 from eee_agent.modeling.validation import (
     ValidationStatus,

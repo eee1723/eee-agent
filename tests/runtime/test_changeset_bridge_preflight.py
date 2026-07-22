@@ -39,7 +39,6 @@ from eee_agent.houdini_bridge.changesets import (
     CHANGESET_V1,
     PreflightRequest,
     PreflightResult,
-    parse_preflight_response,
 )
 from eee_agent.houdini_bridge.client import BridgeClient, BridgeClientError
 from eee_agent.houdini_bridge.contracts import (
@@ -49,7 +48,6 @@ from eee_agent.houdini_bridge.contracts import (
     SceneQueryResult,
 )
 from eee_agent.houdini_bridge.queue import MainThreadReadQueue
-from houdini_side.changeset_executor import ChangeSetPreflightAdapter
 from houdini_side.secure_bridge import BridgeServer, HoudiniSceneAdapter
 
 # --------------------------------------------------------------------------

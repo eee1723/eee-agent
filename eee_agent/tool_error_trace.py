@@ -26,7 +26,6 @@ from langchain.agents.middleware.types import (
     ContextT,
     ResponseT,
 )
-from langchain_core.messages import ToolMessage
 
 
 def _tracing_on() -> bool:

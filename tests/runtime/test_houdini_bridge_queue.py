@@ -1027,7 +1027,6 @@ def test_scene_mutation_after_query_does_not_affect_result() -> None:
     assert snapshot["points"] == 8
     # Mutate the fake scene AFTER the query — the snapshot must not change.
     node._geo.points = 9999  # type: ignore[union-attr]
-    hou2_selection = [_geo_node(points=9999)]
     # the already-returned DTO is unaffected
     assert result.selected_nodes[0].geometry_stats["points"] == 8
     assert result.to_dict() == result.to_dict()  # stable

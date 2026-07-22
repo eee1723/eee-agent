@@ -32,6 +32,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from eee_agent.changesets.contracts import (
     ApprovalDecision,
@@ -63,6 +64,11 @@ from eee_agent.core import AgentError, AgentException, ErrorCategory, IdKind, re
 from eee_agent.houdini_bridge.contracts import SceneBinding
 from eee_agent.runtime.database import RuntimeDatabase
 from eee_agent.runtime.models import EventRecord, RetentionClass, canonical_json_dumps
+
+if TYPE_CHECKING:
+    # EventStore lives in the runtime package; importing it eagerly here would
+    # create a runtime/changesets import cycle. The dependency is type-only.
+    from eee_agent.runtime.events import EventStore
 
 # --------------------------------------------------------------------------
 # ChangeSet state machine (design section 5)
@@ -1486,7 +1492,7 @@ class ChangeSetRepository:
         cid = _require_id_value(change_id, IdKind.CHANGE)
         async with self._database.write_transaction() as conn:
             cursor = await conn.execute(
-                f"SELECT payload_json, digest, state FROM changesets WHERE change_id = ?",
+                "SELECT payload_json, digest, state FROM changesets WHERE change_id = ?",
                 (cid,),
             )
             row = await cursor.fetchone()

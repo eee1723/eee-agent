@@ -389,8 +389,6 @@ def test_compile_rejects_binding_mismatches(
 
 def test_compile_rejects_catalog_node_parm_and_shape_injection() -> None:
     brief = _brief()
-    base = _spec(brief)
-    component = base.components[0]
     bad_node = NodeSpec(
         node_key="bad",
         node_type="python",

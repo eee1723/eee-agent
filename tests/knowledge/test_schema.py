@@ -29,7 +29,7 @@ from eee_agent.knowledge.models import (
 from eee_agent.knowledge.parse_hom import parse_hom_document
 from eee_agent.knowledge.parse_node import parse_node_document
 from eee_agent.knowledge.parse_vex import parse_vex_document
-from eee_agent.knowledge.schema import KB_SCHEMA_VERSION, create_schema, verify_fts5
+from eee_agent.knowledge.schema import KB_SCHEMA_VERSION, verify_fts5
 from eee_agent.knowledge.writer import (
     CacheIntegrityError,
     validate_cache,

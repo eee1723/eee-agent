@@ -24,7 +24,7 @@ def main() -> None:
     except ImportError as exc:  # pragma: no cover - hython-only command
         raise RuntimeError("run this smoke with Houdini hython") from exc
 
-    from eee_agent.changesets.contracts import ChangeSet, SetParm
+    from eee_agent.changesets.contracts import SetParm
     from eee_agent.houdini_bridge.changesets import ApplyRequest
     from eee_agent.modeling.bootstrap import derive_bootstrap_manifest
     from eee_agent.modeling.catalog import (

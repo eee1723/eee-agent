@@ -14,7 +14,6 @@ from typing import Mapping
 
 from eee_agent.knowledge.models import (
     AliasDraft,
-    Authority,
     EdgeDraft,
     EntityDraft,
     EntityKind,

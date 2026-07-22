@@ -7,7 +7,7 @@ transport, or Houdini process is exercised here.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import pytest
 
@@ -15,12 +15,10 @@ from eee_agent.changesets import (
     ChangeSet,
     ConnectInput,
     CreateNode,
-    Effect,
     NodeRef,
     OwnedNodeRef,
     PermissionMode,
     SetParm,
-    WireRef,
     WorkspaceManifest,
     evaluate_policy,
 )

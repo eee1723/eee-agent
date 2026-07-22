@@ -15,9 +15,7 @@ from pathlib import Path
 import pytest
 
 from eee_agent.core import (
-    AgentError,
     AgentException,
-    ErrorCategory,
     runtime_version_report,
 )
 from eee_agent.houdini_bridge.contracts import SceneBinding
@@ -36,7 +34,6 @@ from eee_agent.runtime.models import (
 )
 from eee_agent.runtime.paths import RuntimePaths
 from eee_agent.runtime.service import (
-    EventCallback,
     RuntimeService,
     SessionSnapshot,
 )
@@ -630,7 +627,7 @@ def test_sync_and_async_callbacks_both_supported(paths: RuntimePaths) -> None:
 
             service.subscribe(sync_cb)
             service.subscribe(async_cb)
-            session = await service.create_session("A")
+            await service.create_session("A")
             assert sync_seen == ["session.created"]
             assert async_seen == ["session.created"]
 

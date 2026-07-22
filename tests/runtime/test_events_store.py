@@ -14,7 +14,6 @@ from eee_agent.runtime.events import EventStore, ReplayResult, SessionSnapshotDa
 from eee_agent.runtime.models import (
     EventRecord,
     RetentionClass,
-    RunStatus,
     SessionStatus,
     canonical_json_dumps,
 )

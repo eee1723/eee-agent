@@ -18,9 +18,6 @@ import asyncio
 import functools
 import inspect
 import json
-import os
-import threading
-import time
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -30,7 +27,6 @@ from eee_agent.houdini_bridge.auth import (
     BRIDGE_DISCOVERY_FILENAME,
     BRIDGE_TOKEN_FILENAME,
     create_bridge_identity,
-    write_bridge_identity_files,
 )
 from eee_agent.houdini_bridge.client import BridgeClient, BridgeClientError
 from eee_agent.houdini_bridge.contracts import (
@@ -524,7 +520,7 @@ async def test_scene_query_roundtrip_returns_dto(tmp_path: Path) -> None:
     node = _geo_node(points=8, prims=6)
     adapter, _ = _make_adapter(selected=[node])
     harness = _Harness()
-    port = await harness.start(tmp_path, adapter=adapter)
+    await harness.start(tmp_path, adapter=adapter)
     try:
         client = BridgeClient.from_state_dir(tmp_path)
         await client.open()

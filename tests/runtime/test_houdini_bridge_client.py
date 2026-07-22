@@ -11,12 +11,20 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
+from pathlib import Path
 from typing import Awaitable, Callable
 
 import pytest
 
 from eee_agent.core import AgentException
-from eee_agent.houdini_bridge.auth import BridgeIdentity, create_bridge_identity
+from eee_agent.houdini_bridge.auth import (
+    BRIDGE_TOKEN_FILENAME,
+    BridgeIdentity,
+    BridgeIdentityError,
+    BridgeTokenError,
+    create_bridge_identity,
+    write_bridge_identity_files,
+)
 from eee_agent.houdini_bridge.client import BridgeClient, BridgeClientError
 from eee_agent.houdini_bridge.contracts import (
     MAX_MESSAGE_BYTES,
@@ -550,15 +558,6 @@ async def test_no_retry_broadcast_or_background_task() -> None:
 # discovery (host/port + fingerprint) and ``bridge.token`` file, verify the
 # fingerprint before connecting, and never fall back to env/CLI/Runtime tokens.
 # ==========================================================================
-
-from pathlib import Path
-
-from eee_agent.houdini_bridge.auth import (
-    BRIDGE_TOKEN_FILENAME,
-    BridgeIdentityError,
-    BridgeTokenError,
-    write_bridge_identity_files,
-)
 
 
 def _publish_identity(state_dir: Path) -> "object":

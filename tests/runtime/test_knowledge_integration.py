@@ -8,7 +8,6 @@ import pytest
 from eee_agent.knowledge.service import KnowledgeService
 from eee_agent.runtime.agent_tools import build_read_only_tools
 from eee_agent.runtime.knowledge import KnowledgeRuntime, KnowledgeStatusCode
-from eee_agent.runtime.paths import RuntimePaths
 
 
 def test_runtime_readonly_allowlist_includes_knowledge_tools() -> None:
