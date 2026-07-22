@@ -219,6 +219,56 @@ class ApplyOutcomeView:
     applied_op_count: int
 
 
+# --------------------------------------------------------------------------
+# Stage A / Task 2: bounded Run failure projection (Qt-free)
+# --------------------------------------------------------------------------
+# failure_json is already durable and validated by the panel state. Only the
+# safe fields (code, message_for_user, retryable) may enter the view model;
+# technical_detail_ref, category internals, suggested_actions, tracebacks,
+# provider responses, and unknown nested fields are deliberately dropped so
+# they can never reach a conversation card, the Run inspector, or a repr.
+
+_FAILURE_FALLBACK_CODE = "runtime.failed"
+_FAILURE_FALLBACK_MESSAGE = "The run failed before producing a response."
+
+
+@dataclass(frozen=True, slots=True)
+class FailureView:
+    """Bounded, user-safe projection of a Run failure.
+
+    Only code / message / retryable ever live here. The tone is fixed to
+    "error" for a failed Run.
+    """
+    code: str
+    message: str
+    retryable: bool
+    tone: str = "error"
+
+
+def failure_view(payload: object) -> FailureView:
+    """Normalize a run.failed payload into a bounded FailureView.
+
+    Defensive: a non-dict payload, or any field that is not an exact
+    non-empty str, falls back to a safe generic message. The original
+    mapping is never retained; no category / technical_detail_ref /
+    unknown field is read or stored.
+    """
+    if type(payload) is not dict:
+        return FailureView(_FAILURE_FALLBACK_CODE, _FAILURE_FALLBACK_MESSAGE, False)
+    code = payload.get("code")
+    message = payload.get("message_for_user")
+    retryable = payload.get("retryable")
+    code_text = code if type(code) is str and code else _FAILURE_FALLBACK_CODE
+    message_text = (
+        message if type(message) is str and message else _FAILURE_FALLBACK_MESSAGE
+    )
+    return FailureView(
+        code=_bounded(code_text, MAX_TITLE_CHARS),
+        message=_bounded(message_text, MAX_BODY_CHARS),
+        retryable=retryable if type(retryable) is bool else False,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class EnvironmentView:
     """The runtime environment block (extracted from model_snapshot_json)."""
@@ -244,6 +294,8 @@ class RunView:
     dependencies: tuple[tuple[str, str], ...]   # (package, version) pairs
     activity: tuple[ActivityStep, ...]
     apply_outcome: ApplyOutcomeView | None
+    # Stage A: bounded failure evidence. Only present for status == "Failed".
+    failure: FailureView | None
     todos: tuple["TodoItemView", ...]
 
 
@@ -457,11 +509,78 @@ def run_view(
         dependencies=_dependencies_from_snapshot(model_snapshot),
         activity=_activity_steps(activity),
         apply_outcome=_apply_outcome_view(apply_outcomes),
+        # Stage A: only a Failed Run reads failure_json; a Completed /
+        # Cancelled Run ignores any stale failure data instead of presenting
+        # a contradictory state.
+        failure=(
+            failure_view(snapshot.get("failure_json"))
+            if status_text == "Failed"
+            else None
+        ),
         # D-3: render the deepagents plan from the run snapshot. The panel
         # state keeps this fresh from both the D-1 todos.updated event and
         # the D-2 persisted RunRecord.todos.
         todos=todo_items(snapshot.get("todos")),
     )
+
+
+def failure_card(failure: FailureView) -> MessageItem:
+    """Render a normalized FailureView as an error-tone conversation card.
+
+    Accepts only an exact FailureView (never a raw mapping). When retryable,
+    a fixed, descriptive English hint is appended. The hint is computed as a
+    structural suffix: the body is bounded to leave room for it, so the whole
+    body never exceeds MAX_BODY_CHARS and the hint stays intact. No automatic
+    retry behavior, button, or command is introduced.
+    """
+    if type(failure) is not FailureView:
+        raise TypeError("failure must be an exact FailureView")
+    title = _bounded(f"Run failed · {failure.code}", MAX_TITLE_CHARS)
+    hint = "Retry may succeed." if failure.retryable else ""
+    if hint:
+        # Reserve space for the two-line join (message + "\n" + hint) before
+        # bounding so the hint itself is never truncated past MAX_BODY_CHARS.
+        remaining = max(0, MAX_BODY_CHARS - len(hint) - 1)
+        body = _bounded(failure.message, remaining) + "\n" + hint
+        body = body[:MAX_BODY_CHARS]
+    else:
+        body = _bounded(failure.message, MAX_BODY_CHARS)
+    return MessageItem(kind="error", title=title, body=body, tone="error")
+
+
+def terminal_result_items(
+    run: object,
+    output: object,
+) -> tuple[MessageItem, ...]:
+    """Pure terminal-result selector shared by history replay and live settling.
+
+    All Completed / Cancelled / Failed rendering decisions live here. It never
+    mutates run, never returns an empty assistant card, and never raises on an
+    unknown status or malformed run. Non-terminal or non-dict runs yield ().
+    output counts only when it is an exact str; otherwise it is treated as
+    empty. A Failed Run with partial output yields (assistant, error) in that
+    fixed order.
+    """
+    if type(run) is not dict:
+        return ()
+    status = run.get("status")
+    text = output if type(output) is str else ""
+    if status == "Completed":
+        if text:
+            return (assistant_message(text),)
+        return (notice_card("The run completed without a response.", tone="normal"),)
+    if status == "Cancelled":
+        if text:
+            return (assistant_message(text),)
+        return (notice_card("The run was cancelled.", tone="warn"),)
+    if status == "Failed":
+        error = failure_card(failure_view(run.get("failure_json")))
+        if text:
+            return (assistant_message(text), error)
+        return (error,)
+    # Non-terminal (Planning / Finalizing / StopRequested / ...) and unknown
+    # statuses settle without terminal cards.
+    return ()
 
 
 def workspace_rows(facts: object) -> tuple[WorkspaceRow, ...]:
