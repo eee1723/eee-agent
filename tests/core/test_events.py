@@ -390,7 +390,7 @@ def test_domain_event_from_dict_rejects_non_exact_string_envelope_keys() -> None
         ("event_type", 1, "event_type must be an exact string"),
         ("timestamp", 1, "timestamp must be an exact string"),
         ("payload", [], "payload must be an exact dict"),
-        ("schema_version", True, "schema_version must be the integer 1"),
+        ("schema_version", True, "schema_version must be an exact integer, not a bool"),
     ],
 )
 def test_domain_event_from_dict_rejects_wrong_field_runtime_types(

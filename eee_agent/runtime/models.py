@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 from types import MappingProxyType
+from typing import cast
 
 from eee_agent.core.ids import IdKind, require_id
 
@@ -107,30 +108,45 @@ def freeze_json(value: object) -> object:
 
 
 def _freeze(value: object, active: set[int]) -> object:
-    value_type = type(value)
-    if value_type in (type(None), str, bool, int):
+    # Direct exact-type branches (no cached type() local) so mypy narrows each
+    # branch: math.isfinite sees a float, dicts expose .items, lists iterate.
+    if (
+        type(value) is None.__class__
+        or type(value) is str
+        or type(value) is bool
+        or type(value) is int
+    ):
         return value
-    if value_type is float:
+    if type(value) is float:
         if not math.isfinite(value):
             raise ValueError("json float values must be finite")
         return value
-    if value_type is dict or value_type is list:
+    if type(value) is dict:
+        data = cast(dict[object, object], value)
         identity = id(value)
         if identity in active:
             raise ValueError("json value must not contain a cycle")
         active.add(identity)
         try:
-            if value_type is dict:
-                frozen: dict[str, object] = {}
-                for key, item in value.items():
-                    if type(key) is not str:
-                        raise TypeError("json dict keys must be exact strings")
-                    frozen[key] = _freeze(item, active)
-                return MappingProxyType(frozen)
-            return tuple(_freeze(item, active) for item in value)
+            frozen: dict[str, object] = {}
+            for key, item in data.items():
+                if type(key) is not str:
+                    raise TypeError("json dict keys must be exact strings")
+                frozen[key] = _freeze(item, active)
+            return MappingProxyType(frozen)
         finally:
             active.discard(identity)
-    raise TypeError(f"unsupported JSON value type: {value_type.__name__}")
+    if type(value) is list:
+        items = cast(list[object], value)
+        identity = id(value)
+        if identity in active:
+            raise ValueError("json value must not contain a cycle")
+        active.add(identity)
+        try:
+            return tuple(_freeze(item, active) for item in items)
+        finally:
+            active.discard(identity)
+    raise TypeError(f"unsupported JSON value type: {type(value).__name__}")
 
 
 def thaw_json(value: object) -> object:

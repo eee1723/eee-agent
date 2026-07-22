@@ -28,6 +28,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import cast
 
 from eee_agent.runtime.models import (
     canonical_json_dumps,
@@ -133,21 +134,49 @@ def _require_exact_keys(value: dict[str, object], allowed: frozenset[str], label
         raise ValueError(f"{label} must have exactly the required fields")
 
 
-def _require_non_empty_str(value: object, label: str) -> None:
+def _require_non_empty_str(value: object, label: str) -> str:
     if type(value) is not str:
         raise TypeError(f"{label} must be a string")
     if not value:
         raise ValueError(f"{label} must be a non-empty string")
+    return value
 
 
-def _require_exact_int(value: object, label: str) -> None:
+def _require_exact_int(value: object, label: str) -> int:
+    # Exact int only: bool is an int subclass, so reject it explicitly.
+    if type(value) is bool:
+        raise TypeError(f"{label} must be an integer, not a bool")
     if type(value) is not int:
         raise TypeError(f"{label} must be an integer")
+    return value
 
 
-def _require_exact_bool(value: object, label: str) -> None:
+def _require_exact_bool(value: object, label: str) -> bool:
     if type(value) is not bool:
         raise TypeError(f"{label} must be a bool")
+    return value
+
+
+def _require_exact_str(value: object, label: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{label} must be a string")
+    return value
+
+
+def _require_exact_mapping(value: object, label: str) -> Mapping[str, object]:
+    # Accept any exact dict at the decode boundary; nested from_dict() callers
+    # re-validate the field set and each field's type.
+    if type(value) is not dict:
+        raise TypeError(f"{label} must be an exact dict")
+    return cast(Mapping[str, object], value)
+
+
+def _require_exact_list(value: object, label: str) -> list[object]:
+    # Returns the exact list so callers can iterate/construct a tuple; element
+    # types are validated by the per-element decoder, not here.
+    if type(value) is not list:
+        raise TypeError(f"{label} must be an exact list")
+    return cast(list[object], value)
 
 
 # --- scene.query payload ---------------------------------------------------
@@ -320,12 +349,29 @@ class SceneQueryResult:
     def from_dict(cls, data: Mapping[str, object]) -> SceneQueryResult:
         envelope = _require_exact_dict(data, "SceneQueryResult envelope")
         _require_exact_keys(envelope, _RESULT_FIELDS, "SceneQueryResult")
+        binding = SceneBinding.from_dict(
+            _require_exact_mapping(envelope["binding"], "SceneQueryResult.binding")
+        )
+        selected_nodes = tuple(
+            SelectedNode.from_dict(
+                _require_exact_mapping(node, "SceneQueryResult.selected_nodes[]")
+            )
+            for node in _require_exact_list(
+                envelope["selected_nodes"], "SceneQueryResult.selected_nodes"
+            )
+        )
+        nodes = tuple(
+            SelectedNode.from_dict(
+                _require_exact_mapping(node, "SceneQueryResult.nodes[]")
+            )
+            for node in _require_exact_list(
+                envelope["nodes"], "SceneQueryResult.nodes"
+            )
+        )
         return cls(
-            binding=SceneBinding.from_dict(envelope["binding"]),
-            selected_nodes=[
-                SelectedNode.from_dict(node) for node in envelope["selected_nodes"]
-            ],
-            nodes=[SelectedNode.from_dict(node) for node in envelope["nodes"]],
+            binding=binding,
+            selected_nodes=selected_nodes,
+            nodes=nodes,
         )
 
 
@@ -394,12 +440,24 @@ class BridgeRequest:
             or operation != BridgeOperation.SCENE_QUERY.value
         ):
             raise ValueError("BridgeRequest operation must be scene.query")
+        request_id = _require_non_empty_str(
+            envelope["request_id"], "BridgeRequest.request_id"
+        )
+        deadline_ms = _require_exact_int(
+            envelope["deadline_ms"], "BridgeRequest.deadline_ms"
+        )
+        scene_epoch = _require_exact_int(
+            envelope["scene_epoch"], "BridgeRequest.scene_epoch"
+        )
+        payload = _require_exact_mapping(
+            envelope["payload"], "BridgeRequest.payload"
+        )
         return cls(
-            request_id=envelope["request_id"],
+            request_id=request_id,
             operation=BridgeOperation.SCENE_QUERY,
-            deadline_ms=envelope["deadline_ms"],
-            scene_epoch=envelope["scene_epoch"],
-            payload=envelope["payload"],
+            deadline_ms=deadline_ms,
+            scene_epoch=scene_epoch,
+            payload=payload,
         )
 
 
@@ -510,14 +568,19 @@ class BridgeResponse:
         _require_exact_bool(ok, "BridgeResponse.ok")
         result = envelope.get("result")
         error = envelope.get("error")
+        request_id = _require_non_empty_str(
+            envelope["request_id"], "BridgeResponse.request_id"
+        )
         if ok is True:
             if result is None or error is not None:
                 raise ValueError(
                     "BridgeResponse ok=true requires result and no error"
                 )
             return cls(
-                request_id=envelope["request_id"],
-                result=SceneQueryResult.from_dict(result),
+                request_id=request_id,
+                result=SceneQueryResult.from_dict(
+                    _require_exact_mapping(result, "BridgeResponse.result")
+                ),
                 error=None,
             )
         if error is None or result is not None:
@@ -525,9 +588,11 @@ class BridgeResponse:
                 "BridgeResponse ok=false requires error and no result"
             )
         return cls(
-            request_id=envelope["request_id"],
+            request_id=request_id,
             result=None,
-            error=BridgeError.from_dict(error),
+            error=BridgeError.from_dict(
+                _require_exact_mapping(error, "BridgeResponse.error")
+            ),
         )
 
 
@@ -541,7 +606,9 @@ def parse_request(raw: str | bytes) -> BridgeRequest:
     UTF-8, duplicate-key rejection at any depth, then full envelope + payload
     validation via :meth:`BridgeRequest.from_dict`.
     """
-    return BridgeRequest.from_dict(_load_strict_json(raw, "Bridge request"))
+    return BridgeRequest.from_dict(
+        _require_exact_mapping(_load_strict_json(raw, "Bridge request"), "Bridge request")
+    )
 
 
 def parse_response(raw: str | bytes) -> BridgeResponse:
@@ -551,4 +618,6 @@ def parse_response(raw: str | bytes) -> BridgeResponse:
     UTF-8, duplicate-key rejection at any depth, then full response validation
     via :meth:`BridgeResponse.from_dict`.
     """
-    return BridgeResponse.from_dict(_load_strict_json(raw, "Bridge response"))
+    return BridgeResponse.from_dict(
+        _require_exact_mapping(_load_strict_json(raw, "Bridge response"), "Bridge response")
+    )

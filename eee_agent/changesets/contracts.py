@@ -298,38 +298,52 @@ def _parm_shape(value: object) -> tuple[object, ...]:
     return ("scalar", type(value))
 
 
+def _validate_scalar_tuple(items: tuple[object, ...], label: str) -> tuple[object, ...]:
+    """Validate a homogeneous non-empty scalar tuple (shared by list/tuple input).
+
+    Uses direct exact-type checks per element so mypy narrows each branch
+    (float reaches math.isfinite, str reaches the size check). bool stays
+    exact: type(item) is bool is its own branch and never matches int.
+    """
+    if not items:
+        raise ValueError(f"{label} tuple must be non-empty")
+    element_type: type | None = None
+    for item in items:
+        item_type = type(item)
+        if item_type not in _SCALAR_TYPES:
+            raise TypeError(f"{label} tuple elements must be scalars")
+        # Direct exact-type branches (not the cached item_type) so mypy narrows.
+        if type(item) is float and not math.isfinite(item):
+            raise ValueError(f"{label} tuple float must be finite")
+        if type(item) is str and not _parm_value_size_ok(item):
+            raise ValueError(f"{label} exceeds the maximum parm value size")
+        if element_type is None:
+            element_type = item_type
+        elif element_type is not item_type:
+            raise ValueError(f"{label} tuple must be homogeneous")
+    if not _parm_value_size_ok(items):
+        raise ValueError(f"{label} exceeds the maximum parm value size")
+    return items
+
+
 def _validate_parm_value(value: object, label: str) -> object:
-    value_type = type(value)
-    if value_type in (bool, int):
+    # Direct exact-type branches (no cached type() local) so mypy narrows each
+    # branch: math.isfinite sees a float, and list/tuple are iterable. bool and
+    # int are checked separately so bool never satisfies the int branch.
+    if type(value) is bool or type(value) is int:
         return value
-    if value_type is float:
+    if type(value) is float:
         if not math.isfinite(value):
             raise ValueError(f"{label} must be a finite float")
         return value
-    if value_type is str:
+    if type(value) is str:
         if not _parm_value_size_ok(value):
             raise ValueError(f"{label} exceeds the maximum parm value size")
         return value
-    if value_type in (tuple, list):
-        items = tuple(value)
-        if not items:
-            raise ValueError(f"{label} tuple must be non-empty")
-        element_type: type | None = None
-        for item in items:
-            item_type = type(item)
-            if item_type not in _SCALAR_TYPES:
-                raise TypeError(f"{label} tuple elements must be scalars")
-            if item_type is float and not math.isfinite(item):
-                raise ValueError(f"{label} tuple float must be finite")
-            if item_type is str and not _parm_value_size_ok(item):
-                raise ValueError(f"{label} exceeds the maximum parm value size")
-            if element_type is None:
-                element_type = item_type
-            elif element_type is not item_type:
-                raise ValueError(f"{label} tuple must be homogeneous")
-        if not _parm_value_size_ok(items):
-            raise ValueError(f"{label} exceeds the maximum parm value size")
-        return items
+    if type(value) is tuple:
+        return _validate_scalar_tuple(value, label)
+    if type(value) is list:
+        return _validate_scalar_tuple(tuple(value), label)
     raise TypeError(f"{label} must be a bounded scalar or homogeneous scalar tuple")
 
 
@@ -979,8 +993,8 @@ class WorkspaceManifest:
             instance_id=instance_id,
             scene_epoch=scene_epoch,
             revision=revision,
-            roots=roots,
-            nodes=nodes,
+            roots=tuple(roots),
+            nodes=tuple(nodes),
             created_by_run=created_by_run,
             updated_at=updated_at,
         )
@@ -1141,13 +1155,13 @@ def _reject_impossible_preflight_facts(
                         "ChangeSet: precondition references a transaction-created "
                         "node whose state cannot exist at preflight"
                     )
-    for snap in checkpoint_plan.parameters:
-        if _is_created_ref(snap.target, created_ids, created_paths):
+    for parm_snapshot in checkpoint_plan.parameters:
+        if _is_created_ref(parm_snapshot.target, created_ids, created_paths):
             raise ValueError(
                 "ChangeSet: checkpoint parameter targets a transaction-created node"
             )
-    for snap in checkpoint_plan.wires:
-        if _is_created_ref(snap.target, created_ids, created_paths):
+    for wire_snapshot in checkpoint_plan.wires:
+        if _is_created_ref(wire_snapshot.target, created_ids, created_paths):
             raise ValueError(
                 "ChangeSet: checkpoint wire targets a transaction-created node"
             )
@@ -1211,10 +1225,10 @@ def _validate_created_references(
     # 4. Checkpoint references — exact match only.
     for ref in list(checkpoint_plan.nodes):
         _check_created_ref(ref, total, created_by_id, created_by_path)
-    for snap in list(checkpoint_plan.parameters):
-        _check_created_ref(snap.target, total, created_by_id, created_by_path)
-    for snap in list(checkpoint_plan.wires):
-        _check_created_ref(snap.target, total, created_by_id, created_by_path)
+    for parm_snapshot in list(checkpoint_plan.parameters):
+        _check_created_ref(parm_snapshot.target, total, created_by_id, created_by_path)
+    for wire_snapshot in list(checkpoint_plan.wires):
+        _check_created_ref(wire_snapshot.target, total, created_by_id, created_by_path)
 
     # 5. Reject impossible preflight facts (created-node state in pre/checkpoint).
     _reject_impossible_preflight_facts(preconditions, checkpoint_plan, created_ids, created_paths)
