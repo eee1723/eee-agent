@@ -22,8 +22,8 @@ after the exact candidate and its redacted evidence have been verified.
 | B-05 | `f88ab39` | Houdini 21.0.440 / hython 3.11.7 | Opt-in HFS knowledge contracts with clean process-local package boundary | 11 pass | PASS | 11 passed in 10.46s; HFS 21.0.440; no user package output in the isolated boundary | RN-013 |
 | B-06 | `f88ab39` | Disposable hython 21.0.440 | Bridge, ChangeSet, capture, sensitivity, bootstrap, golden smokes | All pass; owned state cleaned; no saved HIP | PASS | 20 + 21 + 25 checks passed; bootstrap and golden cases passed; owned temp state empty | RN-013 |
 | B-07 | NOT SET | Interactive Houdini panel | Complete GUI and lifecycle checklist | Every required item PASS with user-observed evidence | NOT RUN | Installed package does not yet target B worktree | RN-012 |
-| B-08 | NOT SET | Explicit real Vision provider | Real provider + exact ArtifactStore byte journey | Completed normalized advisory result; digest match; cleanup | NOT RUN | — | RN-005, RN-006 |
-| B-09 | NOT SET | Final committed candidate | Repeat full gates and Codex evidence/code review | Clean tree; no blocker/high finding; every required B gate PASS | NOT RUN | — | — |
+| B-08 | `bf88745` | Explicit real Vision provider | Real provider + exact ArtifactStore byte journey | Completed normalized advisory result; digest match; cleanup | NOT RUN | Opt-in harness returned `provider_credentials_unavailable`; no real call was attempted | RN-005 |
+| B-09 | `bf88745` | Final committed candidate | Repeat full static/offline gates and Codex evidence/code review | Clean tree; no blocker/high finding; every required B gate PASS | NOT RUN | Static/offline gates pass; final readiness withheld while B-07 and B-08 remain NOT RUN | RN-005, RN-012 |
 
 ## Candidate notes
 
@@ -34,3 +34,21 @@ after the exact candidate and its redacted evidence have been verified.
   implicit deployment authorization.
 - Stage B does not tag, publish an RC, merge, delete a branch, or weaken an
   external gate.
+
+## Final offline candidate gate
+
+At `bf887451024277696606ed64f814a17ecf7b9bd8`:
+
+- `uv lock --check`: exit 0;
+- frozen Ruff: exit 0;
+- targeted Mypy for `eee_agent/panel eee_agent/runtime eee_agent/vision`: exit 0,
+  29 source files;
+- `python -m compileall -q eee_agent houdini_side tests`: exit 0;
+- frozen full pytest: `3225 passed, 12 skipped, 0 warnings` in 102.86s;
+- `git diff --check main...HEAD`: exit 0.
+
+The 12 skips are the same 11 opt-in HFS tests and one WSL probe listed in the
+Stage A evidence; B-05 was separately run with the clean HFS package boundary
+and passed all 11. This offline result is not a release PASS because B-07
+requires user-observed GUI confirmation and B-08 requires an explicitly
+configured real Vision provider.
