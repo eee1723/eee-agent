@@ -104,6 +104,8 @@ class _RunViewWidget(QtWidgets.QFrame):
             return
         self._build_header(run_view)
         self._build_time_block(run_view)
+        if run_view.failure is not None:
+            self._build_failure_block(run_view.failure)
         if run_view.todos:
             self._build_todos_block(run_view.todos)
         if run_view.environment is not None:
@@ -145,6 +147,36 @@ class _RunViewWidget(QtWidgets.QFrame):
         container = QtWidgets.QWidget()
         container.setLayout(grid)
         self._layout.addWidget(container)
+
+    def _build_failure_block(self, failure: vm.FailureView) -> None:
+        # Stage A / Task 4: render the bounded FailureView the view model already
+        # normalized. Only the typed fields (code/message/retryable/tone) are
+        # read; every other field of the original payload stays behind the
+        # view-model boundary and never reaches this widget.
+        self._layout.addWidget(_dim_label("FAILURE"))
+        card = QtWidgets.QFrame()
+        card.setObjectName("FailureBlock")
+        color = _TONE_COLORS.get(failure.tone, theme.STATUS_ERROR)
+        card.setStyleSheet(
+            f"QFrame#FailureBlock {{"
+            f" border-left: 3px solid {color};"
+            f" background: {color}18;"
+            f" border-radius: 3px;"
+            f" }}"
+        )
+        card_layout = QtWidgets.QVBoxLayout(card)
+        card_layout.setContentsMargins(8, 6, 8, 6)
+        card_layout.setSpacing(3)
+        card_layout.addWidget(
+            _tone_label(failure.code, failure.tone, prominent=True))
+        message = QtWidgets.QLabel(failure.message)
+        message.setWordWrap(True)
+        message.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+        message.setStyleSheet(f"color: {color};")
+        card_layout.addWidget(message)
+        if failure.retryable:
+            card_layout.addWidget(_dim_label("Retry may succeed."))
+        self._layout.addWidget(card)
 
     def _build_environment_block(self, env: vm.EnvironmentView) -> None:
         self._layout.addWidget(_dim_label("ENVIRONMENT"))

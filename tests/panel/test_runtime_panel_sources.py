@@ -151,6 +151,38 @@ def test_inspector_uses_structured_widgets_not_plain_text() -> None:
     assert "STATUS_ERROR" in source or "theme.STATUS_ERROR" in source
 
 
+def test_inspector_renders_failure_block_from_typed_failure_view() -> None:
+    # Stage A / Task 4: the RUN inspector must render a structured FailureView
+    # (provided by view_models.RunView.failure) instead of leaving Failed runs
+    # showing only the status badge or dumping failure_json as raw text. The Qt
+    # layer only consumes the typed FailureView fields; it must never read or
+    # stringify the raw failure payload.
+    source = _source("inspector.py")
+    # update_view() gates the block on a typed FailureView, never the raw json.
+    assert "if run_view.failure is not None:" in source
+    assert "self._build_failure_block(run_view.failure)" in source
+    assert "def _build_failure_block(self, failure" in source
+    # Only the four typed FailureView fields may be read.
+    assert "failure.code" in source
+    assert "failure.message" in source
+    assert "failure.retryable" in source
+    assert "failure.tone" in source
+    # A clear failure block title and a retry hint keyed on the bool.
+    assert '"FAILURE"' in source or '"RUN FAILED"' in source
+    assert "Retry may succeed." in source
+    # The block carries a stable objectName for styling / testing.
+    assert '"FailureBlock"' in source
+    # The raw failure payload and technical detail must never enter the Qt layer.
+    # (failure_json is read only inside view_models.run_view, not here.)
+    assert "failure_json" not in source
+    assert "technical_detail_ref" not in source
+    assert "traceback" not in source
+    assert "message_for_user" not in source  # read the normalized failure.message
+    assert "repr(failure)" not in source
+    assert "str(failure)" not in source
+    assert "failure.__dict__" not in source
+
+
 def test_inspector_renders_todolist_block() -> None:
     # D-3: the agent's deepagents TodoList plan must appear in the Run tab
     # with a per-item status marker (one row per todo).
