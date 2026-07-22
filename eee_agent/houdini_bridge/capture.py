@@ -42,7 +42,7 @@ from eee_agent.houdini_bridge.changesets import (
     _MIN_DEADLINE_MS,
     _REQUEST_FIELDS,
     _RESPONSE_REQUIRED_FIELDS,
-    _load_strict_json,
+    _load_strict_dict,
     _require_exact_bool,
     _require_exact_dict,
     _require_exact_int,
@@ -138,10 +138,13 @@ def _require_png_file_name(value: object, label: str) -> None:
 
 
 def _require_ratio(value: object, label: str) -> None:
-    if type(value) is bool or type(value) not in (int, float):
-        raise TypeError(f"{label} must be an exact int or float")
-    if not math.isfinite(value):
+    if type(value) is int:
+        return
+    if type(value) is float:
+        if math.isfinite(value):
+            return
         raise ValueError(f"{label} must be finite")
+    raise TypeError(f"{label} must be an exact int or float")
 
 
 # --------------------------------------------------------------------------
@@ -172,24 +175,28 @@ class CaptureSettings:
     max_adjustments: int = 2
 
     def __post_init__(self) -> None:
-        for label, value in (
+        for label, dimension_value in (
             ("width", self.width),
             ("height", self.height),
             ("preflight_width", self.preflight_width),
             ("preflight_height", self.preflight_height),
         ):
-            _require_exact_int(value, f"CaptureSettings.{label}")
-            if value < 16 or value > 4096 or value % 2 != 0:
+            _require_exact_int(dimension_value, f"CaptureSettings.{label}")
+            if (
+                dimension_value < 16
+                or dimension_value > 4096
+                or dimension_value % 2 != 0
+            ):
                 raise ValueError(f"CaptureSettings.{label} must be an even int in 16..4096")
         if self.width * self.preflight_height != self.height * self.preflight_width:
             raise ValueError("CaptureSettings preflight frame must share the output aspect")
-        for label, value in (
+        for label, ratio_value in (
             ("margin_min", self.margin_min),
             ("longest_axis_min", self.longest_axis_min),
             ("longest_axis_max", self.longest_axis_max),
             ("center_offset_max", self.center_offset_max),
         ):
-            _require_ratio(value, f"CaptureSettings.{label}")
+            _require_ratio(ratio_value, f"CaptureSettings.{label}")
         if not 0.0 < self.margin_min < 0.25:
             raise ValueError("CaptureSettings.margin_min must be in (0, 0.25)")
         if not 0.5 <= self.longest_axis_min < self.longest_axis_max < 1.0:
@@ -558,9 +565,9 @@ class CaptureResponse:
 
 def parse_capture_request(raw: str | bytes) -> CaptureRequest:
     """Parse a ``capture.capture`` request from strict JSON text."""
-    return CaptureRequest.from_dict(_load_strict_json(raw, "Capture request"))
+    return CaptureRequest.from_dict(_load_strict_dict(raw, "Capture request"))
 
 
 def parse_capture_response(raw: str | bytes) -> CaptureResponse:
     """Parse a ``capture.capture`` response from strict JSON text."""
-    return CaptureResponse.from_dict(_load_strict_json(raw, "Capture response"))
+    return CaptureResponse.from_dict(_load_strict_dict(raw, "Capture response"))

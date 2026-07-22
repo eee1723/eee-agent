@@ -22,6 +22,8 @@ import sqlite3
 from pathlib import Path
 from typing import Callable, Mapping
 
+from typing_extensions import TypeIs
+
 from eee_agent.knowledge.api import (
     CandidateSummary,
     GetRequest,
@@ -55,7 +57,7 @@ _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:")
 
 
-def _is_safe_scalar(value: object) -> bool:
+def _is_safe_scalar(value: object) -> TypeIs[str]:
     """A provenance scalar with no control char, drive/UNC prefix or separator."""
     if not isinstance(value, str) or not value:
         return False
@@ -360,7 +362,10 @@ class KnowledgeService:
     def _search_symbol(
         self, store: KnowledgeStore, request: SearchRequest, provenance: KbProvenance
     ) -> SearchResponse:
-        symbol = request.symbol.strip()
+        raw_symbol = request.symbol
+        if raw_symbol is None:
+            raise self._argument_error("search requires a symbol")
+        symbol = raw_symbol.strip()
         candidates = store.alias_candidates(symbol)
         if not candidates:
             return self._no_match(provenance, "no entity matches symbol")

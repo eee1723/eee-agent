@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+from importlib import import_module
 from typing import Any, Callable
 
 from typing_extensions import override
@@ -60,8 +61,9 @@ class ToolErrorTraceMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, 
         if not _tracing_on() or not _is_error_result(result):
             return result
         try:
-            from opentelemetry import trace
-            from opentelemetry.trace import Status, StatusCode
+            trace = import_module("opentelemetry.trace")
+            status_type = getattr(trace, "Status")
+            status_code = getattr(trace, "StatusCode")
 
             span = trace.get_current_span()
             if span is not None and span.is_recording():
@@ -69,7 +71,9 @@ class ToolErrorTraceMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, 
                 msg = _extract_error(result)
                 if msg:
                     span.set_attribute("eee.tool_error_msg", msg)
-                span.set_status(Status(StatusCode.ERROR, "tool returned ok:false"))
+                span.set_status(
+                    status_type(status_code.ERROR, "tool returned ok:false")
+                )
         except Exception:
             pass  # observability must never break the tool path
         return result

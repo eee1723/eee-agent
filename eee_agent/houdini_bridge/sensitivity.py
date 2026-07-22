@@ -37,7 +37,7 @@ from eee_agent.houdini_bridge.changesets import (
     _MIN_DEADLINE_MS,
     _REQUEST_FIELDS,
     _RESPONSE_REQUIRED_FIELDS,
-    _load_strict_json,
+    _load_strict_dict,
     _require_exact_bool,
     _require_exact_dict,
     _require_exact_int,
@@ -392,9 +392,13 @@ class SensitivitySampleResponse:
 
 def parse_sample_request(raw: str | bytes) -> SensitivitySampleRequest:
     """Parse a ``sensitivity.sample`` request from strict JSON text."""
-    return SensitivitySampleRequest.from_dict(_load_strict_json(raw, "Sample request"))
+    return SensitivitySampleRequest.from_dict(
+        _load_strict_dict(raw, "Sample request")
+    )
 
 
 def parse_sample_response(raw: str | bytes) -> SensitivitySampleResponse:
     """Parse a ``sensitivity.sample`` response from strict JSON text."""
-    return SensitivitySampleResponse.from_dict(_load_strict_json(raw, "Sample response"))
+    return SensitivitySampleResponse.from_dict(
+        _load_strict_dict(raw, "Sample response")
+    )

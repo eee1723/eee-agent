@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+from importlib import import_module
 
 from eee_agent.config import repo_root
 
@@ -28,14 +29,17 @@ def is_enabled() -> bool:
 
 def _build_persistent_ctx(model):
     """ContextSeek client with file-backed storage + our model as summarizer."""
-    from contextseek.client.contextseek import ContextSeek
-    from contextseek.config.factory import build_summarizer
-    from contextseek.config.settings import ContextSeekSettings
+    contextseek_client = import_module("contextseek.client.contextseek")
+    contextseek_factory = import_module("contextseek.config.factory")
+    contextseek_settings = import_module("contextseek.config.settings")
+    contextseek_type = getattr(contextseek_client, "ContextSeek")
+    build_summarizer = getattr(contextseek_factory, "build_summarizer")
+    settings_type = getattr(contextseek_settings, "ContextSeekSettings")
 
-    base = ContextSeekSettings()
+    base = settings_type()
     storage = base.storage.model_copy(update={"backend": "file", "path": STORE_PATH})
     settings = base.model_copy(update={"storage": storage})
-    ctx = ContextSeek.from_settings(settings)
+    ctx = contextseek_type.from_settings(settings)
     # Use the agent's own model as the summarizer (mirrors the middleware's
     # internal build), so distillation rides on the configured DeepSeek key.
     if model is not None:
@@ -45,11 +49,14 @@ def _build_persistent_ctx(model):
 
 def build_middleware(model):
     """Build the ContextSeek middleware over a persistent (file-backed) ctx."""
-    from contextseek.bridges.langchain.middleware import ContextSeekMiddleware
+    contextseek_middleware = import_module(
+        "contextseek.bridges.langchain.middleware"
+    )
+    middleware_type = getattr(contextseek_middleware, "ContextSeekMiddleware")
 
     ctx = _build_persistent_ctx(model)
     _seed_lessons(ctx)
-    return ContextSeekMiddleware(
+    return middleware_type(
         ctx=ctx,
         scope=SCOPE,
         retrieval_k=6,

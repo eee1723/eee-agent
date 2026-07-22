@@ -11,6 +11,7 @@ to SEE where the agent loops. To swap to Langfuse later, only the OTLP endpoint
 from __future__ import annotations
 
 import os
+from importlib import import_module
 
 _started = False
 
@@ -30,15 +31,17 @@ def setup_tracing() -> bool:
     if provider != "phoenix":
         return False
 
-    from openinference.instrumentation.langchain import LangChainInstrumentor
-    from phoenix.otel import register
+    instrumentation = import_module("openinference.instrumentation.langchain")
+    phoenix_otel = import_module("phoenix.otel")
+    instrumentor = getattr(instrumentation, "LangChainInstrumentor")
+    register = getattr(phoenix_otel, "register")
 
     endpoint = os.getenv("PHOENIX_OTLP_ENDPOINT", "http://localhost:6006/v1/traces")
     project = os.getenv("EEE_TRACING_PROJECT", "eee-agent")
     # batch=False (default) -> SimpleSpanProcessor: each span is exported at once,
     # so you can watch the trace build up live and won't lose it if the run is killed.
     tracer_provider = register(project_name=project, endpoint=endpoint)
-    LangChainInstrumentor().instrument(tracer_provider=tracer_provider)
+    instrumentor().instrument(tracer_provider=tracer_provider)
     _started = True
     print(f"[eee] tracing -> Phoenix {endpoint} (project={project})", flush=True)
     return True

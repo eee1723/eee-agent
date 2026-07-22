@@ -19,8 +19,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Protocol, TypeAlias, runtime_checkable
 
 from eee_agent.houdini_bridge.auth import (
     BRIDGE_DISCOVERY_FILENAME,
@@ -143,6 +144,11 @@ class BridgeTransport(Protocol):
     async def read_exactly(self, n: int) -> bytes: ...
     async def write(self, data: bytes) -> None: ...
     async def close(self) -> None: ...
+
+
+BridgeTransportFactory: TypeAlias = Callable[
+    [], BridgeTransport | Awaitable[BridgeTransport]
+]
 
 
 class _StreamReaderTransport:
@@ -378,7 +384,15 @@ class BridgeClient:
                 retryable=err.retryable,
                 technical_detail_ref=err.technical_detail_ref,
             )
-        return response.result
+        result = response.result
+        if type(result) is not SceneQueryResult:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response does not contain valid scene facts.",
+            )
+        return result
 
     async def preflight(self, request: PreflightRequest) -> PreflightResult:
         """Send a ``changeset.preflight`` request and return the typed facts.
@@ -427,7 +441,15 @@ class BridgeClient:
                 retryable=err.retryable,
                 technical_detail_ref=err.technical_detail_ref,
             )
-        return response.result
+        result = response.result
+        if type(result) is not PreflightResult:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge preflight response does not contain valid facts.",
+            )
+        return result
 
     async def inspect_workspace(
         self, request: WorkspaceInspectRequest
@@ -749,7 +771,7 @@ class BridgeClient:
             candidate = self._transport_factory()
             if inspect.isawaitable(candidate):
                 candidate = await candidate
-            return candidate  # type: ignore[return-value]
+            return candidate
         reader, writer = await asyncio.open_connection(self._host, self._port)
         return _StreamReaderTransport(reader, writer)
 
@@ -875,9 +897,3 @@ class BridgeClient:
             await transport.close()
         except Exception:  # noqa: BLE001 — closing must never mask the real error
             pass
-
-
-# A transport_factory returns a transport (sync) or an awaitable transport.
-BridgeTransportFactory = (
-    "BridgeTransport | Callable[[], BridgeTransport | Awaitable[BridgeTransport]]"
-)

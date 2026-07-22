@@ -148,21 +148,21 @@ def __getattr__(name: str) -> object:
         globals()[name] = BridgeChangeSetProvider
         return BridgeChangeSetProvider
     if name in _LAZY_PREFLIGHT:
-        from eee_agent.houdini_bridge import changesets as _mod
+        from eee_agent.houdini_bridge import changesets as _changesets_module
 
-        value = getattr(_mod, name)
+        value = getattr(_changesets_module, name)
         globals()[name] = value
         return value
     if name in _LAZY_WORKSPACES:
-        from eee_agent.houdini_bridge import workspaces as _mod
+        from eee_agent.houdini_bridge import workspaces as _workspaces_module
 
-        value = getattr(_mod, name)
+        value = getattr(_workspaces_module, name)
         globals()[name] = value
         return value
     if name in _LAZY_SENSITIVITY:
-        from eee_agent.houdini_bridge import sensitivity as _mod
+        from eee_agent.houdini_bridge import sensitivity as _sensitivity_module
 
-        value = getattr(_mod, name)
+        value = getattr(_sensitivity_module, name)
         globals()[name] = value
         return value
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
