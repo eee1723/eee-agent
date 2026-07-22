@@ -62,6 +62,7 @@ from eee_agent.changesets.contracts import (
 )
 from eee_agent.changesets import codec
 from eee_agent.core import AgentError, AgentException, ErrorCategory, IdKind, require_id
+from eee_agent.core.events import JsonValue
 from eee_agent.houdini_bridge.contracts import SceneBinding
 from eee_agent.runtime.database import RuntimeDatabase
 from eee_agent.runtime.models import EventRecord, RetentionClass, canonical_json_dumps
@@ -119,8 +120,8 @@ TERMINAL_CHANGESET_STATES: frozenset[ChangeSetState] = frozenset(
     s for s, targets in _TRANSITIONS.items() if not targets
 )
 NONTERMINAL_CHANGESET_STATES: frozenset[ChangeSetState] = frozenset(
-    ChangeSetState
-) - TERMINAL_CHANGESET_STATES
+    s for s in ChangeSetState if s not in TERMINAL_CHANGESET_STATES
+)
 
 # Approval decision transitions reachable through update_approval. The
 # Approved -> Consumed transition is performed atomically by consume_approval.
@@ -1651,9 +1652,17 @@ class ChangeSetRepository:
             raise TypeError("decision must be an exact ApprovalDecision")
         if decision not in (ApprovalDecision.APPROVED, ApprovalDecision.REJECTED):
             raise ValueError("decision must be Approved or Rejected")
+        # APPROVED requires an exact SceneBinding; capture the binding scalars
+        # as precise locals here so the later ApprovalRecord construction (in a
+        # separate control-flow branch) does not re-touch the union type. REJECTED
+        # leaves them unset and never reads them.
+        approved_instance_id: str | None = None
+        approved_scene_epoch: int | None = None
         if decision is ApprovalDecision.APPROVED:
             if type(approved_binding) is not SceneBinding:
                 raise _approval_binding_unavailable()
+            approved_instance_id = approved_binding.instance_id
+            approved_scene_epoch = approved_binding.scene_epoch
         events_store = self._events
         if events_store is None:
             raise TypeError("ChangeSetRepository.decide requires an EventStore")
@@ -1746,8 +1755,8 @@ class ChangeSetRepository:
                     requested_at=approval.requested_at,
                     decided_at=now_utc,
                     expires_at=approval.expires_at,
-                    approved_instance_id=approved_binding.instance_id,
-                    approved_scene_epoch=approved_binding.scene_epoch,
+                    approved_instance_id=approved_instance_id,
+                    approved_scene_epoch=approved_scene_epoch,
                 )
                 await self._write_approval_conn(
                     conn, decided_approval, expected_decision=ApprovalDecision.PENDING
@@ -2394,7 +2403,7 @@ def _event_for_receipt(status: ReceiptStatus) -> str:
 
 def _state_changed_payload(
     change_id: str, from_state: ChangeSetState, to_state: ChangeSetState
-) -> dict[str, object]:
+) -> dict[str, JsonValue]:
     return {
         "change_id": change_id,
         "from": from_state.value,
@@ -2406,8 +2415,13 @@ def _receipt_event_payload(
     changeset: ChangeSet,
     receipt: ChangeReceipt,
     state: ChangeSetState,
-) -> dict[str, object]:
-    payload: dict[str, object] = {
+) -> dict[str, JsonValue]:
+    # applied_op_ids is a tuple[str, ...]; build a fresh list[JsonValue] so the
+    # event payload carries a JSON list in the original order without widening
+    # the projection to dict[str, object] or casting.
+    applied_op_ids: list[JsonValue] = []
+    applied_op_ids.extend(receipt.applied_op_ids)
+    payload: dict[str, JsonValue] = {
         "change_id": changeset.change_id,
         "changeset_digest": changeset.digest,
         "state": state.value,
@@ -2416,7 +2430,7 @@ def _receipt_event_payload(
         "scene_epoch": receipt.scene_epoch,
         "before_revision": receipt.before_revision,
         "after_revision": receipt.after_revision,
-        "applied_op_ids": list(receipt.applied_op_ids),
+        "applied_op_ids": applied_op_ids,
         "scene_may_have_changed": receipt.scene_may_have_changed,
     }
     # B-2: surface the structured apply cause so the LLM and UI can branch on
@@ -2437,8 +2451,8 @@ def _workspace_event_payload(
     active: bool,
     old_revision: str | None = None,
     previous_workspace_id: str | None = None,
-) -> dict[str, object]:
-    payload: dict[str, object] = {
+) -> dict[str, JsonValue]:
+    payload: dict[str, JsonValue] = {
         "session_id": manifest.session_id,
         "workspace_id": manifest.workspace_id,
         "revision": manifest.revision,
@@ -2456,9 +2470,29 @@ def _workspace_event_payload(
     return payload
 
 
+def _risk_summary_projection(risk: RiskSummary) -> dict[str, JsonValue]:
+    # The ChangeSet event payload carries a finite, auditable projection of the
+    # risk summary — not the full DTO. RiskSummary.to_dict() is statically
+    # dict[str, object], so the projection is reconstructed here as a precise
+    # dict[str, JsonValue] with the same fields and values, building the two
+    # string sequences as list[JsonValue] to avoid widening or casting.
+    effect_names: list[JsonValue] = []
+    effect_names.extend(risk.effect_names)
+    affected_paths: list[JsonValue] = []
+    affected_paths.extend(risk.affected_paths)
+    return {
+        "touches_external_nodes": risk.touches_external_nodes,
+        "changes_wiring": risk.changes_wiring,
+        "requires_backup": risk.requires_backup,
+        "operation_count": risk.operation_count,
+        "effect_names": effect_names,
+        "affected_paths": affected_paths,
+    }
+
+
 def _proposed_payload(
     changeset: ChangeSet, state: ChangeSetState
-) -> dict[str, object]:
+) -> dict[str, JsonValue]:
     # Bounded proposal facts: IDs, the canonical digest, the resulting state,
     # the permission mode, and the already-bounded risk summary. No full DTO,
     # operations, or parameter values are emitted in the event.
@@ -2469,11 +2503,11 @@ def _proposed_payload(
         "changeset_digest": changeset.digest,
         "state": state.value,
         "required_permission": changeset.required_permission.value,
-        "risk_summary": changeset.risk_summary.to_dict(),
+        "risk_summary": _risk_summary_projection(changeset.risk_summary),
     }
 
 
-def _requested_payload(approval: ApprovalRecord) -> dict[str, object]:
+def _requested_payload(approval: ApprovalRecord) -> dict[str, JsonValue]:
     return {
         "approval_id": approval.approval_id,
         "change_id": approval.change_id,
@@ -2482,22 +2516,34 @@ def _requested_payload(approval: ApprovalRecord) -> dict[str, object]:
     }
 
 
-def _approved_payload(approval: ApprovalRecord) -> dict[str, object]:
+def _approved_payload(approval: ApprovalRecord) -> dict[str, JsonValue]:
+    # A decided approval is contractually required to carry decided_at
+    # (ApprovalRecord.__post_init__ enforces this for APPROVED/CONSUMED). The
+    # static type is datetime | None, so narrow to datetime locally and fail
+    # closed via the existing record-corrupt error rather than leaking payload.
+    decided_at = approval.decided_at
+    if decided_at is None:
+        raise _record_corrupt()
     return {
         "approval_id": approval.approval_id,
         "change_id": approval.change_id,
         "changeset_digest": approval.changeset_digest,
         "approved_instance_id": approval.approved_instance_id,
         "approved_scene_epoch": approval.approved_scene_epoch,
-        "decided_at": approval.decided_at.isoformat(),
+        "decided_at": decided_at.isoformat(),
     }
 
 
-def _decided_payload(approval: ApprovalRecord) -> dict[str, object]:
+def _decided_payload(approval: ApprovalRecord) -> dict[str, JsonValue]:
     # Rejection and expiry carry the same bounded decision facts (no binding).
+    # See _approved_payload: decided_at is contractually present for REJECTED
+    # and EXPIRED, narrowed here from datetime | None.
+    decided_at = approval.decided_at
+    if decided_at is None:
+        raise _record_corrupt()
     return {
         "approval_id": approval.approval_id,
         "change_id": approval.change_id,
         "changeset_digest": approval.changeset_digest,
-        "decided_at": approval.decided_at.isoformat(),
+        "decided_at": decided_at.isoformat(),
     }
