@@ -1389,7 +1389,7 @@ def test_d2_update_todos_empty_list_clears_column(db_path: Path) -> None:
 
 def test_d2_update_todos_rejects_non_list(db_path: Path) -> None:
     async def scenario() -> None:
-        _, sessions, runs = await _open(db_path)
+        db, sessions, runs = await _open(db_path)
         try:
             session = await sessions.create("A")
             run = await runs.create_and_acquire(
@@ -1398,7 +1398,7 @@ def test_d2_update_todos_rejects_non_list(db_path: Path) -> None:
             with pytest.raises(TypeError):
                 await runs.update_todos(run.run_id, "not a list")  # type: ignore[arg-type]
         finally:
-            pass
+            await db.close()
 
     _run(scenario())
 

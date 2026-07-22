@@ -31,6 +31,14 @@ include = ["eee_agent*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+# A background thread that reports into a closed event loop (e.g. an aiosqlite
+# worker orphaned by a test that did not close its database) is a real resource
+# leak. Promote only this category to a hard failure so leaks are attributed to
+# the test that owns the resource, rather than surfacing as a warning in a
+# later test. Third-party deprecation warnings are intentionally left as-is.
+filterwarnings = [
+    "error::pytest.PytestUnhandledThreadExceptionWarning",
+]
 markers = [
     "houdini_kb: opt-in tests that require a local Houdini Knowledge cache/build",
 ]

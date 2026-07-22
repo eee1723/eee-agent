@@ -13,8 +13,6 @@ import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 ROOT = Path(__file__).resolve().parents[2]
 MAIN_WINDOW_SRC = (ROOT / "houdini_side" / "runtime_panel" / "main_window.py").read_text(
     encoding="utf-8"
