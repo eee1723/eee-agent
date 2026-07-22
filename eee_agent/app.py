@@ -9,8 +9,12 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
+from typing import NotRequired, TypedDict
 
 from deepagents import create_deep_agent
+from deepagents.backends import StateBackend
+from langchain.agents.middleware import AgentMiddleware, AgentState
+from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph.state import CompiledStateGraph
@@ -18,6 +22,19 @@ from langgraph.graph.state import CompiledStateGraph
 from eee_agent.harness import configure_deepagents_harness
 from eee_agent.model import build_model
 from eee_agent.system_prompt import build_system_prompt
+
+
+_Middleware = AgentMiddleware[AgentState[object], None, object]
+
+
+class _DeepAgentKwargs(TypedDict):
+    model: BaseChatModel
+    tools: list[BaseTool]
+    system_prompt: str
+    middleware: list[_Middleware]
+    backend: NotRequired[StateBackend]
+    checkpointer: NotRequired[BaseCheckpointSaver]
+    context_schema: NotRequired[type]
 
 
 def build_agent(
@@ -32,7 +49,7 @@ def build_agent(
     from eee_agent.tracing import setup_tracing
     setup_tracing()
     model = build_model()
-    middleware = []
+    middleware: list[_Middleware] = []
     try:
         from eee_agent import context_trim
         if context_trim.is_enabled():
@@ -77,7 +94,6 @@ def build_agent(
     backend = None
     if os.getenv("EEE_COMPACT_TOOL", "true").strip().lower() == "true":
         try:
-            from deepagents.backends import StateBackend
             from deepagents.middleware import create_summarization_tool_middleware
             backend = StateBackend()
             middleware.append(create_summarization_tool_middleware(model, backend))
@@ -87,8 +103,12 @@ def build_agent(
             backend = None
     # Copy the caller sequence so later mutation cannot affect this graph.
     selected_tools = list(tools)
-    kwargs = dict(model=model, tools=selected_tools,
-                  system_prompt=build_system_prompt(), middleware=middleware)
+    kwargs = _DeepAgentKwargs(
+        model=model,
+        tools=selected_tools,
+        system_prompt=build_system_prompt(),
+        middleware=middleware,
+    )
     if backend is not None:
         kwargs["backend"] = backend
     if checkpointer is not None:
