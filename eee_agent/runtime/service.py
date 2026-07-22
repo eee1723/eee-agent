@@ -18,12 +18,16 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import math
 import sys
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Mapping
+from pathlib import Path
+from typing import Protocol, TypeVar, runtime_checkable
+
+from langchain_core.language_models import BaseChatModel
 
 from eee_agent.changesets.contracts import (
     ApprovalDecision,
@@ -58,8 +62,13 @@ from eee_agent.core import (
     runtime_version_report,
 )
 from eee_agent.core.artifacts import ArtifactRef
-from eee_agent.houdini_bridge.capture import CaptureFramingReport
-from eee_agent.houdini_bridge.sensitivity import SensitivitySampleTarget
+from eee_agent.core.events import JsonValue
+from eee_agent.houdini_bridge.capture import CaptureFramingReport, CaptureResult
+from eee_agent.houdini_bridge.contracts import SceneQueryResult
+from eee_agent.houdini_bridge.sensitivity import (
+    SensitivitySampleResult,
+    SensitivitySampleTarget,
+)
 from eee_agent.houdini_bridge.workspaces import (
     WorkspaceInspectResult,
     WorkspaceInspectionUnavailable,
@@ -113,6 +122,47 @@ from eee_agent.runtime.titles import generate_session_title
 # (returning None) or an async function (returning an awaitable); the service
 # awaits awaitable results and isolates every callback failure.
 EventCallback = Callable[[EventRecord], "Awaitable[None] | None"]
+
+_T = TypeVar("_T")
+
+
+class _LegacyRunner(Protocol):
+    """Compatibility stream surface retained for injected test runners."""
+
+    def stream(
+        self, *, session_id: str, user_input: str
+    ) -> AsyncIterator[RunnerEvent | RunnerCompleted]: ...
+
+
+@runtime_checkable
+class _ModelingValidationProvider(Protocol):
+    """Required post-Apply geometry inspection capability."""
+
+    async def inspect_geometry(self, changeset: ChangeSet) -> SceneQueryResult: ...
+
+
+@runtime_checkable
+class _SensitivityProvider(Protocol):
+    """Optional typed sample-and-restore capability."""
+
+    async def sample_sensitivity(
+        self,
+        changeset: ChangeSet,
+        samples: tuple[SensitivitySampleTarget, ...],
+    ) -> SensitivitySampleResult: ...
+
+
+@runtime_checkable
+class _CaptureProvider(Protocol):
+    """Optional post-Apply viewport capture capability."""
+
+    async def capture(
+        self,
+        changeset: ChangeSet,
+        *,
+        target_dir: Path,
+        artifact_id: str,
+    ) -> CaptureResult: ...
 
 # Bounded wait for an active run to reach a terminal state during shutdown.
 _GRACEFUL_TIMEOUT_SECONDS = 10.0
@@ -278,7 +328,60 @@ def _changeset_delivery_spec(changeset: ChangeSet) -> str:
     )[:4096]
 
 
-async def _run_uncancelled(coro: Awaitable[object]) -> object:
+def _json_value(value: object, active: set[int]) -> JsonValue:
+    """Validate and copy one mutable JSON value at a persistence boundary."""
+    if value is None:
+        return None
+    if type(value) is str:
+        return value
+    if type(value) is bool:
+        return value
+    if type(value) is int:
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError("JSON float values must be finite")
+        return value
+    if type(value) is list:
+        identity = id(value)
+        if identity in active:
+            raise ValueError("JSON value must not contain a cycle")
+        active.add(identity)
+        try:
+            return [_json_value(item, active) for item in value]
+        finally:
+            active.remove(identity)
+    if type(value) is dict:
+        identity = id(value)
+        if identity in active:
+            raise ValueError("JSON value must not contain a cycle")
+        active.add(identity)
+        try:
+            result: dict[str, JsonValue] = {}
+            for key, item in value.items():
+                if type(key) is not str:
+                    raise TypeError("JSON object keys must be exact strings")
+                result[key] = _json_value(item, active)
+            return result
+        finally:
+            active.remove(identity)
+    raise TypeError(f"unsupported JSON value type: {type(value).__name__}")
+
+
+def _json_object(value: Mapping[str, object]) -> dict[str, JsonValue]:
+    """Validate and copy a string-keyed object for strict JSON consumers."""
+    if type(value) is not dict:
+        raise TypeError("JSON object must be an exact dict")
+    result: dict[str, JsonValue] = {}
+    active = {id(value)}
+    for key, item in value.items():
+        if type(key) is not str:
+            raise TypeError("JSON object keys must be exact strings")
+        result[key] = _json_value(item, active)
+    return result
+
+
+async def _run_uncancelled(coro: Awaitable[_T]) -> _T:
     """Run ``coro`` to completion, deferring cancellation of this task.
 
     Used to protect short critical persistence regions (run.created commit +
@@ -351,7 +454,7 @@ class RuntimeService:
         read_only_provider: ReadOnlyProvider | None = None,
         knowledge_runtime: KnowledgeRuntime | None = None,
         vision_provider: VisionProvider | None = None,
-        title_model_provider: Callable[[], object] | None = None,
+        title_model_provider: Callable[[], BaseChatModel] | None = None,
     ) -> None:
         self._database = database
         self._paths = paths
@@ -373,7 +476,7 @@ class RuntimeService:
         # diverge from the actual transitioned-from status.
         self._state_lock = asyncio.Lock()
         self._checkpoints: CheckpointManager | None = None
-        self._runner: object | None = None
+        self._runner: AgentRunner | _LegacyRunner | None = None
         self._modeling_catalog_provider = modeling_catalog_provider
         base_read_only_provider: ReadOnlyProvider = (
             read_only_provider
@@ -384,10 +487,10 @@ class RuntimeService:
         self._read_only_provider: ReadOnlyProvider = _RuntimeReadOnlyProvider(
             base_read_only_provider, self._knowledge
         )
-        self._modeling_validation_provider = (
+        self._modeling_validation_provider: _ModelingValidationProvider | None = (
             changeset_bridge_provider
             if modeling_catalog_provider is not None
-            and hasattr(changeset_bridge_provider, "inspect_geometry")
+            and isinstance(changeset_bridge_provider, _ModelingValidationProvider)
             else None
         )
         # Trusted ChangeSet approval service. It shares this service's EventStore
@@ -461,7 +564,7 @@ class RuntimeService:
         read_only_provider: ReadOnlyProvider | None = None,
         knowledge_runtime: KnowledgeRuntime | None = None,
         vision_provider: VisionProvider | None = None,
-        title_model_provider: Callable[[], object] | None = None,
+        title_model_provider: Callable[[], BaseChatModel] | None = None,
     ) -> AsyncIterator["RuntimeService"]:
         """Open a service in the approved order and close it in reverse.
 
@@ -541,8 +644,8 @@ class RuntimeService:
                 apply_items, timeout=self._graceful_timeout
             )
             del done
-            for task in pending:
-                task.cancel()
+            for apply_task in pending:
+                apply_task.cancel()
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
 
@@ -550,9 +653,9 @@ class RuntimeService:
         # timeout. A task cancelled before it ever started never enters its
         # body, so its terminal-guarantee finally does not run either.
         items = list(self._tasks.values())
-        for task in items:
-            if not task.done():
-                task.cancel()
+        for run_task in items:
+            if not run_task.done():
+                run_task.cancel()
         if items:
             try:
                 await asyncio.wait_for(
@@ -689,10 +792,10 @@ class RuntimeService:
         # Freeze a fresh runtime_version_report into THIS run's model snapshot
         # (one call per start_run). Atomic global acquisition happens inside
         # create_and_acquire.
-        model_snapshot = runtime_version_report()
+        model_snapshot = _json_object(runtime_version_report())
         # Freeze Knowledge provenance into every Run snapshot.  These fields
         # are advisory metadata only and never grant scene creatability.
-        model_snapshot.update(self._knowledge.snapshot_fields())
+        model_snapshot.update(_json_object(self._knowledge.snapshot_fields()))
         run = await self._runs.create_and_acquire(
             session_id, user_input, model_snapshot
         )
@@ -889,6 +992,10 @@ class RuntimeService:
             # bounded sample targets and the quality profile enables it.
             sample_plan = await self._sensitivity_sample_plan(result.changeset)
             if sample_plan:
+                if not isinstance(provider, _SensitivityProvider):
+                    raise TypeError(
+                        "modeling validation provider lacks sensitivity sampling"
+                    )
                 evidence = await provider.sample_sensitivity(
                     result.changeset, sample_plan
                 )
@@ -1091,7 +1198,7 @@ class RuntimeService:
         closed and deletes the file). Never a replay of the durable Apply.
         """
         provider = self._modeling_validation_provider
-        if provider is None or not hasattr(provider, "capture"):
+        if provider is None or not isinstance(provider, _CaptureProvider):
             return None
         if ValidatorKind.ARTIFACT not in (
             houdini_21_minimal_quality_profile().validators
@@ -1142,11 +1249,13 @@ class RuntimeService:
         if task is None or task.done():
             task = asyncio.create_task(self._apply_changeset_task(change_id))
             self._apply_tasks[change_id] = task
-            task.add_done_callback(
-                lambda completed, cid=change_id: self._discard_apply_task(
-                    cid, completed
-                )
-            )
+
+            def discard_apply_task(
+                completed: asyncio.Future[ApplyCompletionResult],
+            ) -> None:
+                self._discard_apply_task(change_id, completed)
+
+            task.add_done_callback(discard_apply_task)
         return await asyncio.shield(task)
 
     async def _apply_changeset_task(
@@ -1171,7 +1280,7 @@ class RuntimeService:
     def _discard_apply_task(
         self,
         change_id: str,
-        task: asyncio.Task[ApplyCompletionResult],
+        task: asyncio.Future[ApplyCompletionResult],
     ) -> None:
         if not task.cancelled():
             # Mark a background exception retrieved even when the original
@@ -1351,7 +1460,7 @@ class RuntimeService:
             session_id=session_id,
             run_id=run_id,
             event_type=event_type,
-            payload=payload,
+            payload=_json_object(payload),
             retention_class=retention_class,
         )
 
@@ -1590,7 +1699,7 @@ class RuntimeService:
             }
             # D-2: last-seen todos payload, written to runs.todos_json when the
             # run terminates. None means no todos.updated event arrived.
-            last_todos: list | None = None
+            last_todos: list[Mapping[str, object]] | None = None
             if isinstance(runner, AgentRunner):
                 stream = runner.stream(
                     session_id=session_id,
@@ -1598,7 +1707,7 @@ class RuntimeService:
                     user_input=user_input,
                 )
             else:
-                stream = runner.stream(  # type: ignore[union-attr]
+                stream = runner.stream(
                     session_id=session_id, user_input=user_input
                 )
             async for event in stream:
@@ -1616,7 +1725,11 @@ class RuntimeService:
                     # and writing it after the stream ends is enough for the UI
                     # to render the plan that was active at completion.
                     if event.event_type == "todos.updated":
-                        last_todos = list(event.payload.get("todos") or [])
+                        todos = event.payload.get("todos")
+                        if isinstance(todos, list):
+                            last_todos = [
+                                item for item in todos if isinstance(item, Mapping)
+                            ]
                 elif isinstance(event, RunnerCompleted):
                     final_response = event.final_response
                     usage = dict(event.usage)
@@ -1668,30 +1781,32 @@ class RuntimeService:
         provider = self._title_model_provider
         if provider is None or session_id in self._title_tasks:
             return
-        try:
-            session = self._sessions.get(session_id)
-        except Exception:  # noqa: BLE001 — best-effort scheduling
-            return
-        if session is None or session.get("title") != "New session":
-            return
         task = asyncio.create_task(
             self._autotitle_session_task(
                 session_id, user_input, final_response, provider
             )
         )
         self._title_tasks[session_id] = task
-        task.add_done_callback(lambda _t, sid=session_id: self._title_tasks.pop(sid, None))
+
+        def discard_title_task(completed: asyncio.Future[None]) -> None:
+            if self._title_tasks.get(session_id) is completed:
+                self._title_tasks.pop(session_id, None)
+
+        task.add_done_callback(discard_title_task)
 
     async def _autotitle_session_task(
         self,
         session_id: str,
         user_input: str,
         final_response: str,
-        provider: Callable[[], object],
+        provider: Callable[[], BaseChatModel],
     ) -> None:
         # Best-effort: any failure (provider down, bad output, rename race) is
         # swallowed so it can never affect the completed run.
         try:
+            session = await self._sessions.get(session_id)
+            if session.title != "New session":
+                return
             model = provider()
             title = await generate_session_title(
                 model, user_input, final_response=final_response
