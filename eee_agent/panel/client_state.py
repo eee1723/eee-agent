@@ -368,7 +368,7 @@ def choose_active_session(
     """Choose the preferred active Session, otherwise the most active one."""
     if type(sessions) is not list:
         raise PanelClientError("Runtime Session list is invalid.")
-    active: list[dict[str, object]] = []
+    active: list[tuple[dict[str, object], str, int, datetime]] = []
     for item in sessions:
         if type(item) is not dict:
             raise PanelClientError("Runtime Session list is invalid.")
@@ -387,23 +387,23 @@ def choose_active_session(
         ):
             raise PanelClientError("Runtime Session list is invalid.")
         try:
-            datetime.fromisoformat(updated_at)
+            parsed_updated_at = datetime.fromisoformat(updated_at)
         except ValueError as exc:
             raise PanelClientError("Runtime Session list is invalid.") from exc
         if status == "active":
-            active.append(item)
+            active.append((item, session_id, last_seq, parsed_updated_at))
     if preferred_session_id is not None:
-        for item in active:
-            if item["session_id"] == preferred_session_id:
+        for item, session_id, _last_seq, _updated_at in active:
+            if session_id == preferred_session_id:
                 return MappingProxyType(dict(item))
     if not active:
         return None
-    chosen = max(
+    chosen, _session_id, _last_seq, _updated_at = max(
         active,
-        key=lambda item: (
-            item["last_seq"],
-            datetime.fromisoformat(item["updated_at"]),
-            item["session_id"],
+        key=lambda entry: (
+            entry[2],
+            entry[3],
+            entry[1],
         ),
     )
     return MappingProxyType(dict(chosen))

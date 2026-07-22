@@ -360,16 +360,33 @@ class RuntimePanelState:
 
     def load_snapshot(self, payload: object) -> None:
         snap = parse_session_snapshot(payload)
-        self._session_id = snap["session"]["session_id"]
-        self._last_seq = snap["snapshot_seq"]
-        self._runs = {run["run_id"]: dict(run) for run in snap["runs"]}
-        self._run_order = [run["run_id"] for run in snap["runs"]]
+        session = snap["session"]
+        runs = snap["runs"]
+        snapshot_seq = snap["snapshot_seq"]
         active = snap["active_run"]
+        if (
+            type(session) is not dict
+            or type(runs) is not list
+            or type(snapshot_seq) is not int
+            or (active is not None and type(active) is not dict)
+        ):
+            raise PanelClientError("Runtime Session snapshot is invalid.")
+        self._session_id = _matching(session.get("session_id"), _SESSION_ID_RE)
+        self._last_seq = snapshot_seq
+        parsed_runs = [_validate_run(run) for run in runs]
+        self._runs = {
+            _matching(run["run_id"], _RUN_ID_RE): dict(run) for run in parsed_runs
+        }
+        self._run_order = [
+            _matching(run["run_id"], _RUN_ID_RE) for run in parsed_runs
+        ]
         if active is not None:
-            self._runs[active["run_id"]] = dict(active)
-            if active["run_id"] not in self._run_order:
-                self._run_order.append(active["run_id"])
-            self._active_run_id = active["run_id"]
+            active_run = _validate_run(active)
+            active_run_id = _matching(active_run["run_id"], _RUN_ID_RE)
+            self._runs[active_run_id] = dict(active_run)
+            if active_run_id not in self._run_order:
+                self._run_order.append(active_run_id)
+            self._active_run_id = active_run_id
         else:
             self._active_run_id = None
         self._output = {
@@ -408,7 +425,7 @@ class RuntimePanelState:
             user_input = payload.get("user_input")
             if type(user_input) is not str:
                 raise PanelClientError("Runtime Run event is invalid.")
-            run = {
+            created_run: dict[str, object] = {
                 "run_id": rid,
                 "session_id": self._session_id,
                 "status": "Created",
@@ -423,7 +440,7 @@ class RuntimePanelState:
                 # snapshot repopulates it from RunRecord.todos.
                 "todos": [],
             }
-            self._runs[rid] = run
+            self._runs[rid] = created_run
             if rid not in self._run_order:
                 self._run_order.append(rid)
             self._active_run_id = rid
@@ -681,11 +698,12 @@ def artifact_refresh_required(message: Mapping[str, object]) -> bool:
 
 
 def _finite_number(value: object) -> float:
-    if type(value) is bool or type(value) not in (int, float):
-        raise PanelClientError("Runtime artifact event is invalid.")
-    if not math.isfinite(value):
-        raise PanelClientError("Runtime artifact event is invalid.")
-    return float(value)
+    if type(value) is int:
+        return float(value)
+    if type(value) is float:
+        if math.isfinite(value):
+            return value
+    raise PanelClientError("Runtime artifact event is invalid.")
 
 
 def parse_artifact_event(message: Mapping[str, object]) -> Mapping[str, object]:
