@@ -89,7 +89,7 @@ class ModelingProposalSummary:
         if any(type(name) is not str for name in names):
             raise TypeError("ModelingProposalSummary.effect_names must contain strings")
         object.__setattr__(self, "effect_names", names)
-        if len(self.to_dict()["effect_names"]) > 16:
+        if len(names) > 16:
             raise ValueError("ModelingProposalSummary has too many effect names")
 
     def to_dict(self) -> dict[str, object]:

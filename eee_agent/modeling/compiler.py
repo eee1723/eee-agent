@@ -17,9 +17,12 @@ from eee_agent.changesets.contracts import (
     NodeRef,
     ParmValueEquals,
     PermissionMode,
+    Postcondition,
+    Precondition,
     RiskSummary,
     SceneBindingEquals,
     SetParm,
+    TypedOperation,
     WireInputEquals,
     WireRef,
     WorkspaceManifest,
@@ -261,6 +264,16 @@ def _stable_suffix(spec_digest: str, category: str, logical_key: str) -> str:
     return hashlib.sha256(
         f"{spec_digest}:{category}:{logical_key}".encode("utf-8")
     ).hexdigest()[:24]
+
+
+def _required_node_id(ref: NodeRef) -> str:
+    node_id = ref.node_id
+    if node_id is None:
+        raise _error(
+            "modeling.changeset_invalid",
+            "A compiled node is missing its deterministic node identity.",
+        )
+    return node_id
 
 
 def _topological_nodes(spec: ProceduralSpec) -> tuple[_LogicalNode, ...]:
@@ -557,7 +570,11 @@ def compile_procedural_spec(
                 )
             )
 
-    operations = tuple([*create_ops, *parm_ops, *wire_ops])
+    operations: tuple[TypedOperation, ...] = (
+        *create_ops,
+        *parm_ops,
+        *wire_ops,
+    )
     affected_nodes = tuple(node_refs[item.qualified_key] for item in ordered)
     if len(operations) > _MAX_CHANGESET_OPERATIONS:
         raise _error(
@@ -579,7 +596,7 @@ def compile_procedural_spec(
             "modeling.condition_budget_exceeded",
             "The compiled graph exceeds the typed ChangeSet postcondition budget.",
         )
-    preconditions = (
+    preconditions: tuple[Precondition, ...] = (
         SceneBindingEquals(
             instance_id=scene_binding.instance_id,
             scene_epoch=scene_binding.scene_epoch,
@@ -590,11 +607,11 @@ def compile_procedural_spec(
         ),
         NodeIdentityEquals(node=root_ref),
         *(
-            NodeAbsent(path=ref.path, node_id=ref.node_id)
+            NodeAbsent(path=ref.path, node_id=_required_node_id(ref))
             for ref in affected_nodes
         ),
     )
-    postconditions = (
+    postconditions: tuple[Postcondition, ...] = (
         *(NodeIdentityEquals(node=ref) for ref in affected_nodes),
         *parm_postconditions,
         *wire_postconditions,
@@ -721,7 +738,7 @@ def compile_bootstrap_procedural_spec(
     root_create = CreateNode(
         op_id=f"op_create_{_stable_suffix(stable_seed, 'create', 'bootstrap_root')}",
         parent=parent_ref,
-        node_id=root_ref.node_id or "",
+        node_id=_required_node_id(root_ref),
         node_type="geo",
         node_name=bootstrap.root_name,
         workspace_id=bootstrap.workspace_id,
@@ -822,7 +839,11 @@ def compile_bootstrap_procedural_spec(
                 )
             )
 
-    operations = tuple([*create_ops, *parm_ops, *wire_ops])
+    operations: tuple[TypedOperation, ...] = (
+        *create_ops,
+        *parm_ops,
+        *wire_ops,
+    )
     affected_nodes = (root_ref,) + tuple(
         node_refs[item.qualified_key] for item in ordered
     )
@@ -846,15 +867,18 @@ def compile_bootstrap_procedural_spec(
             "modeling.condition_budget_exceeded",
             "The bootstrap graph exceeds the typed ChangeSet postcondition budget.",
         )
-    preconditions = (
+    preconditions: tuple[Precondition, ...] = (
         SceneBindingEquals(
             instance_id=scene_binding.instance_id,
             scene_epoch=scene_binding.scene_epoch,
         ),
         NodeIdentityEquals(node=parent_ref),
-        *(NodeAbsent(path=ref.path, node_id=ref.node_id or "") for ref in affected_nodes),
+        *(
+            NodeAbsent(path=ref.path, node_id=_required_node_id(ref))
+            for ref in affected_nodes
+        ),
     )
-    postconditions = (
+    postconditions: tuple[Postcondition, ...] = (
         *(NodeIdentityEquals(node=ref) for ref in affected_nodes),
         *parm_postconditions,
         *wire_postconditions,

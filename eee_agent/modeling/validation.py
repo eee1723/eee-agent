@@ -395,7 +395,12 @@ def derive_sensitivity_sample_plan(
             continue
         seen.add(key)
         value = operation.value
-        if type(value) is bool or type(value) not in (int, float):
+        sample_value: int | float
+        if type(value) is int:
+            sample_value = value + 1
+        elif type(value) is float:
+            sample_value = value + 1.0
+        else:
             continue
         definition = definitions.get(operation.target.expected_type)
         if definition is None:
@@ -412,7 +417,7 @@ def derive_sensitivity_sample_plan(
                 node_id=operation.target.node_id,
                 path=operation.target.path,
                 parm_name=operation.parm_name,
-                value=value + 1 if type(value) is int else value + 1.0,
+                value=sample_value,
             )
         )
         if len(targets) >= limit:

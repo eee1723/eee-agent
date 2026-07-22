@@ -754,31 +754,35 @@ def _evaluate_postconditions(
     for cond in changeset.expected_postconditions:
         passed = False
         if isinstance(cond, NodeIdentityEquals):
-            fact = node_facts.get(_identity(cond.node))
-            passed = fact is not None and fact.exists
-            if passed:
+            node_fact = node_facts.get(_identity(cond.node))
+            if node_fact is not None and node_fact.exists:
                 passed = (
-                    fact.actual_path == cond.node.path
-                    and fact.actual_type == cond.node.expected_type
+                    node_fact.actual_path == cond.node.path
+                    and node_fact.actual_type == cond.node.expected_type
                     and (
                         cond.node.node_id is None
-                        or fact.node_id == cond.node.node_id
+                        or node_fact.node_id == cond.node.node_id
                     )
                     and (
                         cond.node.expected_workspace_id is None
-                        or fact.workspace_id == cond.node.expected_workspace_id
+                        or node_fact.workspace_id
+                        == cond.node.expected_workspace_id
                     )
                 )
         elif isinstance(cond, ParmValueEquals):
-            fact = parm_facts.get((_identity(cond.target), cond.parm_name))
+            parm_fact = parm_facts.get(
+                (_identity(cond.target), cond.parm_name)
+            )
             passed = (
-                fact is not None
-                and fact.exists
-                and _json_equal(fact.value, cond.value)
+                parm_fact is not None
+                and parm_fact.exists
+                and _json_equal(parm_fact.value, cond.value)
             )
         elif isinstance(cond, WireInputEquals):
-            fact = wire_facts.get((_identity(cond.target), cond.input_index))
-            passed = fact is not None and fact.source == cond.source
+            wire_fact = wire_facts.get(
+                (_identity(cond.target), cond.input_index)
+            )
+            passed = wire_fact is not None and wire_fact.source == cond.source
         results.append(ConditionResult(kind=cond.kind, passed=passed, detail=None))
     return tuple(results)
 
