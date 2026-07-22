@@ -42,8 +42,6 @@ from eee_agent.changesets.contracts import (
     OwnedNodeRef,
     ParmSnapshot,
     ParmValueEquals,
-    PermissionMode,
-    ReceiptStatus,
     RiskSummary,
     SceneBindingEquals,
     SetParm,
@@ -55,6 +53,7 @@ from eee_agent.changesets.contracts import (
     _parm_value_json,
     _validate_parm_value,
 )
+from eee_agent.changesets import codec
 from eee_agent.core.ids import IdKind, require_id
 from eee_agent.houdini_bridge.contracts import (
     MAX_MESSAGE_BYTES,
@@ -133,105 +132,23 @@ _CONDITION_RESULT_FIELDS = frozenset({"kind", "passed", "detail"})
 _RESPONSE_REQUIRED_FIELDS = frozenset({"protocol", "kind", "request_id", "ok"})
 
 # ChangeSet/manifest deserializer field sets (mirror the accepted repository).
-_CHANGESET_FIELDS = frozenset(
-    {
-        "schema_version",
-        "change_id",
-        "session_id",
-        "run_id",
-        "scene_binding",
-        "workspace_id",
-        "base_revision",
-        "required_permission",
-        "scoped_node_ids",
-        "operations",
-        "affected_nodes",
-        "read_dependencies",
-        "preconditions",
-        "expected_postconditions",
-        "risk_summary",
-        "checkpoint_plan",
-        "created_at",
-    }
-)
-_MANIFEST_FIELDS = frozenset(
-    {
-        "schema_version",
-        "workspace_id",
-        "session_id",
-        "instance_id",
-        "scene_epoch",
-        "revision",
-        "roots",
-        "nodes",
-        "created_by_run",
-        "updated_at",
-    }
-)
-_OWNED_FIELDS = frozenset(
-    {"node_id", "path", "node_type", "parent_path", "capability", "role"}
-)
-_NODEREF_FIELDS = frozenset(
-    {"node_id", "path", "expected_type", "expected_workspace_id"}
-)
-_WIREREF_FIELDS = frozenset({"source", "source_output_index"})
-_CREATE_FIELDS = frozenset(
-    {
-        "kind",
-        "op_id",
-        "parent",
-        "node_id",
-        "node_type",
-        "node_name",
-        "workspace_id",
-        "capability",
-        "role",
-    }
-)
-_SETPARM_FIELDS = frozenset(
-    {"kind", "op_id", "target", "parm_name", "value", "expected_old_value"}
-)
-_CONNECT_FIELDS = frozenset(
-    {
-        "kind",
-        "op_id",
-        "target",
-        "input_index",
-        "source",
-        "source_output_index",
-        "expected_old_source",
-    }
-)
-_RISK_FIELDS = frozenset(
-    {
-        "touches_external_nodes",
-        "changes_wiring",
-        "requires_backup",
-        "operation_count",
-        "effect_names",
-        "affected_paths",
-    }
-)
-_CHECKPOINT_FIELDS = frozenset({"nodes", "parameters", "wires"})
-_PARM_SNAPSHOT_FIELDS = frozenset({"target", "parm_name"})
-_WIRE_SNAPSHOT_FIELDS = frozenset({"target", "input_index"})
+# Shared ChangeSet/Manifest/Receipt field sets live in the contract codec; the
+# names below are re-exported for any internal reference and kept stable.
+_CHANGESET_FIELDS = codec._CHANGESET_FIELDS
+_MANIFEST_FIELDS = codec._MANIFEST_FIELDS
+_OWNED_FIELDS = codec._OWNED_FIELDS
+_NODEREF_FIELDS = codec._NODEREF_FIELDS
+_WIREREF_FIELDS = codec._WIREREF_FIELDS
+_CREATE_FIELDS = codec._CREATE_FIELDS
+_SETPARM_FIELDS = codec._SETPARM_FIELDS
+_CONNECT_FIELDS = codec._CONNECT_FIELDS
+_RISK_FIELDS = codec._RISK_FIELDS
+_CHECKPOINT_FIELDS = codec._CHECKPOINT_FIELDS
+_PARM_SNAPSHOT_FIELDS = codec._PARM_SNAPSHOT_FIELDS
+_WIRE_SNAPSHOT_FIELDS = codec._WIRE_SNAPSHOT_FIELDS
 # ChangeReceipt wire fields (mirror the accepted repository decoder).
-_RECEIPT_FIELDS = frozenset(
-    {
-        "schema_version",
-        "change_id",
-        "status",
-        "instance_id",
-        "scene_epoch",
-        "before_revision",
-        "after_revision",
-        "applied_op_ids",
-        "postcondition_results",
-        "rollback_results",
-        "scene_may_have_changed",
-        "completed_at",
-    }
-)
+_RECEIPT_FIELDS = codec._RECEIPT_FIELDS
+
 
 
 # --------------------------------------------------------------------------
@@ -382,257 +299,86 @@ def _decode_dt(value: object, label: str) -> datetime:
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# DTO decoders: thin private wrappers over the shared contract codec. The
+# codec owns the single typed decode path; these names are kept so existing
+# call sites (including houdini_bridge.workspaces._decode_manifest and tests)
+# are unchanged. Bridge-only decoders (preflight facts / envelope parsing)
+# stay in this module further below.
+# --------------------------------------------------------------------------
+
+
 def _decode_owned(data: object) -> OwnedNodeRef:
-    value = _require_exact_dict(data, "OwnedNodeRef")
-    _require_exact_keys(value, _OWNED_FIELDS, "OwnedNodeRef")
-    return OwnedNodeRef(
-        node_id=value["node_id"],
-        path=value["path"],
-        node_type=value["node_type"],
-        parent_path=value["parent_path"],
-        capability=value["capability"],
-        role=value["role"],
-    )
+    return codec.decode_owned_node_ref(data)
 
 
 def _decode_noderef(data: object) -> NodeRef:
-    value = _require_exact_dict(data, "NodeRef")
-    _require_exact_keys(value, _NODEREF_FIELDS, "NodeRef")
-    return NodeRef(
-        node_id=value["node_id"],
-        path=value["path"],
-        expected_type=value["expected_type"],
-        expected_workspace_id=value["expected_workspace_id"],
-    )
+    return codec.decode_node_ref(data)
 
 
 def _decode_wiref(data: object) -> WireRef:
-    value = _require_exact_dict(data, "WireRef")
-    _require_exact_keys(value, _WIREREF_FIELDS, "WireRef")
-    return WireRef(
-        source=_decode_noderef(value["source"]),
-        source_output_index=value["source_output_index"],
-    )
+    return codec.decode_wire_ref(data)
 
 
-def _decode_operation(data: object) -> object:
-    value = _require_exact_dict(data, "typed operation")
-    kind = value.get("kind")
-    if kind == "node.create":
-        _require_exact_keys(value, _CREATE_FIELDS, "CreateNode")
-        return CreateNode(
-            op_id=value["op_id"],
-            parent=_decode_noderef(value["parent"]),
-            node_id=value["node_id"],
-            node_type=value["node_type"],
-            node_name=value["node_name"],
-            workspace_id=value["workspace_id"],
-            capability=value["capability"],
-            role=value["role"],
-        )
-    if kind == "parm.set":
-        _require_exact_keys(value, _SETPARM_FIELDS, "SetParm")
-        return SetParm(
-            op_id=value["op_id"],
-            target=_decode_noderef(value["target"]),
-            parm_name=value["parm_name"],
-            value=value["value"],
-            expected_old_value=value["expected_old_value"],
-        )
-    if kind == "wire.connect":
-        _require_exact_keys(value, _CONNECT_FIELDS, "ConnectInput")
-        old_source = value["expected_old_source"]
-        return ConnectInput(
-            op_id=value["op_id"],
-            target=_decode_noderef(value["target"]),
-            input_index=value["input_index"],
-            source=_decode_noderef(value["source"]),
-            source_output_index=value["source_output_index"],
-            expected_old_source=(
-                None if old_source is None else _decode_wiref(old_source)
-            ),
-        )
-    raise ValueError(f"unsupported operation kind tag: {kind!r}")
+def _decode_operation(data: object) -> CreateNode | SetParm | ConnectInput:
+    return codec.decode_operation(data)
 
 
-def _decode_condition(data: object) -> object:
-    value = _require_exact_dict(data, "condition")
-    kind = value.get("kind")
-    if kind == "scene.binding_equals":
-        _require_exact_keys(
-            value,
-            frozenset({"kind", "instance_id", "scene_epoch"}),
-            "SceneBindingEquals",
-        )
-        return SceneBindingEquals(
-            instance_id=value["instance_id"], scene_epoch=value["scene_epoch"]
-        )
-    if kind == "workspace.revision_equals":
-        _require_exact_keys(
-            value,
-            frozenset({"kind", "workspace_id", "revision"}),
-            "WorkspaceRevisionEquals",
-        )
-        return WorkspaceRevisionEquals(
-            workspace_id=value["workspace_id"], revision=value["revision"]
-        )
-    if kind == "node.identity_equals":
-        _require_exact_keys(value, frozenset({"kind", "node"}), "NodeIdentityEquals")
-        return NodeIdentityEquals(node=_decode_noderef(value["node"]))
-    if kind == "parm.value_equals":
-        _require_exact_keys(
-            value,
-            frozenset({"kind", "target", "parm_name", "value"}),
-            "ParmValueEquals",
-        )
-        return ParmValueEquals(
-            target=_decode_noderef(value["target"]),
-            parm_name=value["parm_name"],
-            value=value["value"],
-        )
-    if kind == "wire.input_equals":
-        _require_exact_keys(
-            value,
-            frozenset({"kind", "target", "input_index", "source"}),
-            "WireInputEquals",
-        )
-        source = value["source"]
-        return WireInputEquals(
-            target=_decode_noderef(value["target"]),
-            input_index=value["input_index"],
-            source=None if source is None else _decode_wiref(source),
-        )
-    if kind == "node.absent":
-        _require_exact_keys(value, frozenset({"kind", "path", "node_id"}), "NodeAbsent")
-        return NodeAbsent(path=value["path"], node_id=value["node_id"])
-    raise ValueError(f"unsupported condition kind tag: {kind!r}")
+def _decode_condition(
+    data: object,
+) -> (
+    SceneBindingEquals
+    | WorkspaceRevisionEquals
+    | NodeIdentityEquals
+    | ParmValueEquals
+    | WireInputEquals
+    | NodeAbsent
+):
+    return codec.decode_condition(data)
 
 
 def _decode_risk(data: object) -> RiskSummary:
-    value = _require_exact_dict(data, "RiskSummary")
-    _require_exact_keys(value, _RISK_FIELDS, "RiskSummary")
-    return RiskSummary(
-        touches_external_nodes=value["touches_external_nodes"],
-        changes_wiring=value["changes_wiring"],
-        requires_backup=value["requires_backup"],
-        operation_count=value["operation_count"],
-        effect_names=value["effect_names"],
-        affected_paths=value["affected_paths"],
-    )
+    return codec.decode_risk_summary(data)
 
 
 def _decode_parm_snapshot(data: object) -> ParmSnapshot:
-    value = _require_exact_dict(data, "ParmSnapshot")
-    _require_exact_keys(value, _PARM_SNAPSHOT_FIELDS, "ParmSnapshot")
-    return ParmSnapshot(
-        target=_decode_noderef(value["target"]), parm_name=value["parm_name"]
-    )
+    return codec.decode_parm_snapshot(data)
 
 
 def _decode_wire_snapshot(data: object) -> WireSnapshot:
-    value = _require_exact_dict(data, "WireSnapshot")
-    _require_exact_keys(value, _WIRE_SNAPSHOT_FIELDS, "WireSnapshot")
-    return WireSnapshot(
-        target=_decode_noderef(value["target"]), input_index=value["input_index"]
-    )
+    return codec.decode_wire_snapshot(data)
 
 
 def _decode_checkpoint(data: object) -> CheckpointPlan:
-    value = _require_exact_dict(data, "CheckpointPlan")
-    _require_exact_keys(value, _CHECKPOINT_FIELDS, "CheckpointPlan")
-    return CheckpointPlan(
-        nodes=[_decode_noderef(n) for n in value["nodes"]],
-        parameters=[_decode_parm_snapshot(p) for p in value["parameters"]],
-        wires=[_decode_wire_snapshot(w) for w in value["wires"]],
-    )
+    return codec.decode_checkpoint_plan(data)
 
 
 def _decode_condition_result(data: object) -> ConditionResult:
-    value = _require_exact_dict(data, "ConditionResult")
-    _require_exact_keys(value, _CONDITION_RESULT_FIELDS, "ConditionResult")
-    return ConditionResult(
-        kind=value["kind"], passed=value["passed"], detail=value["detail"]
-    )
+    return codec.decode_condition_result(data)
 
 
 def _decode_manifest(data: object) -> WorkspaceManifest:
-    value = _require_exact_dict(data, "WorkspaceManifest")
-    _require_exact_keys(value, _MANIFEST_FIELDS, "WorkspaceManifest")
-    return WorkspaceManifest(
-        schema_version=value["schema_version"],
-        workspace_id=value["workspace_id"],
-        session_id=value["session_id"],
-        instance_id=value["instance_id"],
-        scene_epoch=value["scene_epoch"],
-        revision=value["revision"],
-        roots=[_decode_owned(r) for r in value["roots"]],
-        nodes=[_decode_owned(n) for n in value["nodes"]],
-        created_by_run=value["created_by_run"],
-        updated_at=_decode_dt(value["updated_at"], "WorkspaceManifest.updated_at"),
-    )
+    return codec.decode_workspace_manifest(data)
 
 
 def _decode_changeset(data: object) -> ChangeSet:
-    value = _require_exact_dict(data, "ChangeSet")
-    _require_exact_keys(value, _CHANGESET_FIELDS, "ChangeSet")
-    return ChangeSet(
-        schema_version=value["schema_version"],
-        change_id=value["change_id"],
-        session_id=value["session_id"],
-        run_id=value["run_id"],
-        scene_binding=SceneBinding.from_dict(
-            _require_exact_dict(value["scene_binding"], "ChangeSet.scene_binding")
-        ),
-        workspace_id=value["workspace_id"],
-        base_revision=value["base_revision"],
-        required_permission=PermissionMode(value["required_permission"]),
-        scoped_node_ids=value["scoped_node_ids"],
-        operations=[_decode_operation(op) for op in value["operations"]],
-        affected_nodes=[_decode_noderef(n) for n in value["affected_nodes"]],
-        read_dependencies=[_decode_noderef(n) for n in value["read_dependencies"]],
-        preconditions=[_decode_condition(c) for c in value["preconditions"]],
-        expected_postconditions=[
-            _decode_condition(c) for c in value["expected_postconditions"]
-        ],
-        risk_summary=_decode_risk(value["risk_summary"]),
-        checkpoint_plan=_decode_checkpoint(value["checkpoint_plan"]),
-        created_at=_decode_dt(value["created_at"], "ChangeSet.created_at"),
-    )
+    return codec.decode_changeset(data)
 
 
 def _decode_receipt(data: object) -> ChangeReceipt:
     """Decode a bounded ``ChangeReceipt`` from strict JSON-derived dict data.
 
-    Self-contained (mirrors the accepted repository decoder) so the Bridge
-    layer never imports the persistence layer. The status tag is mapped to the
-    exact :class:`ReceiptStatus`; every other field is validated by the
-    frozen contract constructor.
+    Delegates to the shared contract codec so the Bridge layer never imports
+    the persistence layer; the codec validates field sets, exact primitive
+    types, and builds tuple collection fields.
     """
-    value = _require_exact_dict(data, "ChangeReceipt")
-    _require_exact_keys(value, _RECEIPT_FIELDS, "ChangeReceipt")
-    return ChangeReceipt(
-        schema_version=value["schema_version"],
-        change_id=value["change_id"],
-        status=ReceiptStatus(value["status"]),
-        instance_id=value["instance_id"],
-        scene_epoch=value["scene_epoch"],
-        before_revision=value["before_revision"],
-        after_revision=value["after_revision"],
-        applied_op_ids=value["applied_op_ids"],
-        postcondition_results=[
-            _decode_condition_result(r) for r in value["postcondition_results"]
-        ],
-        rollback_results=[
-            _decode_condition_result(r) for r in value["rollback_results"]
-        ],
-        scene_may_have_changed=value["scene_may_have_changed"],
-        completed_at=_decode_dt(value["completed_at"], "ChangeReceipt.completed_at"),
-    )
+    return codec.decode_change_receipt(data)
 
 
 def decode_change_receipt(data: Mapping[str, object]) -> ChangeReceipt:
     """Public alias for the bounded ChangeReceipt decoder (tests/clients)."""
     return _decode_receipt(data)
+
 
 
 # --------------------------------------------------------------------------
