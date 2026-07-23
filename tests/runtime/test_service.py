@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from langchain_core.language_models.fake_chat_models import FakeListChatModel
 
 from eee_agent.core import (
     AgentException,
@@ -203,27 +202,16 @@ def test_runnercompleted_is_unique_and_durable(paths: RuntimePaths) -> None:
 
 
 def test_completed_placeholder_session_is_auto_titled(
-    paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch
+    paths: RuntimePaths,
 ) -> None:
+    # The title is now derived locally from the prompt (no model call), so no
+    # title_model_provider / monkeypatch is needed.
     runner = FakeRunner(_success_items("finished"))
-    title_model = FakeListChatModel(responses=["unused"])
-    title_calls: list[tuple[str, str]] = []
-
-    async def fake_generate_title(
-        _model: object, user_input: str, *, final_response: str = ""
-    ) -> str:
-        title_calls.append((user_input, final_response))
-        return "Procedural chair"
-
-    monkeypatch.setattr(
-        "eee_agent.runtime.service.generate_session_title", fake_generate_title
-    )
 
     async def scenario() -> None:
         async with RuntimeService.open(
             paths,
             runner_factory=_factory_for(runner),
-            title_model_provider=lambda: title_model,
         ) as service:
             session = await service.create_session("New session")
             started = await service.start_run(session.session_id, "build a chair")
@@ -233,8 +221,8 @@ def test_completed_placeholder_session_is_auto_titled(
                 await asyncio.gather(*pending_titles)
 
             renamed = await service.get_session(session.session_id)
-            assert renamed.title == "Procedural chair"
-            assert title_calls == [("build a chair", "finished")]
+            # The title is the prompt's first line, truncated to 40 chars.
+            assert renamed.title == "build a chair"
 
     _run(scenario())
 

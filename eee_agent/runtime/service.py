@@ -27,8 +27,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol, TypeVar, runtime_checkable
 
-from langchain_core.language_models import BaseChatModel
-
 from eee_agent.changesets.contracts import (
     ApprovalDecision,
     ChangeSet,
@@ -116,7 +114,7 @@ from eee_agent.runtime.models import (
 from eee_agent.runtime.paths import RuntimePaths
 from eee_agent.runtime.runs import RunRepository
 from eee_agent.runtime.sessions import EMPTY_SESSION_TITLE, SessionRepository
-from eee_agent.runtime.titles import generate_session_title
+from eee_agent.runtime.titles import derive_session_title
 
 # A callback receives one committed EventRecord. It may be a plain function
 # (returning None) or an async function (returning an awaitable); the service
@@ -455,7 +453,6 @@ class RuntimeService:
         knowledge_runtime: KnowledgeRuntime | None = None,
         vision_provider: VisionProvider | None = None,
         vision_timeout_seconds: float = 30.0,
-        title_model_provider: Callable[[], BaseChatModel] | None = None,
     ) -> None:
         self._database = database
         self._paths = paths
@@ -536,9 +533,6 @@ class RuntimeService:
             vision_provider,
             timeout_seconds=vision_timeout_seconds,
         )
-        # Optional seam for auto-titling placeholder Sessions after the first
-        # run completes. None disables it (tests / no-LLM contexts).
-        self._title_model_provider = title_model_provider
         # In-flight auto-title tasks, keyed by session_id, so a Session is
         # titled at most once and a shutdown can await them.
         self._title_tasks: dict[str, asyncio.Task[None]] = {}
@@ -574,7 +568,6 @@ class RuntimeService:
         knowledge_runtime: KnowledgeRuntime | None = None,
         vision_provider: VisionProvider | None = None,
         vision_timeout_seconds: float = 30.0,
-        title_model_provider: Callable[[], BaseChatModel] | None = None,
     ) -> AsyncIterator["RuntimeService"]:
         """Open a service in the approved order and close it in reverse.
 
@@ -607,7 +600,6 @@ class RuntimeService:
                 knowledge_runtime=knowledge_runtime,
                 vision_provider=vision_provider,
                 vision_timeout_seconds=vision_timeout_seconds,
-                title_model_provider=title_model_provider,
             )
             await service._reconcile()
             checkpoints = CheckpointManager(paths.checkpoints_db)
@@ -1804,10 +1796,9 @@ class RuntimeService:
                 final_response=final_response,
             )
             # Best-effort: rename a placeholder Session to a meaningful title
-            # derived from the prompt. Fire-and-forget; a failure or missing
-            # model provider leaves the placeholder intact and never affects
-            # the run result.
-            self._maybe_autotitle_session(session_id, user_input, final_response)
+            # derived from the prompt. Fire-and-forget; a failure leaves the
+            # placeholder intact and never affects the run result.
+            self._maybe_autotitle_session(session_id, user_input)
         except Exception:
             # Any failure (a runner exception, or an invalid transition caused
             # by a concurrent stop) is decided by _handle_failure under the state
@@ -1816,18 +1807,15 @@ class RuntimeService:
             await self._handle_failure(session_id, run_id)
 
     def _maybe_autotitle_session(
-        self, session_id: str, user_input: str, final_response: str
+        self, session_id: str, user_input: str
     ) -> None:
         # Schedule a rename only for placeholder Sessions ("New session" is the
-        # auto-create marker) with a configured model provider and no task
-        # already running for that Session. Never raises.
-        provider = self._title_model_provider
-        if provider is None or session_id in self._title_tasks:
+        # auto-create marker) with no task already running for that Session.
+        # Never raises.
+        if session_id in self._title_tasks:
             return
         task = asyncio.create_task(
-            self._autotitle_session_task(
-                session_id, user_input, final_response, provider
-            )
+            self._autotitle_session_task(session_id, user_input)
         )
         self._title_tasks[session_id] = task
 
@@ -1841,19 +1829,15 @@ class RuntimeService:
         self,
         session_id: str,
         user_input: str,
-        final_response: str,
-        provider: Callable[[], BaseChatModel],
     ) -> None:
-        # Best-effort: any failure (provider down, bad output, rename race) is
-        # swallowed so it can never affect the completed run.
+        # Best-effort: any failure (empty prompt, rename race) is swallowed so
+        # it can never affect the completed run. The title is derived locally
+        # from the prompt (no model call), so it is instantaneous.
         try:
             session = await self._sessions.get(session_id)
             if session.title != "New session":
                 return
-            model = provider()
-            title = await generate_session_title(
-                model, user_input, final_response=final_response
-            )
+            title = derive_session_title(user_input)
             if title:
                 await self.rename_session(session_id, title)
         except Exception:  # noqa: BLE001 — auto-title must never block the run
