@@ -53,6 +53,7 @@ _PANEL_COMMANDS = frozenset(
         "changeset.list",
         "changeset.approve",
         "changeset.reject",
+        "changeset.recover",
         "workspace.create",
         "workspace.bind",
         "workspace.inspect",
@@ -277,6 +278,11 @@ def _validate_panel_payload(command_type: str, payload: dict) -> None:
             and _valid_id(payload["change_id"], _CHANGE_ID_RE)
             and type(payload["changeset_digest"]) is str
             and _DIGEST_RE.fullmatch(payload["changeset_digest"]) is not None
+        )
+    elif command_type == "changeset.recover":
+        valid = (
+            _exact_keys(payload, {"change_id"})
+            and _valid_id(payload["change_id"], _CHANGE_ID_RE)
         )
     elif command_type == "workspace.create":
         valid = (

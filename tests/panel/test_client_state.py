@@ -112,6 +112,11 @@ def test_build_command_is_canonical_and_bounded() -> None:
         "changeset.approve",
         {"change_id": change_id, "changeset_digest": "d" * 64},
     )
+    assert '"type":"changeset.recover"' in build_command(
+        "req_3b",
+        "changeset.recover",
+        {"change_id": change_id},
+    )
     assert '"type":"run.stop"' in build_command(
         "req_4", "run.stop", {"run_id": run_id}
     )
