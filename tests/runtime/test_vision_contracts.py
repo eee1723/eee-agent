@@ -65,6 +65,34 @@ def test_report_rejects_nonfinite_or_wrong_type_confidence(confidence: object) -
         NormalizedVisualReport("summary", (), confidence, True)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(("confidence", "expected"), [(0, 0.0), (1, 1.0)])
+def test_report_from_dict_normalizes_json_integer_confidence(
+    confidence: int, expected: float
+) -> None:
+    report = NormalizedVisualReport.from_dict(
+        {
+            "summary": "summary",
+            "observations": [],
+            "confidence": confidence,
+            "advisory_passed": False,
+        }
+    )
+    assert report.confidence == expected
+    assert type(report.confidence) is float
+
+
+def test_report_from_dict_rejects_boolean_confidence() -> None:
+    with pytest.raises(ValueError):
+        NormalizedVisualReport.from_dict(
+            {
+                "summary": "summary",
+                "observations": [],
+                "confidence": False,
+                "advisory_passed": False,
+            }
+        )
+
+
 def test_report_and_unavailable_payloads_are_bounded() -> None:
     report = NormalizedVisualReport("ok", ("silhouette matches",), 0.9, True)
     assert report.advisory_passed

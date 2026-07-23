@@ -224,8 +224,14 @@ class NormalizedVisualReport(_StrictContract):
         observations = data["observations"]
         if type(observations) is not list:
             raise ValueError("observations must be a list")
+        confidence = data["confidence"]
+        if type(confidence) is int:
+            try:
+                confidence = float(confidence)
+            except OverflowError:
+                raise ValueError("confidence must be finite and in 0..1") from None
         return cls(
-            data["summary"], tuple(observations), data["confidence"], data["advisory_passed"]  # type: ignore[arg-type]
+            data["summary"], tuple(observations), confidence, data["advisory_passed"]  # type: ignore[arg-type]
         )
 
     def to_dict(self) -> dict[str, object]:
