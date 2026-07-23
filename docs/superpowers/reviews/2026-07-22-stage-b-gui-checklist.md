@@ -1,14 +1,17 @@
 # Stage B Interactive Houdini Panel Checklist
 
-Candidate reviewed: `bf88745`
+Candidate reviewed: `9bdf37b`
 Branch: `feature/b-release-acceptance`
 Decision: **NOT RUN**
 Evidence: screenshots and interactive logs remain in `[machine-local acceptance root]` only.
 
 Every row below requires observation against the exact B candidate loaded by
 the installed Houdini package. Codex does not infer a GUI PASS from source
-inspection or Qt-free tests. The current package targets the main worktree,
-not this B branch; that precondition is tracked as RN-012.
+inspection or Qt-free tests. The installed package now targets the B worktree
+(`EEE_PATH = E:/eee-agent/.worktrees/runtime`, verified 2026-07-23); the prior
+RN-012 note that it "targets the main worktree" is stale. Confirm there is no
+unsaved user scene and re-read the package at verification time before
+recording any row as PASS.
 
 | Area | Checklist item | Result | Evidence / finding |
 | --- | --- | --- | --- |
