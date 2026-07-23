@@ -154,6 +154,10 @@ class RuntimePanel(QtWidgets.QWidget):
         self.context_bar.sidebarToggled.connect(
             self.session_sidebar.setVisible)
         self.context_bar.inspectorToggled.connect(self.inspector.setVisible)
+        # Initialize the auto-execute toggle from the persisted preference and
+        # keep the client in sync when the user toggles it.
+        self.context_bar.auto_button.setChecked(c.is_auto_execute())
+        self.context_bar.autoExecuteToggled.connect(c.set_auto_execute)
 
     # -- backend auto-start ----------------------------------------------
 
@@ -437,6 +441,12 @@ class RuntimePanel(QtWidgets.QWidget):
             # Store the exact summary so the decision forwards the same
             # change_id / changeset_digest the gate rendered.
             self._pending_changeset = summary
+            if self._client.is_auto_execute():
+                # Auto-execute: approve immediately via the exact-digest path
+                # (no server-side shortcut — digest binding, stale-scene, and
+                # transactional apply all run unchanged). Skip the manual drawer.
+                self._decide_changeset(True)
+                return
             self.approval_drawer.show_changeset(summary)
             self._position_drawer()
             return

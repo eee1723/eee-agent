@@ -56,6 +56,7 @@ RED = "#E45B55"
 _SETTINGS_ORGANIZATION = "EEEAgent"
 _SETTINGS_APPLICATION = "RuntimePanel"
 _PREFERRED_SESSION_KEY = "preferred_session_id"
+_AUTO_EXECUTE_KEY = "auto_execute_changesets"
 
 _QSS = f"""
 QWidget#EEEAgentRuntimePanel {{
@@ -277,6 +278,27 @@ def _save_preferred_session_id(session_id: str) -> None:
     settings.sync()
 
 
+def _load_auto_execute() -> bool:
+    value = QtCore.QSettings(
+        _SETTINGS_ORGANIZATION, _SETTINGS_APPLICATION
+    ).value(_AUTO_EXECUTE_KEY, False)
+    # QSettings may return a str ("true"/"false") or bool depending on backend;
+    # normalize defensively.
+    if type(value) is bool:
+        return value
+    if type(value) is str:
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _save_auto_execute(enabled: bool) -> None:
+    settings = QtCore.QSettings(
+        _SETTINGS_ORGANIZATION, _SETTINGS_APPLICATION
+    )
+    settings.setValue(_AUTO_EXECUTE_KEY, bool(enabled))
+    settings.sync()
+
+
 class RunRequestEdit(QtWidgets.QPlainTextEdit):
     """Multi-line Run request editor resilient to Windows IME confirmation.
 
@@ -438,6 +460,10 @@ class RuntimeObserverClient(QtCore.QObject):
         self._runtime_state = RuntimePanelState()
         self._sessions: dict[str, dict] = {}
         self._preferred_session_id = _load_preferred_session_id()
+        # When enabled, a proposal auto-approves and applies immediately
+        # (reusing the exact-digest approve path). Default off; persisted so the
+        # user's choice survives a Houdini restart.
+        self._auto_execute = _load_auto_execute()
         self._current_session_id: str | None = None
         self._current_session_title = ""
         # When the user sends a prompt with no active Session, we auto-create
@@ -480,6 +506,15 @@ class RuntimeObserverClient(QtCore.QObject):
             socket.deleteLater()
         self._timer.stop()
         self._schedule(0)
+
+    def is_auto_execute(self) -> bool:
+        """Whether proposals auto-approve and apply without a manual gate."""
+        return self._auto_execute
+
+    def set_auto_execute(self, enabled: bool) -> None:
+        """Persist the auto-execute preference (survives a Houdini restart)."""
+        self._auto_execute = bool(enabled)
+        _save_auto_execute(self._auto_execute)
 
     def create_unnamed_session(self) -> None:
         """Create or focus the one empty placeholder conversation."""

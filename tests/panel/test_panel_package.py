@@ -125,6 +125,21 @@ def test_client_exposes_changeset_recover_command() -> None:
     assert '"changeset.recover"' in source
 
 
+def test_auto_execute_preference_is_persisted_and_wired() -> None:
+    # The auto-execute toggle is a persisted QSettings preference (off by
+    # default) that drives the _on_changesets auto-approve path.
+    client_source = (PKG / "client.py").read_text(encoding="utf-8")
+    assert "_AUTO_EXECUTE_KEY" in client_source
+    assert "def _load_auto_execute" in client_source
+    assert "def _save_auto_execute" in client_source
+    assert "def is_auto_execute" in client_source
+    assert "def set_auto_execute" in client_source
+    window_source = (PKG / "main_window.py").read_text(encoding="utf-8")
+    assert "is_auto_execute()" in window_source
+    context_source = (PKG / "context_bar.py").read_text(encoding="utf-8")
+    assert "autoExecuteToggled" in context_source
+
+
 def test_client_refreshes_sidebar_on_session_renamed() -> None:
     # An auto-titled Session emits session.renamed; the client must update the
     # cached title and re-emit sessionsChanged so the sidebar refreshes in

@@ -23,6 +23,7 @@ class ContextBar(QtWidgets.QWidget):
 
     sidebarToggled = QtCore.Signal(bool)
     inspectorToggled = QtCore.Signal(bool)
+    autoExecuteToggled = QtCore.Signal(bool)
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -53,8 +54,19 @@ class ContextBar(QtWidgets.QWidget):
         self.inspector_button.setCheckable(True)
         self.inspector_button.setChecked(True)
         self.inspector_button.toggled.connect(self.inspectorToggled)
+        # Auto-execute: when checked, proposals approve+apply immediately
+        # without the manual gate (exact-digest path is reused unchanged).
+        self.auto_button = QtWidgets.QToolButton()
+        self.auto_button.setText("Auto")
+        self.auto_button.setToolTip(
+            "Auto-execute: approve and apply proposals immediately "
+            "(no manual gate). The exact-digest approval path is reused.")
+        self.auto_button.setCheckable(True)
+        self.auto_button.setChecked(False)
+        self.auto_button.toggled.connect(self.autoExecuteToggled)
         location.addWidget(self.sidebar_button)
         location.addWidget(self.inspector_button)
+        location.addWidget(self.auto_button)
         root.addLayout(location)
 
         states = QtWidgets.QHBoxLayout()
