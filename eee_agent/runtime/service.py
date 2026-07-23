@@ -1729,6 +1729,7 @@ class RuntimeService:
             modeling = await self._build_modeling_context(session_id, run_id)
         return RuntimeToolContext(
             read_only=self._read_only_provider,
+            knowledge=self._knowledge,
             modeling=modeling,
         )
 

@@ -41,14 +41,45 @@ class _Provider:
         return {"ok": True, "components": []}
 
 
-def _runtime(provider=None):
+class _Knowledge:
+    """Minimal trusted KnowledgeProvider for tool tests."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, ...]] = []
+
+    def search(self, query: str, *, limit: int = 5):
+        self.calls.append(("search", query, limit))
+        # A result with more than 64 recursive items, which would have tripped
+        # the bridge plain-value item budget before knowledge bypassed _finish.
+        return {
+            "ok": True,
+            "results": [
+                {"entity_id": f"node:{i}", "title": f"node {i}", "body": "x" * 40}
+                for i in range(40)
+            ],
+        }
+
+    def get(self, entity_id: str, *, max_body_bytes: int = 8_000):
+        self.calls.append(("get", entity_id, max_body_bytes))
+        return {"ok": True, "entity_id": entity_id, "body": "x" * 200}
+
+
+def _runtime(provider=None, knowledge=None):
     provider = _Provider() if provider is None else provider
-    return SimpleNamespace(context=RuntimeToolContext(read_only=provider))
+    knowledge = _Knowledge() if knowledge is None else knowledge
+    return SimpleNamespace(
+        context=RuntimeToolContext(read_only=provider, knowledge=knowledge)
+    )
 
 
 def test_runtime_context_rejects_missing_readonly_provider() -> None:
     with pytest.raises(TypeError, match="read_only"):
-        RuntimeToolContext(read_only=None)  # type: ignore[arg-type]
+        RuntimeToolContext(read_only=None, knowledge=_Knowledge())  # type: ignore[arg-type]
+
+
+def test_runtime_context_rejects_missing_knowledge_provider() -> None:
+    with pytest.raises(TypeError, match="knowledge"):
+        RuntimeToolContext(read_only=_Provider(), knowledge=None)  # type: ignore[arg-type]
 
 
 def test_readonly_tools_return_bounded_plain_dicts() -> None:
@@ -198,3 +229,44 @@ def test_finish_rejects_integer_too_large_to_serialize() -> None:
         "code": "bridge.unavailable",
         "message": "The read-only provider returned unsupported data.",
     }
+
+
+def test_knowledge_search_bypasses_bridge_budget_validator() -> None:
+    # Knowledge results come from a trusted local cache, not the live Houdini
+    # process, so a large result (many items) must NOT be misreported as
+    # bridge.unavailable the way the scene-tools budget validator would.
+    tools = {item.name: item for item in build_read_only_tools()}
+    knowledge = _Knowledge()
+    result = _run(
+        tools["search_houdini_knowledge"].coroutine(
+            query="box node", runtime=_runtime(knowledge=knowledge)
+        )
+    )
+    assert result["ok"] is True
+    assert len(result["results"]) == 40
+    assert knowledge.calls == [("search", "box node", 5)]
+
+
+def test_knowledge_search_reports_unavailable_without_provider() -> None:
+    tools = {item.name: item for item in build_read_only_tools()}
+    runtime = SimpleNamespace(context=None)
+    result = _run(
+        tools["search_houdini_knowledge"].coroutine(
+            query="box", runtime=runtime
+        )
+    )
+    assert result["ok"] is False
+    assert result["code"] == "bridge.unavailable"
+
+
+def test_knowledge_get_returns_bounded_entity() -> None:
+    tools = {item.name: item for item in build_read_only_tools()}
+    knowledge = _Knowledge()
+    result = _run(
+        tools["get_houdini_knowledge"].coroutine(
+            entity_id="node:box", runtime=_runtime(knowledge=knowledge)
+        )
+    )
+    assert result["ok"] is True
+    assert result["entity_id"] == "node:box"
+    assert knowledge.calls[0][0] == "get"

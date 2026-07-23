@@ -35,16 +35,41 @@ class ReadOnlyProvider(Protocol):
     async def work_status(self, workspace_id: str) -> Mapping[str, PlainData]: ...
 
 
+@runtime_checkable
+class KnowledgeProvider(Protocol):
+    """The bounded, read-only Houdini Knowledge Graph cache.
+
+    Results come from a trusted local build (not the live Houdini process),
+    so unlike the live-scene ReadOnlyProvider they do not need the bridge
+    plain-value/budget validator: KnowledgeRuntime.search/get already return
+    bounded plain JSON-serializable data and their own ``kb_unavailable``
+    status when the cache is missing.
+    """
+
+    def search(self, query: str, *, limit: int = 5) -> dict[str, object]: ...
+
+    def get(self, entity_id: str, *, max_body_bytes: int = 8_000) -> dict[str, object]: ...
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeToolContext:
     """Per-run trusted context consumed by secure Runtime tools."""
 
     read_only: ReadOnlyProvider
+    knowledge: KnowledgeProvider
     modeling: object | None = None
 
     def __post_init__(self) -> None:
         if self.read_only is None or not isinstance(self.read_only, ReadOnlyProvider):
             raise TypeError("RuntimeToolContext.read_only must implement ReadOnlyProvider")
+        if self.knowledge is None or not isinstance(self.knowledge, KnowledgeProvider):
+            raise TypeError("RuntimeToolContext.knowledge must implement KnowledgeProvider")
 
 
-__all__ = ["PlainData", "PlainValue", "ReadOnlyProvider", "RuntimeToolContext"]
+__all__ = [
+    "PlainData",
+    "PlainValue",
+    "KnowledgeProvider",
+    "ReadOnlyProvider",
+    "RuntimeToolContext",
+]

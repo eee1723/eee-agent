@@ -32,6 +32,16 @@ WS = f"ws_{'a' * 32}"
 OTHER_WS = f"ws_{'b' * 32}"
 
 
+class _Knowledge:
+    """Minimal trusted KnowledgeProvider for context-construction tests."""
+
+    def search(self, query, *, limit=5):
+        return {"ok": True, "results": []}
+
+    def get(self, entity_id, *, max_body_bytes=8_000):
+        return {"ok": True, "entity_id": entity_id}
+
+
 def _binding(epoch: int = 3) -> SceneBinding:
     return SceneBinding(
         instance_id="hou:21.0.440:pid1",
@@ -152,7 +162,7 @@ def _bridge_error(code: str, message: str = "bounded bridge detail") -> BridgeCl
 def test_provider_satisfies_read_only_protocol(tmp_path: Path) -> None:
     provider = _provider(tmp_path)
     assert isinstance(provider, ReadOnlyProvider)
-    context = RuntimeToolContext(read_only=provider)
+    context = RuntimeToolContext(read_only=provider, knowledge=_Knowledge())
     assert context.read_only is provider
 
 
@@ -346,7 +356,7 @@ def test_provider_results_pass_the_real_tool_boundary(tmp_path: Path) -> None:
     _handoff(tmp_path)
     provider = _provider(tmp_path, [_StubClient()])
     tool = next(item for item in build_read_only_tools() if item.name == "scene_status")
-    runtime = SimpleNamespace(context=RuntimeToolContext(read_only=provider))
+    runtime = SimpleNamespace(context=RuntimeToolContext(read_only=provider, knowledge=_Knowledge()))
 
     result = asyncio.run(tool.coroutine(runtime=runtime))
     assert result["ok"] is True

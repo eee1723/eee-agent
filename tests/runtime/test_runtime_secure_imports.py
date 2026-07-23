@@ -34,6 +34,16 @@ if legacy:
     assert result.returncode == 0, result.stderr or result.stdout
 
 
+class _Knowledge:
+    """Minimal trusted KnowledgeProvider for context-construction tests."""
+
+    def search(self, query, *, limit=5):
+        return {"ok": True, "results": []}
+
+    def get(self, entity_id, *, max_body_bytes=8_000):
+        return {"ok": True, "entity_id": entity_id}
+
+
 def test_finish_rejects_non_status_mapping() -> None:
     from types import SimpleNamespace
     import asyncio
@@ -59,7 +69,7 @@ def test_finish_rejects_non_status_mapping() -> None:
 
     tool = next(item for item in build_read_only_tools() if item.name == "scene_status")
     result = asyncio.run(
-        tool.coroutine(runtime=SimpleNamespace(context=RuntimeToolContext(Provider())))
+        tool.coroutine(runtime=SimpleNamespace(context=RuntimeToolContext(Provider(), knowledge=_Knowledge())))
     )
     assert result["ok"] is False
     assert result["code"] == "bridge.unavailable"
@@ -90,7 +100,7 @@ def test_finish_rejects_opaque_mapping_values() -> None:
 
     tool = next(item for item in build_read_only_tools() if item.name == "scene_status")
     result = asyncio.run(
-        tool.coroutine(runtime=SimpleNamespace(context=RuntimeToolContext(Provider())))
+        tool.coroutine(runtime=SimpleNamespace(context=RuntimeToolContext(Provider(), knowledge=_Knowledge())))
     )
     assert result["ok"] is False
     assert result["code"] == "bridge.unavailable"
@@ -121,6 +131,7 @@ def test_runtime_service_creates_new_context_for_each_run() -> None:
     service._modeling_catalog_provider = None
     provider = Provider()
     service._read_only_provider = provider
+    service._knowledge = _Knowledge()
     first, second = asyncio.run(
         _contexts(service)
     )

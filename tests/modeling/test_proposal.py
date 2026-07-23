@@ -54,6 +54,14 @@ class _ReadOnlyProvider:
     async def work_status(self, workspace_id):
         return {}
 
+
+class _Knowledge:
+    def search(self, query, *, limit=5):
+        return {"ok": True, "results": []}
+
+    def get(self, entity_id, *, max_body_bytes=8_000):
+        return {"ok": True, "entity_id": entity_id}
+
 SES = f"ses_{'1' * 32}"
 RUN = f"run_{'2' * 32}"
 WS = f"ws_{'3' * 32}"
@@ -368,7 +376,7 @@ def test_tool_hides_runtime_context_and_returns_bounded_summary() -> None:
         calls.append(changeset)
 
     modeling = ModelingToolContext(ModelingProposalCoordinator(_context(callback)))
-    context = RuntimeToolContext(read_only=_ReadOnlyProvider(), modeling=modeling)
+    context = RuntimeToolContext(read_only=_ReadOnlyProvider(), knowledge=_Knowledge(), modeling=modeling)
     brief = _brief()
     result = _run(
         propose_modeling.coroutine(  # type: ignore[union-attr]
@@ -410,6 +418,7 @@ def test_proposal_tool_reads_modeling_context_from_runtime_context() -> None:
     brief = _brief()
     context = RuntimeToolContext(
         read_only=_ReadOnlyProvider(),
+        knowledge=_Knowledge(),
         modeling=ModelingToolContext(ModelingProposalCoordinator(_context(callback))),
     )
     result = _run(

@@ -297,7 +297,24 @@ async def search_houdini_knowledge(
     query_value = _valid_text(query, max_len=512)
     if query_value is None or type(limit) is not int or not 1 <= limit <= 10:
         return _error("runtime.tool_input_invalid", "knowledge search input is invalid.")
-    return await _call(runtime, "search_houdini_knowledge", query_value, limit)
+    # Knowledge results come from a trusted local cache (not the live Houdini
+    # process), so they bypass the bridge plain-value/budget validator that the
+    # scene tools need. KnowledgeRuntime.search already returns bounded plain
+    # JSON-serializable data and its own ``kb_unavailable`` status when the
+    # cache is missing or corrupt.
+    context = _context(runtime)
+    if context is None or context.knowledge is None:
+        return _error(
+            "bridge.unavailable",
+            "A trusted knowledge provider is unavailable.",
+        )
+    try:
+        return dict(context.knowledge.search(query_value, limit=limit))
+    except Exception:
+        return _error(
+            "bridge.unavailable",
+            "The trusted knowledge provider is unavailable.",
+        )
 
 
 @tool
@@ -314,9 +331,21 @@ async def get_houdini_knowledge(
         or not 1 <= max_body_bytes <= 8_000
     ):
         return _error("runtime.tool_input_invalid", "knowledge get input is invalid.")
-    return await _call(
-        runtime, "get_houdini_knowledge", entity_value, max_body_bytes
-    )
+    context = _context(runtime)
+    if context is None or context.knowledge is None:
+        return _error(
+            "bridge.unavailable",
+            "A trusted knowledge provider is unavailable.",
+        )
+    try:
+        return dict(
+            context.knowledge.get(entity_value, max_body_bytes=max_body_bytes)
+        )
+    except Exception:
+        return _error(
+            "bridge.unavailable",
+            "The trusted knowledge provider is unavailable.",
+        )
 
 
 def build_read_only_tools() -> list[Any]:
