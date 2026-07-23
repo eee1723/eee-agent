@@ -118,6 +118,19 @@ def test_first_connection_defaults_to_empty_session() -> None:
     assert "_load_preferred_session_id()" in source
 
 
+def test_bootstrap_archives_leftover_placeholder_for_fresh_session() -> None:
+    # On the first session.list after panel start, a leftover empty placeholder
+    # from a previous Houdini session must be archived (it has no runs, so
+    # nothing is lost) and a fresh placeholder created, so every Houdini launch
+    # begins a genuinely new conversation rather than reopening the last empty
+    # one. Archive is sequenced before create so the server does not hand back
+    # the still-present stale row.
+    source = (PKG / "client.py").read_text(encoding="utf-8")
+    assert "_bootstrap_archiving" in source
+    assert "bootstrap_archiving = True" in source
+    assert "self.archive_session(stale_id)" in source
+
+
 def test_client_exposes_changeset_recover_command() -> None:
     # The manual CriticalRecovery exit must be reachable from the panel client.
     source = (PKG / "client.py").read_text(encoding="utf-8")

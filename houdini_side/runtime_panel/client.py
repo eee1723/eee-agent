@@ -479,6 +479,12 @@ class RuntimeObserverClient(QtCore.QObject):
         # preferred id; every later reconnect honors it so an in-progress
         # conversation survives reconnect.
         self._bootstrap_complete = False
+        # Set on bootstrap when a leftover empty placeholder is found and
+        # archived so a genuinely fresh Session is created. The archive success
+        # response then triggers create_unnamed_session() (sequencing archive
+        # before create avoids the server's find_empty_placeholder returning the
+        # not-yet-removed stale row).
+        self._bootstrap_archiving = False
 
     def start(self) -> None:
         self._stopping = False
@@ -796,6 +802,11 @@ class RuntimeObserverClient(QtCore.QObject):
                 # Auto-create failed: drop the stashed prompt so a later manual
                 # retry isn't silently swallowed when a Session activates.
                 self._pending_run_input = None
+            if purpose == "session.archive":
+                # Bootstrap archived a leftover placeholder but it failed (e.g.
+                # an active run appeared); clear the flag so a later reconnect
+                # can re-evaluate instead of wedging on the stale row.
+                self._bootstrap_archiving = False
             self.commandFailed.emit(
                 purpose or "runtime.request",
                 code,
@@ -827,6 +838,13 @@ class RuntimeObserverClient(QtCore.QObject):
             if sid:
                 self._sessions.pop(sid, None)
             self.commandSucceeded.emit(purpose, result)
+            if purpose == "session.archive" and self._bootstrap_archiving:
+                # Bootstrap archived a leftover empty placeholder; now create a
+                # fresh one. create_unnamed_session sets the preferred id and the
+                # create response reconnects so the new placeholder activates.
+                self._bootstrap_archiving = False
+                self.create_unnamed_session()
+                return
             if sid == self._current_session_id or sid == self._preferred_session_id:
                 self._preferred_session_id = None
                 _save_preferred_session_id("")
@@ -923,6 +941,23 @@ class RuntimeObserverClient(QtCore.QObject):
             self.runtimeSnapshotChanged.emit({})
             self.changesetsChanged.emit(())
             return
+        if (
+            bootstrap
+            and selected.get("title") == "New session"
+            and not self._bootstrap_archiving
+        ):
+            # A leftover empty placeholder from a previous Houdini session was
+            # selected. Archive it (it has no runs, so nothing is lost) and then
+            # create a fresh placeholder so every Houdini launch begins a new
+            # conversation. Archive is sent first; its success response triggers
+            # create_unnamed_session (see the session.archive handler), which
+            # avoids the server's find_empty_placeholder returning the still-
+            # present stale row.
+            stale_id = selected.get("session_id")
+            if type(stale_id) is str and stale_id:
+                self._bootstrap_archiving = True
+                self.archive_session(stale_id)
+                return
         self.sessionsChanged.emit(
             tuple(self._sessions.values()), selected["session_id"]
         )
