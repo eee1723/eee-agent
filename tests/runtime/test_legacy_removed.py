@@ -65,7 +65,13 @@ def test_runtime_system_prompt_describes_only_current_capabilities() -> None:
         assert removed not in prompt
     for current in (
         "scene_status", "query_scene", "inspect_workspace", "geometry_stats",
-        "work_status", "typed proposal", "explicitly approve",
+        "work_status",
+        # The Chinese prompt still describes the typed-proposal / explicit-
+        # approval workflow; assert its Chinese phrasing so a future English
+        # drift does not silently drop the constraint.
+        "带类型的提案", "明确批准",
+        # Always reply in Chinese (the user-facing language directive).
+        "始终用中文回复",
     ):
         assert current in prompt
 

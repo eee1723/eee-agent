@@ -56,6 +56,7 @@ def test_prompt_branches_on_known_error_codes() -> None:
 def test_prompt_tells_user_to_approve_in_ui() -> None:
     # ses_65fefe0a5d symptom: the user approved but the LLM did not realize
     # approval was a UI action it could not observe directly. The prompt must
-    # tell the LLM to ask the user to approve in the UI and not claim success
-    # until the apply event arrives.
-    assert "approve" in BASE_PROMPT.lower()
+    # tell the LLM to ask the user to approve (批准) in the UI and not claim
+    # success until the apply event arrives. The prompt is Chinese, so assert
+    # the Chinese approval term rather than the English word.
+    assert "批准" in BASE_PROMPT
