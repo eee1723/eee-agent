@@ -552,6 +552,30 @@ class RuntimeObserverClient(QtCore.QObject):
             # Sessions never leaves hidden live subscriptions behind.
             self.reconnect_now()
 
+    def delete_session(self, session_id: str) -> None:
+        # The server cascades runs/events and removes artifacts for the Session.
+        # The authoritative confirmation is the success response (the broadcast
+        # session.deleted control event carries seq=None and is dropped by the
+        # cursor); _handle_response drops it from the local cache and, if it was
+        # the active Session, reconnects so the next session.list selects a valid
+        # conversation.
+        self._send("session.delete", {"session_id": session_id}, "session.delete")
+
+    def archive_session(self, session_id: str) -> None:
+        # Archived Sessions are hidden from the default list (include_archived
+        # is False on session.list). _handle_response drops it from the local
+        # cache and reconnects so the sidebar no longer offers it.
+        self._send("session.archive", {"session_id": session_id}, "session.archive")
+
+    def cached_session_title(self, session_id: str) -> str | None:
+        # Read-only view of the cached Session title, for UI affordances (e.g.
+        # an archive/delete confirmation). Returns None when the id is unknown
+        # to this client so the caller can fall back to a generic label.
+        session = self._sessions.get(session_id)
+        if type(session) is dict and type(session.get("title")) is str:
+            return session["title"]
+        return None
+
     def start_run(self, user_input: str) -> None:
         session_id = self._current_session_id
         if session_id is None:
@@ -788,6 +812,30 @@ class RuntimeObserverClient(QtCore.QObject):
                 _save_preferred_session_id(result["session_id"])
             self.commandSucceeded.emit(purpose, result)
             self.reconnect_now()
+            return
+        if purpose in ("session.delete", "session.archive"):
+            # Drop the affected Session from the local cache. The server already
+            # removed (delete) or hid (archive) it, so the next session.list
+            # reflects the new state. If it was the active/preferred Session,
+            # clear the preference and reconnect so a valid conversation is
+            # chosen; otherwise a lightweight sidebar refresh suffices.
+            sid = (
+                result.get("session_id")
+                if type(result) is dict and type(result.get("session_id")) is str
+                else None
+            )
+            if sid:
+                self._sessions.pop(sid, None)
+            self.commandSucceeded.emit(purpose, result)
+            if sid == self._current_session_id or sid == self._preferred_session_id:
+                self._preferred_session_id = None
+                _save_preferred_session_id("")
+                self.reconnect_now()
+            else:
+                self.sessionsChanged.emit(
+                    tuple(self._sessions.values()),
+                    self._current_session_id or "",
+                )
             return
         if purpose in ("session.snapshot", "session.bootstrap_snapshot"):
             try:

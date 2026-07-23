@@ -117,6 +117,16 @@ def test_build_command_is_canonical_and_bounded() -> None:
         "changeset.recover",
         {"change_id": change_id},
     )
+    assert '"type":"session.archive"' in build_command(
+        "req_3c",
+        "session.archive",
+        {"session_id": sid},
+    )
+    assert '"type":"session.delete"' in build_command(
+        "req_3d",
+        "session.delete",
+        {"session_id": sid},
+    )
     assert '"type":"run.stop"' in build_command(
         "req_4", "run.stop", {"run_id": run_id}
     )
@@ -175,6 +185,9 @@ def test_build_command_is_canonical_and_bounded() -> None:
                 "changeset_digest": "X" * 64,
             },
         ),
+        ("session.archive", {"session_id": "ses_bad"}),
+        ("session.delete", {"session_id": "ses_bad"}),
+        ("session.archive", {"session_id": "ses_" + "a" * 32, "extra": 1}),
     ],
 )
 def test_build_command_rejects_invalid_ui_payloads(

@@ -54,6 +54,8 @@ _PANEL_COMMANDS = frozenset(
         "changeset.approve",
         "changeset.reject",
         "changeset.recover",
+        "session.archive",
+        "session.delete",
         "workspace.create",
         "workspace.bind",
         "workspace.inspect",
@@ -247,6 +249,11 @@ def _validate_panel_payload(command_type: str, payload: dict) -> None:
             and payload["last_seq"] >= 0
         )
     elif command_type == "session.snapshot":
+        valid = (
+            _exact_keys(payload, {"session_id"})
+            and _valid_id(payload["session_id"], _SESSION_ID_RE)
+        )
+    elif command_type in ("session.archive", "session.delete"):
         valid = (
             _exact_keys(payload, {"session_id"})
             and _valid_id(payload["session_id"], _SESSION_ID_RE)

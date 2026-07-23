@@ -143,6 +143,12 @@ class RuntimePanel(QtWidgets.QWidget):
         self.session_sidebar.newSessionRequested.connect(
             self._client.create_unnamed_session
         )
+        self.session_sidebar.sessionArchiveRequested.connect(
+            self._archive_session
+        )
+        self.session_sidebar.sessionDeleteRequested.connect(
+            self._delete_session
+        )
         self.conversation.sendRequested.connect(self._send_run)
         self.conversation.stopRequested.connect(self._stop_run)
         self.inspector.createWorkspaceRequested.connect(self._create_workspace)
@@ -539,6 +545,35 @@ class RuntimePanel(QtWidgets.QWidget):
         # is refused (manual scene check required), never silently resolved.
         for change_id in self._blocked_recovery_ids:
             self._client.recover_changeset(change_id)
+
+    def _session_title_for(self, session_id: str) -> str:
+        title = self._client.cached_session_title(session_id)
+        if title is None or not title:
+            return "该对话"
+        if title == "New session":
+            return "未命名对话"
+        return title
+
+    def _archive_session(self, session_id: str) -> None:
+        title = self._session_title_for(session_id)
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "归档对话",
+            f"归档「{title}」?\n归档后该对话从列表隐藏,但仍保留在运行时中。",
+        )
+        if answer == QtWidgets.QMessageBox.StandardButton.Yes:
+            self._client.archive_session(session_id)
+
+    def _delete_session(self, session_id: str) -> None:
+        title = self._session_title_for(session_id)
+        # Deletion cascades runs/events/artifacts and is irreversible.
+        answer = QtWidgets.QMessageBox.question(
+            self,
+            "删除对话",
+            f"永久删除「{title}」?\n该操作不可撤销,将删除其全部运行记录与产物。",
+        )
+        if answer == QtWidgets.QMessageBox.StandardButton.Yes:
+            self._client.delete_session(session_id)
 
     # -- bridge state (SelectionQueryWorker, mirrors legacy) -----------------
 

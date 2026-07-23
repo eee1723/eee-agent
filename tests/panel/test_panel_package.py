@@ -125,6 +125,32 @@ def test_client_exposes_changeset_recover_command() -> None:
     assert '"changeset.recover"' in source
 
 
+def test_panel_can_archive_and_delete_sessions() -> None:
+    # session.archive / session.delete are fully implemented server-side; the
+    # panel must expose client methods, whitelist the commands, handle the
+    # success response (cache drop + reconnect), and offer sidebar actions.
+    client_source = (PKG / "client.py").read_text(encoding="utf-8")
+    assert "def delete_session" in client_source
+    assert "def archive_session" in client_source
+    assert '"session.delete"' in client_source
+    assert '"session.archive"' in client_source
+    # Success path drops the Session from the local cache and reconnects when
+    # it was the active/preferred conversation.
+    assert '"session.delete", "session.archive"' in client_source
+
+    sidebar_source = (PKG / "session_sidebar.py").read_text(encoding="utf-8")
+    assert "sessionArchiveRequested" in sidebar_source
+    assert "sessionDeleteRequested" in sidebar_source
+    assert "归档对话" in sidebar_source
+    assert "删除对话" in sidebar_source
+
+    window_source = (PKG / "main_window.py").read_text(encoding="utf-8")
+    assert "def _archive_session" in window_source
+    assert "def _delete_session" in window_source
+    assert "sessionArchiveRequested" in window_source
+    assert "sessionDeleteRequested" in window_source
+
+
 def test_auto_execute_preference_is_persisted_and_wired() -> None:
     # The auto-execute toggle is a persisted QSettings preference (off by
     # default) that drives the _on_changesets auto-approve path.
