@@ -99,6 +99,25 @@ def test_new_session_is_unnamed_and_coalesced() -> None:
     assert "未命名对话" in sidebar_source
 
 
+def test_create_unnamed_session_signals_when_already_on_placeholder() -> None:
+    # Idempotency is preserved (no duplicate create sent), but the client must
+    # emit a signal so the panel can give feedback instead of appearing dead.
+    source = (PKG / "client.py").read_text(encoding="utf-8")
+    assert "emptySessionFocused" in source
+
+
+def test_first_connection_defaults_to_empty_session() -> None:
+    # A freshly opened panel must not restore the last-used Session. It selects
+    # (or creates) the empty placeholder on the first session.list, ignoring the
+    # persisted preferred id. Subsequent reconnects still honor the preferred id
+    # so an in-progress conversation is preserved across reconnect.
+    source = (PKG / "client.py").read_text(encoding="utf-8")
+    assert "_bootstrap_complete" in source
+    # The persisted preferred id is still loaded (used for reconnect), but the
+    # first session.list resolution must NOT pass it as the preferred choice.
+    assert "_load_preferred_session_id()" in source
+
+
 def test_client_refreshes_sidebar_on_session_renamed() -> None:
     # An auto-titled Session emits session.renamed; the client must update the
     # cached title and re-emit sessionsChanged so the sidebar refreshes in

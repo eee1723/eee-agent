@@ -271,6 +271,10 @@ class ConversationView(QtWidgets.QWidget):
             self.stop_button.setText(
                 "Stopping…" if state == "stopping" else "Stop")
 
+    def focus_composer(self) -> None:
+        """Focus the Run-request editor so the user can start typing."""
+        self.input.setFocus()
+
     def _send(self) -> None:
         text = self.input.text().strip()
         if not text:

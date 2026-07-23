@@ -11,6 +11,7 @@ from eee_agent.panel.client_state import (
     RuntimeCursorBook,
     build_command,
     choose_active_session,
+    choose_empty_placeholder,
     load_runtime_credentials,
     parse_runtime_message,
     snapshot_boundary,
@@ -257,6 +258,33 @@ def test_choose_active_session_prefers_highest_activity_boundary() -> None:
         ]
     )
     assert chosen["session_id"] == "ses_b"
+
+
+def test_choose_empty_placeholder_returns_the_active_new_session() -> None:
+    sessions = [
+        _session("ses_old", "2026-07-16T10:00:00+00:00", last_seq=368),
+        {**_session("ses_new", "2026-07-23T10:00:00+00:00"), "title": "New session"},
+        _session("ses_arch", "2026-07-16T09:00:00+00:00", status="archived"),
+    ]
+    chosen = choose_empty_placeholder(sessions)
+    assert chosen is not None
+    assert chosen["session_id"] == "ses_new"
+    assert chosen["title"] == "New session"
+
+
+def test_choose_empty_placeholder_ignores_archived_placeholder() -> None:
+    sessions = [
+        {
+            **_session("ses_arch", "2026-07-16T09:00:00+00:00", status="archived"),
+            "title": "New session",
+        },
+    ]
+    assert choose_empty_placeholder(sessions) is None
+
+
+def test_choose_empty_placeholder_rejects_invalid_list() -> None:
+    with pytest.raises(PanelClientError):
+        choose_empty_placeholder([{"session_id": "x"}])  # missing fields
 
 
 def test_cursor_book_is_per_session_monotonic_and_ignores_control_events() -> None:

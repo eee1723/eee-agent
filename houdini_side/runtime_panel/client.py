@@ -22,6 +22,7 @@ from eee_agent.panel.client_state import (  # noqa: E402
     RuntimeCursorBook,
     build_command,
     choose_active_session,
+    choose_empty_placeholder,
     load_runtime_credentials,
     parse_runtime_message,
     runtime_state_dir,
@@ -415,6 +416,10 @@ class RuntimeObserverClient(QtCore.QObject):
     commandFailed = QtCore.Signal(str, str, str, bool, bool)
     artifactObserved = QtCore.Signal(object)
     visionObserved = QtCore.Signal(object)
+    # Fired when New Session is requested but the current Session is already
+    # the empty placeholder: no duplicate create is sent (idempotency holds),
+    # but the panel needs a cue to acknowledge the click instead of looking dead.
+    emptySessionFocused = QtCore.Signal()
 
     _DELAYS_MS = (250, 500, 1000, 2000, 5000)
 
@@ -442,6 +447,12 @@ class RuntimeObserverClient(QtCore.QObject):
         self._session_create_inflight = False
         self._attempt = 0
         self._stopping = False
+        # A freshly opened panel defaults to the empty placeholder rather than
+        # restoring the last-used Session (Houdini sessions begin new work).
+        # Only the FIRST session.list after panel start ignores the persisted
+        # preferred id; every later reconnect honors it so an in-progress
+        # conversation survives reconnect.
+        self._bootstrap_complete = False
 
     def start(self) -> None:
         self._stopping = False
@@ -480,6 +491,10 @@ class RuntimeObserverClient(QtCore.QObject):
             and current.get("title") == "New session"
             and not self._runtime_state.snapshot().get("runs")
         ):
+            # Already on the empty placeholder. A duplicate create is not sent
+            # (the server's find_empty_placeholder would return this same one),
+            # but the click must be acknowledged so the panel doesn't look dead.
+            self.emptySessionFocused.emit()
             return
         self._session_create_inflight = True
         self._send(
@@ -494,6 +509,9 @@ class RuntimeObserverClient(QtCore.QObject):
             return
         self._preferred_session_id = session_id
         _save_preferred_session_id(session_id)
+        # An explicit selection ends the fresh-open bootstrap: honor this
+        # choice even if the very first session.list has not resolved yet.
+        self._bootstrap_complete = True
         if session_id != self._current_session_id:
             # A connection has no unsubscribe command. Reconnect so switching
             # Sessions never leaves hidden live subscriptions behind.
@@ -785,8 +803,17 @@ class RuntimeObserverClient(QtCore.QObject):
         if purpose != "session.list":
             return
         sessions = result.get("sessions") if type(result) is dict else None
+        # A freshly opened panel ignores the persisted preferred id and opens
+        # the empty placeholder ("New session"). Every later reconnect honors
+        # the preferred id so an in-progress conversation survives.
+        bootstrap = not self._bootstrap_complete
+        self._bootstrap_complete = True
+        preferred = None if bootstrap else self._preferred_session_id
         try:
-            selected = choose_active_session(sessions, self._preferred_session_id)
+            if bootstrap:
+                selected = choose_empty_placeholder(sessions)
+            else:
+                selected = choose_active_session(sessions, preferred)
         except PanelClientError as exc:
             self.connectionChanged.emit("error", str(exc))
             return
@@ -796,6 +823,13 @@ class RuntimeObserverClient(QtCore.QObject):
             if type(item) is dict and type(item.get("session_id")) is str
         }
         if selected is None:
+            if bootstrap:
+                # No empty placeholder exists yet: create one. The create
+                # result triggers a reconnect whose session.list will find it
+                # (bootstrap is now complete, but create_unnamed_session sets
+                # the preferred id so the next list activates it directly).
+                self.create_unnamed_session()
+                return
             self._current_session_id = None
             self._current_session_title = ""
             self.sessionChanged.emit("", "No active Session", 0)

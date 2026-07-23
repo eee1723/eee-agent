@@ -125,6 +125,7 @@ class RuntimePanel(QtWidgets.QWidget):
         c.visionObserved.connect(self._on_vision)
         c.commandSucceeded.connect(self._on_command_succeeded)
         c.commandFailed.connect(self._on_command_failed)
+        c.emptySessionFocused.connect(self._on_empty_session_focused)
 
         self.session_sidebar.sessionChosen.connect(c.select_session)
         self.session_sidebar.newSessionRequested.connect(
@@ -482,6 +483,12 @@ class RuntimePanel(QtWidgets.QWidget):
         self.conversation.append_item(
             view_models.notice_card(f"{purpose} failed: {message}",
                                     tone="error"))
+
+    def _on_empty_session_focused(self) -> None:
+        # New Session was requested while already on the empty placeholder.
+        # No duplicate create is sent; just focus the composer so the user can
+        # immediately start the new conversation.
+        self.conversation.focus_composer()
 
     # -- bridge state (SelectionQueryWorker, mirrors legacy) -----------------
 

@@ -409,6 +409,40 @@ def choose_active_session(
     return MappingProxyType(dict(chosen))
 
 
+def choose_empty_placeholder(
+    sessions: object,
+) -> Mapping[str, object] | None:
+    """Return the active empty placeholder Session, or None.
+
+    Used on a panel's first connection so a freshly opened Houdini starts on a
+    new conversation instead of restoring the last-used Session. Validates the
+    list identically to ``choose_active_session``. The placeholder is the
+    active Session whose title is the internal ``"New session"`` marker; the
+    server guarantees at most one such empty conversation exists.
+    """
+    if type(sessions) is not list:
+        raise PanelClientError("Runtime Session list is invalid.")
+    placeholder: dict[str, object] | None = None
+    for item in sessions:
+        if type(item) is not dict:
+            raise PanelClientError("Runtime Session list is invalid.")
+        # Validate every item's shape so a malformed list is rejected here the
+        # same way choose_active_session rejects it (a later reconnect would
+        # otherwise surface a different error for the same bad payload).
+        if (
+            type(item.get("session_id")) is not str
+            or type(item.get("title")) is not str
+            or type(item.get("status")) is not str
+        ):
+            raise PanelClientError("Runtime Session list is invalid.")
+        if (
+            item.get("status") == "active"
+            and item.get("title") == "New session"
+        ):
+            placeholder = item
+    return None if placeholder is None else MappingProxyType(dict(placeholder))
+
+
 class RuntimeCursorBook:
     """In-memory monotonic reconnect cursors, one per Runtime Session."""
 
