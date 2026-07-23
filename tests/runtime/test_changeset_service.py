@@ -36,7 +36,7 @@ from eee_agent.changesets.service import (
     ChangeSetService,
     summary_from_decision,
 )
-from eee_agent.core import AgentException
+from eee_agent.core import AgentError, AgentException, ErrorCategory
 from eee_agent.houdini_bridge.contracts import SceneBinding
 from eee_agent.runtime.database import RuntimeDatabase
 from eee_agent.runtime.events import EventStore
@@ -993,6 +993,67 @@ def test_runtime_modeling_approval_runs_internal_apply(
                 "state": "Applied",
                 "receipt_status": "Applied",
                 "scene_may_have_changed": False,
+            }
+
+    _run(scenario())
+
+
+def test_runtime_modeling_approval_reports_recovery_block_without_losing_approval(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Approval is durable even when the trusted Apply barrier is blocked."""
+    monkeypatch.setenv("EEE_RUNTIME_HOME", str(db_path.parent / "home_rt_blocked"))
+    clock = FakeClock(NOW)
+    binding = _binding(instance_id="hou_instance_1", scene_epoch=1)
+
+    async def scenario() -> None:
+        from eee_agent.runtime.paths import RuntimePaths
+        from eee_agent.runtime.service import RuntimeService
+
+        paths = RuntimePaths.from_environment()
+
+        async with RuntimeService.open(
+            paths,
+            runner_factory=lambda _saver: object(),
+            changeset_clock=clock,
+            changeset_binding_provider=lambda: binding,
+        ) as service:
+            await _seed_session_run(service._database)
+            cs = _changeset()
+            await service._changesets.propose(cs, _policy(cs))
+            service._modeling_catalog_provider = lambda: object()  # type: ignore[assignment]
+            monkeypatch.setattr(service, "_changesets_has_bridge", lambda: True)
+
+            async def blocked_apply(_change_id: str):
+                raise AgentException(
+                    AgentError(
+                        code="recovery.critical_required",
+                        category=ErrorCategory.CRITICAL_RECOVERY,
+                        message_for_user=(
+                            "A ChangeSet outcome requires recovery before "
+                            "further writes."
+                        ),
+                        requires_user_action=True,
+                        scene_may_have_changed=True,
+                    )
+                )
+
+            async def blockers():
+                return ("chg_" + "9" * 32,)
+
+            monkeypatch.setattr(service, "apply_changeset_trusted", blocked_apply)
+            monkeypatch.setattr(
+                service._changesets, "critical_recovery_blockers", blockers
+            )
+            result = await service.approve_changeset(CHG, cs.digest)
+
+            assert result["decision"] == "Approved"
+            assert result["state"] == "Approved"
+            assert result["apply"] == {
+                "state": "BlockedRecovery",
+                "reason_code": "recovery.critical_required",
+                "blocking_change_ids": ["chg_" + "9" * 32],
+                "scene_may_have_changed": True,
             }
 
     _run(scenario())

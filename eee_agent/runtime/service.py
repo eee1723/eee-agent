@@ -115,7 +115,7 @@ from eee_agent.runtime.models import (
 )
 from eee_agent.runtime.paths import RuntimePaths
 from eee_agent.runtime.runs import RunRepository
-from eee_agent.runtime.sessions import SessionRepository
+from eee_agent.runtime.sessions import EMPTY_SESSION_TITLE, SessionRepository
 from eee_agent.runtime.titles import generate_session_title
 
 # A callback receives one committed EventRecord. It may be a plain function
@@ -476,6 +476,10 @@ class RuntimeService:
         # atomically so a concurrent stop cannot make the recorded from-state
         # diverge from the actual transitioned-from status.
         self._state_lock = asyncio.Lock()
+        # Serializes placeholder creation with its durable session.created
+        # event. Runtime itself is single-process, but this also prevents two
+        # rapid panel requests from producing duplicate empty conversations.
+        self._session_create_lock = asyncio.Lock()
         self._checkpoints: CheckpointManager | None = None
         self._runner: AgentRunner | _LegacyRunner | None = None
         self._modeling_catalog_provider = modeling_catalog_provider
@@ -709,25 +713,36 @@ class RuntimeService:
         # The session mutation and its durable event form one
         # cancellation-deferred persistence region, so a caller cancel cannot
         # leave a persisted session without its session.created event.
-        async def persist() -> tuple[str, EventRecord]:
-            session = await self._sessions.create(title)
-            record = await self._append(
-                session.session_id,
-                None,
-                "session.created",
-                {
-                    "session_id": session.session_id,
-                    "title": session.title,
-                    "status": session.status.value,
-                },
-                RetentionClass.DURABLE,
-            )
-            return session.session_id, record
+        placeholder = (
+            type(title) is str and title.strip() == EMPTY_SESSION_TITLE
+        )
 
-        session_id, record = await _run_uncancelled(persist())
-        await self._notify(record)
-        # Return the post-event record so last_seq reflects the committed event.
-        return await self._sessions.get(session_id)
+        async with self._session_create_lock:
+            if placeholder:
+                existing = await self._sessions.find_empty_placeholder()
+                if existing is not None:
+                    return existing
+
+            async def persist() -> tuple[str, EventRecord]:
+                session = await self._sessions.create(title)
+                record = await self._append(
+                    session.session_id,
+                    None,
+                    "session.created",
+                    {
+                        "session_id": session.session_id,
+                        "title": session.title,
+                        "status": session.status.value,
+                    },
+                    RetentionClass.DURABLE,
+                )
+                return session.session_id, record
+
+            session_id, record = await _run_uncancelled(persist())
+            await self._notify(record)
+            # Return the post-event record so last_seq reflects the committed
+            # event.
+            return await self._sessions.get(session_id)
 
     async def list_sessions(
         self, include_archived: bool = False
@@ -1362,7 +1377,21 @@ class RuntimeService:
         # durable and let the normal explicit trusted seam remain unavailable.
         if not self._changesets_has_bridge():
             return decision
-        applied = await self.apply_changeset_trusted(change_id)
+        try:
+            applied = await self.apply_changeset_trusted(change_id)
+        except AgentException as exc:
+            if exc.error.code != "recovery.critical_required":
+                raise
+            blockers = await self._changesets.critical_recovery_blockers()
+            return {
+                **decision,
+                "apply": {
+                    "state": "BlockedRecovery",
+                    "reason_code": exc.error.code,
+                    "blocking_change_ids": list(blockers),
+                    "scene_may_have_changed": exc.error.scene_may_have_changed,
+                },
+            }
         return {
             **decision,
             "apply": {

@@ -71,6 +71,7 @@ _TRANSIENT_RECOVERY_CODES = frozenset(
         "bridge.capability_unavailable",
     }
 )
+_MAX_RECOVERY_BLOCKER_IDS = 16
 
 
 class ChangeSetBridgeProvider(Protocol):
@@ -365,6 +366,16 @@ class ChangeSetService:
             session_id, limit=limit
         )
         return tuple(_panel_summary(view) for view in views)
+
+    async def critical_recovery_blockers(self) -> tuple[str, ...]:
+        """Return bounded IDs of terminal outcomes that freeze further writes."""
+        blockers = await self._repository.changesets_in_states(
+            (ChangeSetState.CRITICAL_RECOVERY,)
+        )
+        return tuple(
+            item.changeset.change_id
+            for item in blockers[:_MAX_RECOVERY_BLOCKER_IDS]
+        )
 
     async def approve(
         self,

@@ -55,7 +55,7 @@ def test_all_modules_keep_import_boundary() -> None:
 def test_client_keeps_ime_and_security_wiring() -> None:
     source = (PKG / "client.py").read_text(encoding="utf-8")
     assert "WA_InputMethodEnabled" in source
-    assert "SessionTitleDialog" in source
+    assert "SessionTitleDialog" not in source
     assert "RunRequestEdit" in source
     assert "QInputDialog.getText" not in source
     assert "textMessageReceived.connect(self._on_text_message)" in source
@@ -86,6 +86,17 @@ def test_client_auto_creates_session_when_none_active() -> None:
     # A failed auto-create clears the stash so it isn't silently swallowed.
     assert 'purpose == "session.create"' in source
     assert "self._pending_run_input = None" in source
+
+
+def test_new_session_is_unnamed_and_coalesced() -> None:
+    client_source = (PKG / "client.py").read_text(encoding="utf-8")
+    window_source = (PKG / "main_window.py").read_text(encoding="utf-8")
+    sidebar_source = (PKG / "session_sidebar.py").read_text(encoding="utf-8")
+    assert "_new_session" not in window_source
+    assert "def create_unnamed_session" in client_source
+    assert "_session_create_inflight" in client_source
+    assert "New session" in client_source
+    assert "未命名对话" in sidebar_source
 
 
 def test_client_refreshes_sidebar_on_session_renamed() -> None:

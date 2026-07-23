@@ -38,6 +38,8 @@ class SessionSidebar(QtWidgets.QWidget):
             selected_row = -1
             for row, item in enumerate(sessions):
                 title = item.get("title", "session")
+                if title == "New session":
+                    title = "未命名对话"
                 marker = "● " if item.get("session_id") == selected_id else ""
                 row_item = QtWidgets.QListWidgetItem(marker + title)
                 row_item.setData(QtCore.Qt.ItemDataRole.UserRole,

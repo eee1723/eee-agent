@@ -11,7 +11,7 @@ import sys
 import threading
 from pathlib import Path
 
-from PySide6 import QtCore, QtGui, QtNetwork, QtWebSockets, QtWidgets
+from PySide6 import QtCore, QtNetwork, QtWebSockets, QtWidgets
 
 REPO = Path(__file__).resolve().parent.parent.parent
 if str(REPO) not in sys.path:
@@ -192,17 +192,6 @@ QPlainTextEdit {{
     padding: 7px;
     font-family: "Segoe UI";
 }}
-QDialog#SessionTitleDialog {{
-    background: {GRAPHITE};
-    color: {TEXT};
-}}
-QDialog#SessionTitleDialog QLabel {{
-    color: {TEXT};
-}}
-QLineEdit {{
-    padding: 6px 8px;
-    font-family: "Segoe UI";
-}}
 QFrame#RunLane {{
     background: {SLATE};
     border: 1px solid {IRON};
@@ -285,76 +274,6 @@ def _save_preferred_session_id(session_id: str) -> None:
     )
     settings.setValue(_PREFERRED_SESSION_KEY, session_id)
     settings.sync()
-
-
-class SessionTitleDialog(QtWidgets.QDialog):
-    """Owned Session-title dialog with explicit Windows IME support."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setObjectName("SessionTitleDialog")
-        self.setWindowTitle("New Runtime Session")
-        self.setModal(True)
-        self.setMinimumWidth(360)
-        self.setStyleSheet(_QSS)
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 14)
-        layout.setSpacing(10)
-        label = QtWidgets.QLabel(
-            "Short Session title (for example: 17B smoke).\n"
-            "Enter the Run request in the editor after creating the Session."
-        )
-        label.setWordWrap(True)
-        layout.addWidget(label)
-        self.title_edit = QtWidgets.QLineEdit()
-        self.title_edit.setMaxLength(200)
-        self.title_edit.setPlaceholderText("Session title")
-        _configure_ime(self.title_edit, multiline=False)
-        self.title_edit.installEventFilter(self)
-        layout.addWidget(self.title_edit)
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Cancel
-            | QtWidgets.QDialogButtonBox.StandardButton.Ok
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-        ok = buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok)
-        cancel = buttons.button(
-            QtWidgets.QDialogButtonBox.StandardButton.Cancel
-        )
-        for button in (ok, cancel):
-            button.setAutoDefault(False)
-            button.setDefault(False)
-        ok.setEnabled(False)
-        self.title_edit.textChanged.connect(
-            lambda text: ok.setEnabled(bool(text.strip()))
-        )
-        QtCore.QTimer.singleShot(0, self._focus_editor)
-
-    def eventFilter(self, watched, event) -> bool:
-        if (
-            watched is self.title_edit
-            and event.type() == QtCore.QEvent.Type.KeyPress
-            and event.key()
-            in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter)
-        ):
-            # Windows IMEs commonly emit Return after committing a candidate.
-            # Never let that confirmation key activate QDialog's OK/default
-            # path; Session creation requires an explicit button click.
-            event.accept()
-            return True
-        return super().eventFilter(watched, event)
-
-    def _focus_editor(self) -> None:
-        self.activateWindow()
-        self.title_edit.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
-        QtGui.QGuiApplication.inputMethod().update(
-            QtCore.Qt.InputMethodQuery.ImQueryAll
-        )
-
-    def title(self) -> str:
-        return self.title_edit.text().strip()
 
 
 class RunRequestEdit(QtWidgets.QPlainTextEdit):
@@ -520,6 +439,7 @@ class RuntimeObserverClient(QtCore.QObject):
         # one (placeholder title) and stash the prompt here to fire run.start
         # once the new Session activates after reconnect.
         self._pending_run_input: str | None = None
+        self._session_create_inflight = False
         self._attempt = 0
         self._stopping = False
 
@@ -550,8 +470,23 @@ class RuntimeObserverClient(QtCore.QObject):
         self._timer.stop()
         self._schedule(0)
 
-    def create_session(self, title: str) -> None:
-        self._send("session.create", {"title": title}, "session.create")
+    def create_unnamed_session(self) -> None:
+        """Create or focus the one empty placeholder conversation."""
+        if self._session_create_inflight:
+            return
+        current = self._sessions.get(self._current_session_id or "")
+        if (
+            type(current) is dict
+            and current.get("title") == "New session"
+            and not self._runtime_state.snapshot().get("runs")
+        ):
+            return
+        self._session_create_inflight = True
+        self._send(
+            "session.create",
+            {"title": "New session"},
+            "session.create",
+        )
 
     def select_session(self, session_id: str) -> None:
         session = self._sessions.get(session_id)
@@ -572,11 +507,7 @@ class RuntimeObserverClient(QtCore.QObject):
             # The backend renames it to a meaningful title once the first run
             # completes (see RuntimeService auto-title).
             self._pending_run_input = user_input
-            self._send(
-                "session.create",
-                {"title": "New session"},
-                "session.create",
-            )
+            self.create_unnamed_session()
             return
         self._send(
             "run.start",
@@ -711,6 +642,7 @@ class RuntimeObserverClient(QtCore.QObject):
             return
         self._current_session_id = None
         self._current_session_title = ""
+        self._session_create_inflight = False
         self.sessionChanged.emit("", "Runtime disconnected", 0)
         self.connectionChanged.emit("offline", "Runtime disconnected")
         self._pending.clear()
@@ -780,6 +712,7 @@ class RuntimeObserverClient(QtCore.QObject):
             if purpose in ("ping", "session.list", None):
                 self.connectionChanged.emit("error", text)
             if purpose == "session.create":
+                self._session_create_inflight = False
                 # Auto-create failed: drop the stashed prompt so a later manual
                 # retry isn't silently swallowed when a Session activates.
                 self._pending_run_input = None
@@ -793,6 +726,7 @@ class RuntimeObserverClient(QtCore.QObject):
             return
         result = message.get("result")
         if purpose == "session.create":
+            self._session_create_inflight = False
             if type(result) is dict and type(result.get("session_id")) is str:
                 self._preferred_session_id = result["session_id"]
                 _save_preferred_session_id(result["session_id"])
@@ -880,12 +814,14 @@ class RuntimeObserverClient(QtCore.QObject):
         self._preferred_session_id = session_id
         _save_preferred_session_id(session_id)
         self._current_session_id = session_id
-        self._current_session_title = title
+        self._current_session_title = (
+            "未命名对话" if title == "New session" else title
+        )
         # Bootstrap from one bounded snapshot, then subscribe from that exact
         # boundary. Events committed between the snapshot and subscribe are
         # replayed by the server, so this is gap-free without replaying an
         # entire high-volume Session from seq 0 into Qt.
-        self.sessionChanged.emit("", f"Loading {title}", 0)
+        self.sessionChanged.emit("", f"Loading {self._current_session_title}", 0)
         self._request_snapshot(purpose="session.bootstrap_snapshot")
         self.refresh_changesets()
         # If the user sent a prompt that triggered auto-create, fire the run

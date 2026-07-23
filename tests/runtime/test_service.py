@@ -239,6 +239,30 @@ def test_completed_placeholder_session_is_auto_titled(
     _run(scenario())
 
 
+def test_empty_placeholder_session_creation_is_idempotent(
+    paths: RuntimePaths,
+) -> None:
+    runner = FakeRunner(_success_items("finished"))
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths, runner_factory=_factory_for(runner)
+        ) as service:
+            first = await service.create_session("New session")
+            second = await service.create_session("New session")
+            assert second.session_id == first.session_id
+            assert [item.session_id for item in await service.list_sessions()] == [
+                first.session_id
+            ]
+
+            started = await service.start_run(first.session_id, "actual request")
+            await service.wait_for_run(started.run_id)
+            third = await service.create_session("New session")
+            assert third.session_id != first.session_id
+
+    _run(scenario())
+
+
 # --------------------------------------------------------------------------
 # 2. start_run: freeze once, atomic acquire, one task, non-blocking, concurrency
 # --------------------------------------------------------------------------

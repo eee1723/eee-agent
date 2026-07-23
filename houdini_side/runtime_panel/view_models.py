@@ -95,10 +95,30 @@ def proposal_card(payload: Mapping[str, object]) -> MessageItem:
     )
 
 
-def approval_result_card(approved: bool, *, expired: bool = False) -> MessageItem:
+def approval_result_card(
+    approved: bool,
+    *,
+    expired: bool = False,
+    blocked_recovery: bool = False,
+    blocker_ids: tuple[str, ...] = (),
+) -> MessageItem:
     if expired:
         return MessageItem("approval", "Approval expired",
                            "The gate timed out without a decision.", "warn")
+    if approved and blocked_recovery:
+        blockers = ", ".join(blocker_ids[:4])
+        detail = (
+            "ChangeSet approved, but Apply is blocked until recovery is "
+            "completed."
+        )
+        if blockers:
+            detail += f"\nBlocking ChangeSet(s): {blockers}"
+        return MessageItem(
+            "approval",
+            "Approved — recovery required",
+            detail,
+            "warn",
+        )
     if approved:
         return MessageItem("approval", "Approved",
                            "ChangeSet approved and queued for apply.", "ok")

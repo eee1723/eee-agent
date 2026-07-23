@@ -14,6 +14,7 @@ from eee_agent.runtime.database import RuntimeDatabase
 from eee_agent.runtime.models import SessionRecord, SessionStatus
 
 _MAX_TITLE_CODEPOINTS = 200
+EMPTY_SESSION_TITLE = "New session"
 
 _SESSION_COLUMNS = (
     "session_id, title, status, created_at, updated_at, last_seq, replay_floor_seq"
@@ -30,6 +31,13 @@ _ACTIVE_RUN_FOR_SESSION = (
     "SELECT r.run_id FROM runtime_state rs "
     "JOIN runs r ON r.run_id = rs.active_run_id "
     "WHERE r.session_id = ?"
+)
+_EMPTY_PLACEHOLDER = (
+    f"SELECT {_SESSION_COLUMNS} FROM sessions "
+    "WHERE status = 'active' AND title = ? "
+    "AND NOT EXISTS ("
+    "SELECT 1 FROM runs WHERE runs.session_id = sessions.session_id"
+    ") ORDER BY created_at, session_id LIMIT 1"
 )
 
 
@@ -141,6 +149,13 @@ class SessionRepository:
         if row is None:
             raise _session_not_found()
         return _row_to_session(row)
+
+    async def find_empty_placeholder(self) -> SessionRecord | None:
+        """Return the canonical active placeholder with no conversation Run."""
+        row = await self._database.fetchone(
+            _EMPTY_PLACEHOLDER, (EMPTY_SESSION_TITLE,)
+        )
+        return None if row is None else _row_to_session(row)
 
     async def list(self, include_archived: bool = False) -> list[SessionRecord]:
         if type(include_archived) is not bool:

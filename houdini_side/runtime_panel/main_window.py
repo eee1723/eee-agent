@@ -127,7 +127,9 @@ class RuntimePanel(QtWidgets.QWidget):
         c.commandFailed.connect(self._on_command_failed)
 
         self.session_sidebar.sessionChosen.connect(c.select_session)
-        self.session_sidebar.newSessionRequested.connect(self._new_session)
+        self.session_sidebar.newSessionRequested.connect(
+            self._client.create_unnamed_session
+        )
         self.conversation.sendRequested.connect(self._send_run)
         self.conversation.stopRequested.connect(self._stop_run)
         self.inspector.createWorkspaceRequested.connect(self._create_workspace)
@@ -442,8 +444,22 @@ class RuntimePanel(QtWidgets.QWidget):
         # An approval decision (approve/reject) is acknowledged with a card so
         # the user sees the outcome in the flow, not just a vanishing drawer.
         if purpose == "changeset.approve":
+            apply = result.get("apply") if type(result) is dict else None
+            blocked = (
+                type(apply) is dict
+                and apply.get("state") == "BlockedRecovery"
+            )
+            blockers = (
+                tuple(apply.get("blocking_change_ids", ()))
+                if blocked and type(apply) is dict
+                else ()
+            )
             self.conversation.append_item(
-                view_models.approval_result_card(True))
+                view_models.approval_result_card(
+                    True,
+                    blocked_recovery=blocked,
+                    blocker_ids=blockers,
+                ))
             return
         if purpose == "changeset.reject":
             self.conversation.append_item(
@@ -521,14 +537,6 @@ class RuntimePanel(QtWidgets.QWidget):
             summary["changeset_digest"],
             approve=approve,
         )
-
-    def _new_session(self) -> None:
-        from houdini_side.runtime_panel.client import SessionTitleDialog
-
-        dialog = SessionTitleDialog(self)
-        # exec_(): the source boundary forbids the plain builtin-named call.
-        if dialog.exec_() == QtWidgets.QDialog.DialogCode.Accepted:
-            self._client.create_session(dialog.title())
 
     def _create_workspace(self) -> None:
         self._client.create_workspace()
