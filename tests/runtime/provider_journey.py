@@ -95,6 +95,38 @@ _BRIEF = (
 )
 
 
+def _extract_vision_evidence(
+    payload: object,
+    *,
+    artifact_id: str,
+    artifact_digest: str,
+) -> tuple[str, bool, str, bool] | None:
+    """Extract bounded Vision facts from a replayed read-only event payload."""
+    if not isinstance(payload, Mapping):
+        return None
+    vision_status = payload.get("vision_status")
+    decision = payload.get("final_decision")
+    refs = payload.get("artifact_refs")
+    if (
+        type(vision_status) is not str
+        or not isinstance(decision, Mapping)
+        or not isinstance(refs, (list, tuple))
+        or len(refs) != 1
+    ):
+        return None
+    vision_accepted = decision.get("accepted")
+    reason_code = payload.get("vision_reason_code")
+    if type(vision_accepted) is not bool or type(reason_code) is not str:
+        return None
+    ref = refs[0]
+    digest_match = (
+        isinstance(ref, Mapping)
+        and ref.get("artifact_id") == artifact_id
+        and ref.get("sha256") == artifact_digest
+    )
+    return vision_status, vision_accepted, reason_code, digest_match
+
+
 class _StepError(Exception):
     """Bounded journey failure; detail is always a short constant string."""
 
@@ -370,27 +402,21 @@ async def _run_journey(paths: object) -> tuple[dict[str, object], str]:
             )
             if vision is None:
                 raise _StepError("vision", "no durable vision evaluation event")
-            vision_status = vision.payload.get("vision_status")
-            decision = vision.payload.get("final_decision")
-            refs = vision.payload.get("artifact_refs")
-            if (
-                type(vision_status) is not str
-                or type(decision) is not dict
-                or type(refs) is not list
-                or len(refs) != 1
-            ):
-                raise _StepError("vision", "vision evidence is malformed")
-            vision_accepted = decision.get("accepted")
-            reason_code = vision.payload.get("vision_reason_code")
-            vision_artifact_digest_match = (
-                type(refs[0]) is dict
-                and refs[0].get("artifact_id") == artifact_id
-                and refs[0].get("sha256") == artifact_digest
+            extracted = _extract_vision_evidence(
+                vision.payload,
+                artifact_id=artifact_id,
+                artifact_digest=artifact_digest,
             )
+            if extracted is None:
+                raise _StepError("vision", "vision evidence is malformed")
+            (
+                vision_status,
+                vision_accepted,
+                reason_code,
+                vision_artifact_digest_match,
+            ) = extracted
             if (
                 vision_status != "completed"
-                or type(vision_accepted) is not bool
-                or type(reason_code) is not str
                 or not vision_artifact_digest_match
             ):
                 raise _StepError("vision", "real visual evaluation did not complete")

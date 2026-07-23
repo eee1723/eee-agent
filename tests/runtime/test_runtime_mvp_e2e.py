@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+from types import MappingProxyType
 from datetime import timedelta
 from pathlib import Path
 
@@ -44,6 +45,7 @@ from tests.runtime.test_changeset_recovery import (
     _policy,
 )
 from tests.runtime.runtime_mvp_provider_e2e import _validate_evidence
+from tests.runtime.provider_journey import _extract_vision_evidence
 
 
 async def _open_changeset_service(
@@ -318,3 +320,26 @@ def test_mvp_provider_evidence_is_strict_and_cannot_be_a_noop(tmp_path: Path) ->
     assert not _validate_evidence(path)
     path.unlink()
     assert not _validate_evidence(path)
+
+
+def test_provider_journey_accepts_readonly_runtime_vision_payload() -> None:
+    payload = MappingProxyType(
+        {
+            "vision_status": "completed",
+            "final_decision": MappingProxyType({"accepted": True}),
+            "artifact_refs": (
+                MappingProxyType(
+                    {
+                        "artifact_id": "art_" + "a" * 32,
+                        "sha256": "b" * 64,
+                    }
+                ),
+            ),
+            "vision_reason_code": "vision.completed",
+        }
+    )
+    assert _extract_vision_evidence(
+        payload,
+        artifact_id="art_" + "a" * 32,
+        artifact_digest="b" * 64,
+    ) == ("completed", True, "vision.completed", True)
