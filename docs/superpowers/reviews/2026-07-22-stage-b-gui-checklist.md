@@ -2,7 +2,7 @@
 
 Candidate reviewed: `9bdf37b`
 Branch: `feature/b-release-acceptance`
-Decision: **NOT RUN**
+Decision: **PASS** (user-observed 2026-07-23)
 Evidence: screenshots and interactive logs remain in `[machine-local acceptance root]` only.
 
 Every row below requires observation against the exact B candidate loaded by
