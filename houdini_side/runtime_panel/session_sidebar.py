@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtCore, QtGui, QtWidgets
 
 
 class SessionSidebar(QtWidgets.QWidget):
@@ -87,8 +87,8 @@ class SessionSidebar(QtWidgets.QWidget):
         menu.triggered.connect(self._menu_action_triggered)
         menu.popup(self.list.mapToGlobal(pos))
 
-    @QtCore.Slot(QtWidgets.QAction)
-    def _menu_action_triggered(self, action: QtWidgets.QAction) -> None:
+    @QtCore.Slot(QtGui.QAction)
+    def _menu_action_triggered(self, action: QtGui.QAction) -> None:
         data = action.data()
         if not (isinstance(data, tuple) and len(data) == 2):
             return
