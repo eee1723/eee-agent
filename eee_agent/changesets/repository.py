@@ -2188,6 +2188,11 @@ class ChangeSetRepository:
             if stored.state is not ChangeSetState.CRITICAL_RECOVERY:
                 raise _cas_conflict()
             approval = await _fetch_approval_record(conn, cid)
+            # A ChangeSet reaches CRITICAL_RECOVERY only via APPLYING, which in
+            # turn requires a prior Consumed approval. A missing/corrupt approval
+            # record here is an invariant violation, not a recoverable state.
+            if approval is None or approval.decision is not ApprovalDecision.CONSUMED:
+                raise _record_corrupt()
             await self._transition_state_conn(
                 conn,
                 cid,
