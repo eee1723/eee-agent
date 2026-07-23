@@ -35,6 +35,7 @@ COMMAND_TYPES = frozenset(
         "changeset.list",
         "changeset.approve",
         "changeset.reject",
+        "changeset.recover",
         "workspace.create",
         "workspace.bind",
         "workspace.switch",

@@ -1248,3 +1248,93 @@ def test_runtime_records_capture_failed_without_replaying_apply(
             await db.close()
 
     asyncio.run(scenario())
+
+
+# ---------------------------------------------------------------------------
+# Manual CriticalRecovery exit (changeset.recover / recover_critical)
+# ---------------------------------------------------------------------------
+
+
+def _preflight_scene_gone() -> PreflightResult:
+    """A preflight whose binding differs from the ChangeSet's (dead instance)."""
+    base = _preflight(0, before_holds=False)
+    return replace(base, binding=_binding(instance_id="hou:DEAD:pid99999"))
+
+
+def test_recover_critical_resolves_when_scene_is_gone(db_path: Path) -> None:
+    """A zombie CriticalRecovery (dead Houdini instance) can be recovered."""
+
+    async def scenario() -> None:
+        db, _events, repo, service, bridge = await _seed(db_path)
+        bridge.apply_result = _receipt(status=ReceiptStatus.CRITICAL_RECOVERY)
+        assert (await service.apply(CHG)).state is ChangeSetState.CRITICAL_RECOVERY
+        # Preflight now reports a different instance — the original scene is gone.
+        bridge.preflight_result = _preflight_scene_gone()
+        bridge.calls.clear()
+
+        result = await service.recover_critical(CHG)
+        assert result.state is ChangeSetState.RECOVERED
+        assert result.pending is False
+        assert (await repo.get_changeset(CHG)).state is ChangeSetState.RECOVERED
+        await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_recover_critical_clears_write_blocker(db_path: Path) -> None:
+    """A Recovered change no longer blocks an unrelated Apply."""
+
+    async def scenario() -> None:
+        db, _events, repo, service, bridge = await _seed(db_path)
+        bridge.apply_result = _receipt(status=ReceiptStatus.CRITICAL_RECOVERY)
+        assert (await service.apply(CHG)).state is ChangeSetState.CRITICAL_RECOVERY
+
+        blockers = await service.critical_recovery_blockers()
+        assert CHG in blockers
+
+        bridge.preflight_result = _preflight_scene_gone()
+        await service.recover_critical(CHG)
+
+        # No longer a blocker.
+        assert CHG not in await service.critical_recovery_blockers()
+        await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_recover_critical_is_idempotent_on_already_recovered(db_path: Path) -> None:
+    async def scenario() -> None:
+        db, _events, repo, service, bridge = await _seed(db_path)
+        bridge.apply_result = _receipt(status=ReceiptStatus.CRITICAL_RECOVERY)
+        await service.apply(CHG)
+        bridge.preflight_result = _preflight_scene_gone()
+        first = await service.recover_critical(CHG)
+        assert first.state is ChangeSetState.RECOVERED
+
+        second = await service.recover_critical(CHG)
+        assert second.state is ChangeSetState.RECOVERED
+        assert second.events == ()
+        await db.close()
+
+    asyncio.run(scenario())
+
+
+def test_recover_critical_refuses_when_scene_present_and_ambiguous(
+    db_path: Path,
+) -> None:
+    """Current scene matches but postconditions don't hold: refuse (half-written)."""
+
+    async def scenario() -> None:
+        db, _events, repo, service, bridge = await _seed(db_path)
+        bridge.apply_result = _receipt(status=ReceiptStatus.CRITICAL_RECOVERY)
+        assert (await service.apply(CHG)).state is ChangeSetState.CRITICAL_RECOVERY
+        # Same binding (scene still live), postconditions fail (value != 0 set).
+        bridge.preflight_result = _preflight(99, before_holds=False)
+
+        result = await service.recover_critical(CHG)
+        assert result.state is ChangeSetState.CRITICAL_RECOVERY
+        assert result.pending is False
+        assert (await repo.get_changeset(CHG)).state is ChangeSetState.CRITICAL_RECOVERY
+        await db.close()
+
+    asyncio.run(scenario())

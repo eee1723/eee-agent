@@ -550,6 +550,9 @@ class RuntimeObserverClient(QtCore.QObject):
             command,
         )
 
+    def recover_changeset(self, change_id: str) -> None:
+        self._send("changeset.recover", {"change_id": change_id}, "changeset.recover")
+
     def refresh_changesets(self) -> None:
         session_id = self._current_session_id
         if session_id is None:

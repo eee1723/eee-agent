@@ -592,6 +592,12 @@ class RuntimeWebSocketServer:
             self._put(ctx, success_response(req, result))
             return
 
+        if ct == "changeset.recover":
+            _validate(payload, {"change_id": _is_change_id})
+            result = await self._service.recover_changeset(payload["change_id"])
+            self._put(ctx, success_response(req, result))
+            return
+
         if ct == "workspace.create":
             _validate(
                 payload,

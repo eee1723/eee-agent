@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Exact schema v1 DDL from the approved design spec section 7.3. No IF NOT
 # EXISTS: a partially-wrong schema must surface, not be silently masked.
@@ -199,6 +199,39 @@ MIGRATION_V6_SQL = """
 ALTER TABLE runs ADD COLUMN todos_json TEXT NULL;
 """
 
+# Exact schema v7 DDL. Adds the 'Recovered' ChangeSet state to the CHECK
+# constraint, the manual exit from CriticalRecovery. SQLite cannot alter a
+# column CHECK in place, so the changesets table is rebuilt (create-copy-drop-
+# rename). No data semantics change for existing states; only the new terminal
+# 'Recovered' value becomes writable. Accepted v1-v6 script text is unchanged.
+MIGRATION_V7_SQL = """
+CREATE TABLE changesets_v7 (
+    change_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    workspace_id TEXT,
+    digest TEXT NOT NULL CHECK (length(digest) = 64),
+    state TEXT NOT NULL CHECK (state IN (
+        'Proposed', 'AwaitingApproval', 'Approved', 'Applying', 'Applied',
+        'RolledBack', 'CriticalRecovery', 'Recovered', 'Stale', 'Rejected', 'Expired'
+    )),
+    created_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1)
+);
+
+INSERT INTO changesets_v7 (change_id, session_id, run_id, workspace_id, digest,
+    state, created_at, payload_json, schema_version)
+SELECT change_id, session_id, run_id, workspace_id, digest,
+    state, created_at, payload_json, schema_version FROM changesets;
+
+DROP TABLE changesets;
+ALTER TABLE changesets_v7 RENAME TO changesets;
+
+CREATE INDEX changesets_by_session ON changesets(session_id, change_id);
+CREATE INDEX changesets_by_state ON changesets(state, change_id);
+"""
+
 # Ordered migrations. Each entry is (version, SQL script). The orchestrator
 # splits the script into statements and runs them in one atomic transaction.
 MIGRATIONS: tuple[tuple[int, str], ...] = (
@@ -208,6 +241,7 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     (4, MIGRATION_V4_SQL),
     (5, MIGRATION_V5_SQL),
     (6, MIGRATION_V6_SQL),
+    (7, MIGRATION_V7_SQL),
 )
 
 

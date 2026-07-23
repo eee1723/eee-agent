@@ -118,6 +118,13 @@ def test_first_connection_defaults_to_empty_session() -> None:
     assert "_load_preferred_session_id()" in source
 
 
+def test_client_exposes_changeset_recover_command() -> None:
+    # The manual CriticalRecovery exit must be reachable from the panel client.
+    source = (PKG / "client.py").read_text(encoding="utf-8")
+    assert "def recover_changeset" in source
+    assert '"changeset.recover"' in source
+
+
 def test_client_refreshes_sidebar_on_session_renamed() -> None:
     # An auto-titled Session emits session.renamed; the client must update the
     # cached title and re-emit sessionsChanged so the sidebar refreshes in

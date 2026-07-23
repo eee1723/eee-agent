@@ -70,6 +70,7 @@ def test_command_types_match_plan() -> None:
             "changeset.list",
             "changeset.approve",
             "changeset.reject",
+            "changeset.recover",
             "workspace.create",
             "workspace.bind",
             "workspace.switch",

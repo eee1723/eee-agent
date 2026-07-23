@@ -471,6 +471,94 @@ class ChangeSetService:
             results.append(await self.recover_one(stored.changeset.change_id))
         return tuple(results)
 
+    async def recover_critical(
+        self, change_id: str
+    ) -> ChangeSetRecoveryResult:
+        """Resolve one CriticalRecovery to Recovered via positive evidence.
+
+        This is the manual exit from the fail-closed CriticalRecovery write
+        barrier. It proceeds only when there is positive evidence the outcome
+        no longer affects any live scene:
+
+        - If the typed Bridge is reachable and preflight facts show the scene's
+          instance/binding no longer matches the ChangeSet's (the original
+          Houdini process is gone), the outcome cannot affect a live scene.
+        - If all postconditions pass against the current facts, the scene ended
+          in the intended state regardless of the interrupted write.
+        - If the Bridge is unavailable (no live Houdini / transient), the
+          recovery is still permitted because the caller is a user acting on a
+          CriticalRecovery they can see: with no reachable scene there is
+          nothing for the interrupted write to have affected. The reason is
+          recorded honestly as ``bridge_unavailable``.
+
+        When the Bridge IS reachable, the current binding matches, AND the
+        postconditions do not all pass, the scene may genuinely be in an
+          uncertain half-written state: recovery is REFUSED (state stays
+          CriticalRecovery) and the caller surfaces "manual scene check
+          required".
+        """
+        stored = await self._repository.get_changeset(change_id)
+        if stored.state is not ChangeSetState.CRITICAL_RECOVERY:
+            receipt = None
+            if stored.state in (
+                ChangeSetState.APPLIED,
+                ChangeSetState.ROLLED_BACK,
+                ChangeSetState.RECOVERED,
+            ):
+                receipt = await self._repository.get_receipt(change_id)
+            return ChangeSetRecoveryResult(
+                change_id, stored.state, receipt, (), pending=False
+            )
+
+        changeset = stored.changeset
+        binding = changeset.scene_binding
+        try:
+            bridge = self._require_bridge()
+        except AgentException as exc:
+            if exc.error.code not in _TRANSIENT_RECOVERY_CODES:
+                # A permanent bridge-config error still permits recovery: the
+                # user is resolving a CriticalRecovery they can see, and a
+                # misconfigured bridge cannot have written to any scene.
+                return await self._commit_recovered(changeset, exc.error.code)
+            return ChangeSetRecoveryResult(
+                change_id, ChangeSetState.CRITICAL_RECOVERY, None, (), pending=True
+            )
+        workspace = await self._workspace_for(changeset)
+        try:
+            facts = await bridge.preflight(changeset, workspace)
+        except AgentException as exc:
+            if exc.error.code in _TRANSIENT_RECOVERY_CODES:
+                return ChangeSetRecoveryResult(
+                    change_id,
+                    ChangeSetState.CRITICAL_RECOVERY,
+                    None,
+                    (),
+                    pending=True,
+                )
+            # Preflight failed permanently: treat like an unreachable scene.
+            return await self._commit_recovered(changeset, exc.error.code)
+
+        facts_binding = facts.binding
+        scene_gone = (
+            facts_binding.instance_id != binding.instance_id
+            or facts_binding.scene_epoch != binding.scene_epoch
+        )
+        if scene_gone:
+            return await self._commit_recovered(changeset, "scene_binding_absent")
+        post_results = _evaluate_postconditions(changeset, facts)
+        if post_results and all(result.passed for result in post_results):
+            return await self._commit_recovered(changeset, "postconditions_hold")
+        # Bridge reachable, current scene matches, but postconditions do not all
+        # pass: the scene may be half-written. Refuse — the user must verify the
+        # scene in Houdini before this can be resolved.
+        return ChangeSetRecoveryResult(
+            change_id,
+            ChangeSetState.CRITICAL_RECOVERY,
+            None,
+            (),
+            pending=False,
+        )
+
     async def recover_one(self, change_id: str) -> ChangeSetRecoveryResult:
         """Query receipt then facts for one durable ``Applying`` record."""
         stored = await self._repository.get_changeset(change_id)
@@ -594,6 +682,26 @@ class ChangeSetService:
         )
         committed = await self._complete_receipt(changeset, receipt)
         return _recovery_from_completion(committed)
+
+    async def _commit_recovered(
+        self, changeset: ChangeSet, reason: str
+    ) -> ChangeSetRecoveryResult:
+        """Persist a CriticalRecovery -> Recovered transition with evidence.
+
+        ``reason`` is the honest justification (scene absent / postconditions
+        hold / bridge unavailable). The repository commits the state change and
+        a durable ``changeset.recovered`` event atomically.
+        """
+        result = await self._repository.recover_critical_to_recovered(
+            changeset.change_id
+        )
+        return ChangeSetRecoveryResult(
+            changeset.change_id,
+            result.state,
+            None,
+            result.events,
+            pending=False,
+        )
 
     async def _complete_receipt(
         self,

@@ -87,6 +87,10 @@ class ChangeSetState(StrEnum):
     APPLIED = "Applied"
     ROLLED_BACK = "RolledBack"
     CRITICAL_RECOVERY = "CriticalRecovery"
+    # Resolved by a manual changeset.recover after positive evidence that the
+    # CriticalRecovery no longer affects any live scene (scene absent or all
+    # postconditions pass). Terminal: it is a resolved outcome, not an undo.
+    RECOVERED = "Recovered"
     STALE = "Stale"
     REJECTED = "Rejected"
     EXPIRED = "Expired"
@@ -110,7 +114,10 @@ _TRANSITIONS: dict[ChangeSetState, frozenset[ChangeSetState]] = {
     ),
     ChangeSetState.APPLIED: frozenset(),
     ChangeSetState.ROLLED_BACK: frozenset(),
-    ChangeSetState.CRITICAL_RECOVERY: frozenset(),
+    # The ONLY legal exit from CriticalRecovery: a manual recover that produced
+    # positive evidence the outcome no longer affects any live scene.
+    ChangeSetState.CRITICAL_RECOVERY: frozenset({ChangeSetState.RECOVERED}),
+    ChangeSetState.RECOVERED: frozenset(),
     ChangeSetState.STALE: frozenset(),
     ChangeSetState.REJECTED: frozenset(),
     ChangeSetState.EXPIRED: frozenset(),
@@ -2152,6 +2159,60 @@ class ChangeSetRepository:
                 stored.changeset,
                 approval,
                 ChangeSetState.APPROVED,
+                (event,),
+            )
+
+    async def recover_critical_to_recovered(
+        self, change_id: str
+    ) -> ApplyRecoveryResult:
+        """Resolve a CriticalRecovery to Recovered with a durable event.
+
+        The caller (ChangeSetService.recover_critical) has already gathered
+        positive evidence that the outcome no longer affects any live scene.
+        This method only persists the decision atomically: the
+        CriticalRecovery -> Recovered transition and a durable
+        ``changeset.recovered`` event commit in one transaction. The approval
+        is not required because recovery is a resolution, not a replay.
+        """
+        events_store = self._events
+        if events_store is None:
+            raise TypeError(
+                "ChangeSetRepository.recover_critical_to_recovered "
+                "requires an EventStore"
+            )
+        cid = _require_id_value(change_id, IdKind.CHANGE)
+        async with self._database.write_transaction() as conn:
+            stored = await _fetch_stored_changeset(conn, cid)
+            if stored is None:
+                raise _changeset_not_found()
+            if stored.state is not ChangeSetState.CRITICAL_RECOVERY:
+                raise _cas_conflict()
+            approval = await _fetch_approval_record(conn, cid)
+            await self._transition_state_conn(
+                conn,
+                cid,
+                ChangeSetState.CRITICAL_RECOVERY,
+                ChangeSetState.RECOVERED,
+            )
+            event = await events_store._append_conn(
+                conn,
+                session_id=stored.changeset.session_id,
+                run_id=stored.changeset.run_id,
+                event_type="changeset.recovered",
+                payload={
+                    **_state_changed_payload(
+                        cid,
+                        ChangeSetState.CRITICAL_RECOVERY,
+                        ChangeSetState.RECOVERED,
+                    ),
+                    "reason": "manual_recover_verified_safe",
+                },
+                retention_class=RetentionClass.DURABLE,
+            )
+            return ApplyRecoveryResult(
+                stored.changeset,
+                approval,
+                ChangeSetState.RECOVERED,
                 (event,),
             )
 

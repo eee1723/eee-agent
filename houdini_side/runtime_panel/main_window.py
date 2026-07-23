@@ -66,6 +66,10 @@ class RuntimePanel(QtWidgets.QWidget):
         self._current_session_id = ""
         self._expired_notice_id = None
         self._pending_changeset = None
+        # ChangeSet ids that block Apply via an unresolved CriticalRecovery.
+        # Populated when a changeset.approve returns BlockedRecovery; cleared
+        # once a manual recover resolves them.
+        self._blocked_recovery_ids: tuple[str, ...] = ()
         self._artifacts: tuple = ()
         self._visions: tuple = ()
         # Launch worker state: a one-slot result box plus a done event,
@@ -106,6 +110,14 @@ class RuntimePanel(QtWidgets.QWidget):
         # _position_drawer, which runs on every conversation resize.
         self.approval_drawer = ApprovalDrawer(self.conversation)
         self.approval_drawer.hide()
+        # Recovery banner: a small button shown only while a CriticalRecovery
+        # blocks Apply. Clicking sends changeset.recover for every blocker.
+        self._recover_button = QtWidgets.QPushButton(
+            "⚠ Recovery required — click to resolve")
+        self._recover_button.setObjectName("RecoverButton")
+        self._recover_button.setAutoDefault(False)
+        self._recover_button.hide()
+        self._recover_button.clicked.connect(self._recover_blocked_changesets)
         self.conversation.installEventFilter(self)
 
         self._wire()
@@ -455,12 +467,28 @@ class RuntimePanel(QtWidgets.QWidget):
                 if blocked and type(apply) is dict
                 else ()
             )
+            if blocked:
+                self._blocked_recovery_ids = blockers
+            self._refresh_recover_action()
             self.conversation.append_item(
                 view_models.approval_result_card(
                     True,
                     blocked_recovery=blocked,
                     blocker_ids=blockers,
                 ))
+            return
+        if purpose == "changeset.recover":
+            change_id = result.get("change_id") if type(result) is dict else ""
+            recovered = bool(result.get("recovered")) if type(result) is dict else False
+            pending = bool(result.get("pending")) if type(result) is dict else False
+            if recovered and type(change_id) is str:
+                self._blocked_recovery_ids = tuple(
+                    cid for cid in self._blocked_recovery_ids
+                    if cid != change_id
+                )
+            self._refresh_recover_action()
+            self.conversation.append_item(
+                view_models.recover_result_card(change_id, recovered, pending=pending))
             return
         if purpose == "changeset.reject":
             self.conversation.append_item(
@@ -489,6 +517,18 @@ class RuntimePanel(QtWidgets.QWidget):
         # No duplicate create is sent; just focus the composer so the user can
         # immediately start the new conversation.
         self.conversation.focus_composer()
+
+    def _refresh_recover_action(self) -> None:
+        # The recovery banner is only relevant while a CriticalRecovery blocks
+        # Apply. It is a manual action the user opts into — never automatic.
+        self._recover_button.setVisible(bool(self._blocked_recovery_ids))
+
+    def _recover_blocked_changesets(self) -> None:
+        # Send changeset.recover for each blocker. The service gathers positive
+        # evidence before resolving; a scene that genuinely may be half-written
+        # is refused (manual scene check required), never silently resolved.
+        for change_id in self._blocked_recovery_ids:
+            self._client.recover_changeset(change_id)
 
     # -- bridge state (SelectionQueryWorker, mirrors legacy) -----------------
 
@@ -580,6 +620,14 @@ class RuntimePanel(QtWidgets.QWidget):
             max(0, self.conversation.height() - 2 * _DRAWER_MARGIN),
         )
         self.approval_drawer.raise_()
+        # Place the recovery banner across the top of the conversation pane.
+        self._recover_button.setGeometry(
+            _DRAWER_MARGIN,
+            _DRAWER_MARGIN,
+            max(0, self.conversation.width() - 2 * _DRAWER_MARGIN),
+            self._recover_button.sizeHint().height(),
+        )
+        self._recover_button.raise_()
 
     def _refresh_context_bar(self) -> None:
         hip = "-"

@@ -36,6 +36,7 @@ from eee_agent.changesets.contracts import (
 from eee_agent.changesets.repository import (
     ApplyCompletionResult,
     ChangeSetRepository,
+    ChangeSetState,
     ProposalResult,
 )
 from eee_agent.changesets.service import (
@@ -1309,6 +1310,26 @@ class RuntimeService:
             task.exception()
         if self._apply_tasks.get(change_id) is task:
             self._apply_tasks.pop(change_id, None)
+
+    async def recover_changeset(
+        self, change_id: str
+    ) -> dict[str, object]:
+        """Manually resolve one CriticalRecovery via the recover exit.
+
+        Delegates to the ChangeSet service, which gathers positive evidence
+        before transitioning CriticalRecovery -> Recovered. Events committed by
+        the repository transaction are notified only after they are durable
+        (matching the approve/apply notification contract).
+        """
+        result = await self._changesets.recover_critical(change_id)
+        for record in result.events:
+            await self._notify(record)
+        return {
+            "change_id": result.change_id,
+            "state": result.state.value,
+            "recovered": result.state is ChangeSetState.RECOVERED,
+            "pending": result.pending,
+        }
 
     async def recover_changesets_trusted(
         self,

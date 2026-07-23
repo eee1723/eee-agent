@@ -316,7 +316,7 @@ def test_schema_v3_preserves_changeset_tables_and_adds_workspace_state(
                 "session_workspace_state",
             ):
                 assert table in names
-            assert await db.schema_version() == 6
+            assert await db.schema_version() == 7
         finally:
             await db.close()
 
@@ -1177,11 +1177,15 @@ def test_nonterminal_changesets_restart_safe(db_path: Path) -> None:
             repo2 = ChangeSetRepository(db2)
             nonterminal = await repo2.nonterminal_changesets()
             ids = {s.changeset.change_id for s in nonterminal}
+            # CriticalRecovery is non-terminal since schema v7: it has a manual
+            # recover exit to Recovered, so it is an unresolved blocker that
+            # must survive a restart (not a frozen terminal outcome).
             assert ids == {
                 f"chg_{'1' * 32}",
                 f"chg_{'2' * 32}",
                 f"chg_{'3' * 32}",
                 f"chg_{'4' * 32}",
+                f"chg_{'6' * 32}",
             }
             applying = await repo2.changesets_in_states({ChangeSetState.APPLYING})
             assert [s.changeset.change_id for s in applying] == [f"chg_{'4' * 32}"]

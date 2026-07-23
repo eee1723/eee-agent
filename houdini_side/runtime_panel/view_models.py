@@ -126,6 +126,36 @@ def approval_result_card(
                        "ChangeSet rejected by the user.", "error")
 
 
+def recover_result_card(
+    change_id: str, recovered: bool, *, pending: bool = False
+) -> MessageItem:
+    """Card summarizing the outcome of a manual changeset.recover."""
+    short = change_id[:16]
+    if pending:
+        return MessageItem(
+            "approval",
+            "Recovery pending",
+            f"The Bridge was unavailable; {short}… remains blocked. Retry once "
+            "the Houdini Bridge is reachable.",
+            "warn",
+        )
+    if recovered:
+        return MessageItem(
+            "approval",
+            "Recovered",
+            f"CriticalRecovery {short}… resolved. The write barrier is lifted "
+            "and further Applies are allowed.",
+            "ok",
+        )
+    return MessageItem(
+        "approval",
+        "Recovery refused",
+        f"The current scene still matches {short}… but its postconditions do "
+        "not all hold. Verify the scene in Houdini before retrying.",
+        "warn",
+    )
+
+
 def vision_card(summary: Mapping[str, object]) -> MessageItem:
     # Keys follow parse_vision_event: status / accepted / report_summary.
     status = _bounded(summary.get("status"), 40) or "unknown"
