@@ -8,13 +8,13 @@ Runtime Control panel.
 ## Current development handoff
 
 The source of truth is
-`docs/handoffs/2026-07-23-runtime-stage-b-pause-handoff.md`. Stage A is accepted
-on `feature/a-stability`; the active delivery line is
-`feature/b-release-acceptance`. Stage B's deterministic offline, HFS, and
-disposable hython gates pass. The exact B candidate still needs the interactive
-Houdini GUI checklist and a newly verified real Vision-provider journey before
-the final release-readiness decision. A provider result from an older candidate
-does not satisfy this gate.
+`docs/handoffs/2026-07-23-stage-b-pass-stage-c-handoff.md`. Stage A is accepted
+on `feature/a-stability`; Stage B is **accepted (PASS)** at `9fc058b` on
+`feature/b-release-acceptance` (all gates B-01..B-09 PASS, including the
+interactive GUI checklist and a real `qwen-vl-plus` Vision provider journey).
+The next delivery line is Stage C (`feature/c-task19c-delivery`, Task 19-C:
+DecisionSummary delivery package + optional observability), branched from the
+accepted B tip.
 Offline tests and disposable Houdini 21.0.440 `hython` are the default
 verification path until
 the documented GUI gate is required.
