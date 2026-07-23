@@ -24,7 +24,10 @@ from eee_agent.panel.client_state import (
 )
 
 MAX_LOG_BYTES = 65536
-DEFAULT_TIMEOUT_SECONDS = 10.0
+# Cold-start import of deepagents/langchain + DB open + bind can exceed 10s,
+# especially under antivirus scanning. 20s is still snappy (the loop polls
+# every 100ms so a ready backend is detected within ~0.1s of publishing).
+DEFAULT_TIMEOUT_SECONDS = 20.0
 
 SpawnFn = Callable[..., subprocess.Popen]
 
@@ -122,6 +125,14 @@ def ensure_runtime(
                 process=process, log_path=log_path,
             )
         time.sleep(0.1)
+    # The poll interval leaves a gap between the last check and the deadline;
+    # do one final discovery check before declaring timeout. This recovers the
+    # common slow-cold-start case where the backend published discovery in that
+    # gap (the process is still alive and listening).
+    if process.poll() is None and discovery_ready(state_dir):
+        return LaunchResult(status="spawned",
+                            detail="Runtime started by the panel.",
+                            process=process, log_path=log_path)
     return LaunchResult(
         status="timeout",
         detail="Runtime did not publish discovery before the deadline.",
