@@ -2,7 +2,8 @@
 
 Date: 2026-07-24
 Owner: continued from the Pi-model pivot plan
-Branch: `feature/sandbox-verify-commit` (branched from `main` at `5a6880b`)
+Branch: `main` (originally `feature/sandbox-verify-commit`, branched from
+`main` at `5a6880b`, merged back to `main` 2026-07-24)
 Prior source of truth: `docs/handoffs/2026-07-23-stage-b-pass-stage-c-handoff.md`
 
 ## What landed

@@ -9,7 +9,8 @@ Runtime Control panel.
 
 The source of truth is
 `docs/handoffs/2026-07-24-sandbox-verify-commit-handoff.md`. The sandbox +
-verify + commit (Pi model) workflow landed on `feature/sandbox-verify-commit`:
+verify + commit (Pi model) workflow is merged to `main` (originally
+`feature/sandbox-verify-commit`, merged 2026-07-24):
 the agent now builds iteratively in an isolated `/obj/eee_scratch_<run>`
 container (`scratch_build`), observes cooked results, and promotes verified
 geometry through four hard gates (`scratch_commit` → bake / structure /
@@ -133,8 +134,8 @@ sandbox DTOs for exec/commit/destroy) ·
 `eee_agent/changesets` (typed ChangeSet policy, services, repositories — the
 commit persistence seam) ·
 `eee_agent/modeling` (sandbox coordinator + `scratch_build`/`scratch_commit`
-tools; `orientation_math.py` pure-Python PCA/axis math; `scratch_verify.py`
-gates; retained Brief/Spec compiler/proposal for the legacy path) ·
+tools; `orientation_math.py` pure-Python PCA/axis math; retained Brief/Spec
+compiler/proposal for the legacy path) ·
 `eee_agent/knowledge` (read-only Houdini knowledge cache build/store/service) ·
 `eee_agent/vision` (advisory post-Apply evaluation contracts/router) ·
 `eee_agent/panel` (Runtime panel state projection) ·

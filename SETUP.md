@@ -1,11 +1,11 @@
 # Fresh-Machine Setup
 
 This guide restores EEE Agent from a clean clone on a Windows development
-computer. For the exact current branch, accepted commits, verification
-baseline, and resume prompt, read:
+computer. For the exact current commits, verification baseline, and resume
+prompt, read:
 
 ```text
-docs/handoffs/2026-07-17-cross-machine-modeling-handoff.md
+docs/handoffs/2026-07-24-sandbox-verify-commit-handoff.md
 ```
 
 ## Prerequisites
@@ -22,25 +22,28 @@ another computer.
 
 ## 1. Clone and Select the Development Branch
 
+Development happens on `main`; there are no long-lived feature branches right
+now.
+
 ```powershell
 git clone https://github.com/eee1723/eee-agent.git E:\eee-agent
 Set-Location E:\eee-agent
 git fetch --all --prune
-git switch --track origin/feature/runtime
+git switch main
 git status --short --branch
 git log -8 --oneline
 ```
 
 Expected:
 
-- branch: `feature/runtime`
-- upstream: `origin/feature/runtime`
+- branch: `main`
+- upstream: `origin/main`
 - clean worktree
-- history contains accepted modeling implementation tip `2433966` and the
-  newer cross-machine handoff commit
+- history contains the sandbox + verify + commit tip and the prior accepted
+  Runtime/modeling milestones
 
-Do not merge `main`, rebase accepted history, force-push, or use
-`git reset --hard` as part of setup.
+Do not rebase accepted history, force-push, or use `git reset --hard` as part
+of setup.
 
 ## 2. Detect the Local Houdini Installation
 
@@ -87,7 +90,7 @@ uv lock --check
 ```
 
 Do not install the project ad hoc with `pip install -e .` on top of a divergent
-environment. The checked-in lock is the dependency authority for this branch.
+environment. The checked-in lock is the dependency authority.
 
 ## 4. Restore Local Configuration
 
@@ -118,10 +121,10 @@ git diff --check
 git status --short --branch
 ```
 
-The offline baseline on `feature/runtime` is ~2940 tests passing with 11
-Houdini-Knowledge skips (opt-in via `EEE_RUN_HOUDINI_KB_TESTS=true`). Later
-commits may legitimately increase the count, but setup is blocked by any
-failure or unexplained new skip/xfail.
+The offline baseline is **3446 tests passing with 12** Houdini-Knowledge
+skips (opt-in via `EEE_RUN_HOUDINI_KB_TESTS=true`). Later commits may
+legitimately increase the count, but setup is blocked by any failure or
+unexplained new skip/xfail.
 
 For the focused Workspace gate:
 
@@ -225,7 +228,7 @@ not.
 Read:
 
 1. `CLAUDE.md`
-2. `docs/handoffs/2026-07-20-runtime-development-transfer.md` (current entry doc)
+2. `docs/handoffs/2026-07-24-sandbox-verify-commit-handoff.md` (current entry doc)
 3. `docs/superpowers/plans/2026-07-21-runtime-panel-three-pane.md` (latest panel work)
 
 The Foundation, Runtime, Secure Bridge, Docked UI, and Strict Modeling

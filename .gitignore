@@ -52,3 +52,6 @@ desktop.ini
 
 # --- isolated development worktrees ---
 .worktrees/
+
+# --- editor / agent session-local artifacts (ZCode plans, settings) ---
+.zcode/
