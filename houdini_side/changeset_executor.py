@@ -74,7 +74,6 @@ from eee_agent.houdini_bridge.scratch import (
     ScratchDestroyRequest,
     ScratchDestroyResult,
     ScratchGeometry,
-    ScratchOp,
     ScratchRequest,
     ScratchResult,
 )
@@ -2131,12 +2130,19 @@ class ChangeSetExecutor:
         if failure is not None and not request.preserve_on_failure:
             self._destroy_capture_scope(created_this_call)
 
-        if failure is not None and geometry is None:
-            # No geometry to report and we failed: surface the failure honestly.
+        if failure is not None:
+            # Any op failure must be surfaced honestly. When
+            # ``preserve_on_failure`` is True (default) the partially-applied
+            # sandbox is left intact for inspection; the applied_ops count and
+            # output_node in the raised diagnostics tell the agent how far it
+            # got. We never return a ScratchResult that looks like success when
+            # an operation failed — that would let a half-applied build read as
+            # a partial success to the agent.
             if isinstance(failure, HoudiniAdapterError):
                 raise failure
             raise _scratch_failed(
-                f"scratch operation failed: {failure}"[:_MAX_ERROR_CHARS]
+                f"scratch operation failed after {applied} op(s) at "
+                f"{output_node_path}: {failure}"[:_MAX_ERROR_CHARS]
             ) from failure
 
         return ScratchResult(
@@ -2166,7 +2172,12 @@ class ChangeSetExecutor:
         if container is None:
             return ScratchDestroyResult(destroyed_paths=(), missing=True)
         try:
-            with hou.undos.group(_UNDO_LABEL_PREFIX + "scratch.destroy"):
+            # Cleanup is terminal: destroy must NOT be a user-undoable chunk.
+            # If it were grouped, a later hou.undos.undo() (by the user or any
+            # code path) could resurrect /obj/eee_scratch_<sandbox_id> after the
+            # run is already terminal, leaving an orphan that collides with the
+            # next run of the same id. Run it with undo recording disabled.
+            with hou.undos.disabler():  # type: ignore[union-attr]
                 container.destroy()
                 destroyed.append(container_path)
         except Exception:  # noqa: BLE001 — cleanup is best-effort
@@ -2184,10 +2195,13 @@ class ChangeSetExecutor:
         four verify gates (bake / structure / orientation / health) run against
         its output node. On PASS, the sandbox container is renamed into the
         real scene at ``target_parent_path/target_name`` inside a single
-        ``hou.undos.group`` — so if the rename fails mid-flight the whole
-        promotion rolls back atomically (this is stronger than Pi, which has
-        no undo layer around commit). On REFUSE, the sandbox is preserved
-        untouched so the agent can fix and re-commit.
+        ``hou.undos.group``. Note: ``hou.undos.group`` groups operations into
+        one user-undoable chunk — it is NOT a transaction and does NOT roll
+        back automatically if a HOM call raises mid-group. The promotion
+        therefore journals the pre-rename name explicitly and restores it on
+        any failure, so the sandbox is never left half-promoted (renamed but
+        not moved). On REFUSE, the sandbox is preserved untouched so the agent
+        can fix and re-commit.
 
         Returns a bounded verdict: committed/refused, the final path, the
         per-gate results, and a tamper-evident verification receipt.
@@ -2227,9 +2241,14 @@ class ChangeSetExecutor:
                 receipt=receipt,
             )
 
-        # Gates passed: promote the sandbox into the real scene atomically.
-        # The rename happens inside one undo group so a partial failure rolls
-        # back and leaves the sandbox intact (not half-promoted).
+        # Gates passed: promote the sandbox into the real scene. The rename
+        # runs inside one undo group (so the user sees a single undo entry),
+        # but hou.undos.group is NOT a transaction — it does not roll back
+        # applied HOM calls if a later call raises. We therefore journal the
+        # original name and restore it on any failure so the sandbox is never
+        # left half-promoted (renamed but not moved).
+        original_name = container.name()
+        moved = False
         promote_failure: BaseException | None = None
         try:
             with hou.undos.group(_UNDO_LABEL_PREFIX + "scratch.commit"):
@@ -2251,17 +2270,38 @@ class ChangeSetExecutor:
                 # move it under the target parent if that differs.
                 if container.parent().path() != request.target_parent_path:
                     container.move(target_parent)
+                    moved = True
         except HoudiniAdapterError:
             promote_failure = sys.exc_info()[1]  # type: ignore[assignment]
         except Exception as exc:  # noqa: BLE001 — classify any HOM failure
             promote_failure = exc
 
         if promote_failure is not None:
-            # The undo group rolled the rename back; the sandbox is intact.
-            if isinstance(promote_failure, HoudiniAdapterError):
-                raise promote_failure
+            # hou.undos.group did NOT auto-rollback. Undo the partial promotion
+            # manually so the sandbox is intact (not renamed-but-not-moved).
+            # Promotion is two steps: setName then move. If move failed after a
+            # successful setName, move back to /obj (the sandbox's original
+            # parent) then restore the original name. Best-effort — if cleanup
+            # itself fails, that secondary error is folded into the message.
+            rollback_error: BaseException | None = None
+            try:
+                if moved:
+                    obj_net = hou.node("/obj")
+                    if obj_net is not None and container.parent().path() != "/obj":
+                        container.move(obj_net)
+                if container.name() != original_name:
+                    container.setName(original_name)
+            except Exception as rb_exc:  # noqa: BLE001 — best-effort restore
+                rollback_error = rb_exc
+            if rollback_error is None:
+                if isinstance(promote_failure, HoudiniAdapterError):
+                    raise promote_failure
+                raise _scratch_failed(
+                    f"scratch commit promotion failed: {promote_failure}"[:_MAX_ERROR_CHARS]
+                ) from promote_failure
             raise _scratch_failed(
-                f"scratch commit promotion failed: {promote_failure}"[:_MAX_ERROR_CHARS]
+                f"scratch commit promotion failed and rollback also failed: "
+                f"{promote_failure}; rollback: {rollback_error}"[:_MAX_ERROR_CHARS]
             ) from promote_failure
 
         receipt = _build_commit_receipt(gate_report)

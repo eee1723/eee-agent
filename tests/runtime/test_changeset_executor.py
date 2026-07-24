@@ -293,6 +293,22 @@ class _Undos:
 
         return _g()
 
+    def disabler(self):
+        # Mirrors hou.undos.disabler(): a context manager that suppresses undo
+        # recording. Used by terminal cleanup (scratch.destroy) so the destroy
+        # cannot be undone back into an orphan node.
+        spy = self._spy
+
+        @contextlib.contextmanager
+        def _d():
+            spy.append(("undo_disable_begin",))
+            try:
+                yield
+            finally:
+                spy.append(("undo_disable_end",))
+
+        return _d()
+
 
 class _HipFile:
     def __init__(self, name: str = "") -> None:

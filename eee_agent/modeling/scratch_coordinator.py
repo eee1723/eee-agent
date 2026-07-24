@@ -22,11 +22,13 @@ needed yet.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from langchain.tools import ToolRuntime, tool
+
+from eee_agent.core.errors import AgentException
 
 from eee_agent.houdini_bridge.scratch import (
     ScratchCommitResult,
@@ -142,15 +144,8 @@ class ScratchCoordinator:
                 operations=typed_ops,
                 preserve_on_failure=preserve_on_failure,
             )
-        except Exception:  # noqa: BLE001 - bounded at this seam
-            return {
-                "ok": False,
-                "code": "scratch.bridge_unavailable",
-                "message": (
-                    "The sandbox build could not reach the Houdini bridge; the "
-                    "sandbox was not modified."
-                ),
-            }
+        except Exception as exc:  # noqa: BLE001 - bounded at this seam
+            return _bridge_or_op_failure(exc, default="scratch.op_failed")
         return self._summarize(result)
 
     async def commit(
@@ -195,15 +190,8 @@ class ScratchCoordinator:
                 orientation_checks=checks,
                 skip_structure_check=skip_structure_check,
             )
-        except Exception:  # noqa: BLE001 - bounded at this seam
-            return {
-                "ok": False,
-                "code": "scratch.bridge_unavailable",
-                "message": (
-                    "The sandbox commit could not reach the Houdini bridge; "
-                    "the sandbox was not modified."
-                ),
-            }
+        except Exception as exc:  # noqa: BLE001 - bounded at this seam
+            return _bridge_or_op_failure(exc, default="scratch.op_failed")
         return self._summarize_commit(result)
 
     def _parse_orientation_checks(
@@ -302,6 +290,36 @@ def _geometry_summary(geo: ScratchGeometry) -> dict[str, object]:
         "bbox_min": list(geo.bbox_min),
         "bbox_max": list(geo.bbox_max),
     }
+
+
+def _bridge_or_op_failure(exc: BaseException, *, default: str) -> dict[str, object]:
+    """Map a scratch provider exception to a bounded ``{ok: False, ...}`` dict.
+
+    Distinguishes a transport-level bridge failure (the sandbox was never
+    reached) from an operation-level failure (the bridge ran an op that raised
+    — the sandbox may carry partial work the agent can inspect). An
+    ``AgentException`` carrying a ``bridge.not_available`` / ``bridge.auth_failed``
+    code is reported as transport-level; anything else (including an executor
+    ``bridge.scratch_failed`` or a generic provider error) is reported as an
+    operation failure and its message is forwarded verbatim so the agent can
+    see how far the build got.
+    """
+    if isinstance(exc, AgentException):
+        code = getattr(exc.error, "code", "")
+        if code in ("bridge.not_available", "bridge.auth_failed"):
+            return {
+                "ok": False,
+                "code": "scratch.bridge_unavailable",
+                "message": (
+                    "The sandbox build could not reach the Houdini bridge; the "
+                    "sandbox was not modified."
+                ),
+            }
+        msg = getattr(exc.error, "message_for_user", "") or str(exc)
+        return {"ok": False, "code": default, "message": msg}
+    msg = str(exc) or "The sandbox operation failed."
+    return {"ok": False, "code": default, "message": msg}
+
 
 
 @dataclass(frozen=True, slots=True)

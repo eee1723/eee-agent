@@ -26,6 +26,7 @@ from typing import Any
 
 import pytest
 
+from eee_agent.core.errors import AgentError, AgentException, ErrorCategory
 from eee_agent.houdini_bridge.auth import create_bridge_identity
 from eee_agent.houdini_bridge.client import BridgeClient, BridgeClientError
 from eee_agent.houdini_bridge.contracts import MAX_MESSAGE_BYTES, PROTOCOL, BridgeError
@@ -101,6 +102,31 @@ def _op_create(node_name: str = "box1", node_type: str = "box", parent: str = ""
     if parent:
         d["parent"] = parent
     return d
+
+
+def _bridge_down_exc() -> AgentException:
+    """A transport-level bridge-not-available failure (sandbox never reached)."""
+    return AgentException(
+        AgentError(
+            code="bridge.not_available",
+            category=ErrorCategory.HOUDINI_BRIDGE,
+            message_for_user="The Houdini Bridge is not currently available.",
+            retryable=True,
+        )
+    )
+
+
+def _scratch_op_failed_exc() -> AgentException:
+    """An operation-level failure raised after partial application."""
+    return AgentException(
+        AgentError(
+            code="bridge.scratch_failed",
+            category=ErrorCategory.HOUDINI_BRIDGE,
+            message_for_user="scratch operation failed after 2 op(s): bad parm",
+            retryable=True,
+            scene_may_have_changed=True,
+        )
+    )
 
 
 def _geometry_dict(
@@ -787,7 +813,8 @@ class TestScratchCoordinator:
         assert provider.calls == []
 
     def test_provider_exception_fail_closed(self) -> None:
-        provider = _FakeScratchProvider(raise_exc=RuntimeError("bridge down"))
+        # Transport-level failure: bridge unreachable, sandbox never modified.
+        provider = _FakeScratchProvider(raise_exc=_bridge_down_exc())
         coord = _coordinator(provider)
 
         async def run() -> dict[str, object]:
@@ -796,6 +823,20 @@ class TestScratchCoordinator:
         result = asyncio.run(run())
         assert result["ok"] is False
         assert result["code"] == "scratch.bridge_unavailable"
+
+    def test_provider_op_failure_reported_honestly(self) -> None:
+        # Operation-level failure: an op raised after partial application.
+        # Must NOT read as success and must surface the executor's message.
+        provider = _FakeScratchProvider(raise_exc=_scratch_op_failed_exc())
+        coord = _coordinator(provider)
+
+        async def run() -> dict[str, object]:
+            return await coord.build(operations=[_op_create()])
+
+        result = asyncio.run(run())
+        assert result["ok"] is False
+        assert result["code"] == "scratch.op_failed"
+        assert "failed after 2 op(s)" in result["message"]
 
     def test_no_geometry_in_summary(self) -> None:
         provider = _FakeScratchProvider(
@@ -1355,7 +1396,8 @@ class TestScratchCoordinatorCommit:
         assert result["reason"] == "health failed"
 
     def test_provider_exception_fail_closed(self) -> None:
-        provider = _CommitFakeProvider(raise_exc=RuntimeError("bridge down"))
+        # Transport-level failure: bridge unreachable.
+        provider = _CommitFakeProvider(raise_exc=_bridge_down_exc())
         coord = ScratchCoordinator(ScratchSessionContext(provider=provider, sandbox_id="run1"))
 
         async def run() -> dict[str, object]:
@@ -1364,6 +1406,19 @@ class TestScratchCoordinatorCommit:
         result = asyncio.run(run())
         assert result["ok"] is False
         assert result["code"] == "scratch.bridge_unavailable"
+
+    def test_provider_op_failure_reported_honestly(self) -> None:
+        # Operation-level failure during commit promotion.
+        provider = _CommitFakeProvider(raise_exc=_scratch_op_failed_exc())
+        coord = ScratchCoordinator(ScratchSessionContext(provider=provider, sandbox_id="run1"))
+
+        async def run() -> dict[str, object]:
+            return await coord.commit(target_parent_path="/obj", target_name="my_asset")
+
+        result = asyncio.run(run())
+        assert result["ok"] is False
+        assert result["code"] == "scratch.op_failed"
+        assert "failed after 2 op(s)" in result["message"]
 
     def test_bad_target_parent_rejected(self) -> None:
         provider = _CommitFakeProvider()
