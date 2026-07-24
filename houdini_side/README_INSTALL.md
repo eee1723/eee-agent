@@ -22,8 +22,11 @@ uv run --frozen --extra eval python -m eee_agent.runtime serve
 ```
 
 The Runtime panel authenticates through discovery/token files, sends bounded
-commands, and exposes no direct HOM, SQLite, raw operation JSON, or write
-route. Scene changes use the typed proposal → approval → changeset flow.
+commands, and exposes no direct HOM, SQLite, or raw operation JSON. Scene
+changes use the **sandbox + verify + commit** workflow: the agent builds in an
+isolated `/obj/eee_scratch_<run>` container, then promotes verified geometry
+through four hard gates (bake / structure / orientation / health) via
+`scratch_commit`. Sandbox containers are cleaned up on run end/cancel/restart.
 
 The former unauthenticated rpyc server, chat panel, and interactive CLI are
 removed. They must not be started manually or used as a rollback path.

@@ -1,7 +1,7 @@
 # Project Conventions (always loaded into the agent)
 
 The authoritative project context is `CLAUDE.md` plus the current handoff
-(`docs/handoffs/2026-07-20-runtime-development-transfer.md`). This file holds
+(`docs/handoffs/2026-07-24-sandbox-verify-commit-handoff.md`). This file holds
 only the conventions an agent must not violate between sessions.
 
 ## Retired tool system (do not use)
@@ -15,11 +15,18 @@ suggest restarting `start_rpc.py`.
 
 ## Current production path
 
-- Scene effects go only through the persistent Runtime: typed proposal
-  (`propose_modeling` with a strict Brief/Spec payload) → explicit approval →
-  transactional Apply with receipt. There is no direct write/save/export tool.
-- Scene queries use exactly five read-only tools (`scene_status`,
-  `query_scene`, `inspect_workspace`, `geometry_stats`, `work_status`) over the
+- Scene effects go through the **sandbox + verify + commit** workflow:
+  the agent builds iteratively in an isolated sandbox container
+  (`/obj/eee_scratch_<run>`, via `scratch_build`), observes cooked results,
+  then promotes verified geometry into the real scene through hard gates
+  (`scratch_commit` → bake / structure / orientation / health). There is no
+  direct write/save/export tool.
+- The legacy `propose_modeling` tool (blind-whole-spec-at-once) is retired
+  from the agent graph; its module and tests are retained pending the new
+  workflow stabilizing. The ChangeSet/ownership/recovery internals it used
+  are kept as the commit persistence seam.
+- Scene queries use the read-only tools (`scene_status`, `query_scene`,
+  `inspect_workspace`, `geometry_stats`, `work_status`) over the
   authenticated loopback Secure Bridge; they return bounded plain dicts, never
   live HOM objects.
 - Houdini-side code (`houdini_side/`) uses only Houdini's bundled Python and

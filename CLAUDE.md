@@ -8,21 +8,20 @@ Runtime Control panel.
 ## Current development handoff
 
 The source of truth is
-`docs/handoffs/2026-07-23-stage-b-pass-stage-c-handoff.md`. Stage A is accepted
-on `feature/a-stability`; Stage B is **accepted (PASS)** at `9fc058b` on
-`feature/b-release-acceptance` (all gates B-01..B-09 PASS, including the
-interactive GUI checklist and a real `qwen-vl-plus` Vision provider journey).
-The next delivery line is Stage C (`feature/c-task19c-delivery`, Task 19-C:
-DecisionSummary delivery package + optional observability), branched from the
-accepted B tip.
-Offline tests and disposable Houdini 21.0.440 `hython` are the default
-verification path until
-the documented GUI gate is required.
+`docs/handoffs/2026-07-24-sandbox-verify-commit-handoff.md`. The sandbox +
+verify + commit (Pi model) workflow landed on `feature/sandbox-verify-commit`:
+the agent now builds iteratively in an isolated `/obj/eee_scratch_<run>`
+container (`scratch_build`), observes cooked results, and promotes verified
+geometry through four hard gates (`scratch_commit` → bake / structure /
+orientation / health) inside one undo group. `propose_modeling` is retired
+from the agent graph (module retained). Full offline gate: 3446 passed, 12
+skipped. The remaining acceptance gate is a real-Houdini end-to-end smoke of
+the full build → observe → commit cycle.
 
 Do not merge `main`, rewrite accepted history, or weaken trusted Workspace,
-typed ChangeSet, exact approval, preflight, transactional Apply, receipt,
-rollback, restart recovery, model/public write-tool exclusion, or single-FIFO
-boundaries. Preserve the accepted Runtime reconnect and Chinese IME fixes.
+the ChangeSet/ownership/recovery kernel (the commit persistence seam),
+single-FIFO boundaries, or loopback auth. Preserve the accepted Runtime
+reconnect and Chinese IME fixes.
 
 ## Golden rule
 
@@ -55,9 +54,12 @@ authoritative documentation; never rely on memory for version/API details.
   bounded Session/Run/approval commands. The panel owns no agent graph,
   SQLite, or Apply implementation.
 - **Agent boundary**: `eee_agent.runtime.agent_context` injects a trusted
-  `ReadOnlyProvider`; `eee_agent.runtime.agent_tools.build_read_only_tools()`
-  returns exactly five tools: `scene_status`, `query_scene`,
-  `inspect_workspace`, `geometry_stats`, and `work_status`.
+  `ReadOnlyProvider` plus a `ScratchToolContext`. The read-only tool allowlist
+  is `scene_status`, `query_scene`, `inspect_workspace`, `geometry_stats`,
+  `work_status`, `search_houdini_knowledge`, `get_houdini_knowledge`. Modeling
+  runs additionally expose `scratch_build` (build/observe in an isolated
+  sandbox) and `scratch_commit` (promote verified geometry through hard gates).
+  The legacy `propose_modeling` tool is retired from the graph.
 
 ## Critical gotchas
 
@@ -102,13 +104,17 @@ Use that installation's `bin\hython.exe`; do not copy `.venv` between machines.
 
 ## Runtime status
 
-Runtime is persistent, authenticated, loopback-only, and read-only at the agent
-scene boundary. It stores sessions/runs/events and LangGraph checkpoints under
-`EEE_RUNTIME_HOME` (absolute path) or `%LOCALAPPDATA%\EEEAgent`. The five secure
-read-only tools are the only scene-query tools exposed to the model. Workspace
-creation/binding/switching/inspection is trusted scene context, never write
-permission. Typed ChangeSet proposal, exact approval, preflight, Apply, receipt,
-rollback, and restart recovery remain separate guarded capabilities.
+Runtime is persistent, authenticated, loopback-only. It stores sessions/runs/
+events and LangGraph checkpoints under `EEE_RUNTIME_HOME` (absolute path) or
+`%LOCALAPPDATA%\EEEAgent`. The read-only tools plus the sandbox modeling tools
+(`scratch_build` / `scratch_commit`) are the scene boundary the agent sees.
+Workspace creation/binding/switching/inspection is trusted scene context, never
+uncontrolled write permission. The **sandbox + verify + commit** workflow is now
+the primary modeling path: the agent builds in an isolated
+`/obj/eee_scratch_<run>` container and promotes verified geometry through four
+hard gates (bake / structure / orientation / health) inside one undo group. The
+legacy typed-ChangeSet proposal/approval/Apply/recovery internals remain as the
+commit persistence seam and are retained for cross-restart recovery.
 
 ## Historical archive (not a supported path)
 
@@ -122,9 +128,13 @@ directories; do not restore or invoke them.
 
 `eee_agent/core` (IDs, errors, artifacts, events, versioning) ·
 `eee_agent/providers` (contracts, registry, secrets, adapters) ·
-`eee_agent/houdini_bridge` (authenticated typed bridge) ·
-`eee_agent/changesets` (typed ChangeSet policy, services, repositories) ·
-`eee_agent/modeling` (strict Brief/Spec contracts, catalog compiler, validation) ·
+`eee_agent/houdini_bridge` (authenticated typed bridge; incl. `scratch.py`
+sandbox DTOs for exec/commit/destroy) ·
+`eee_agent/changesets` (typed ChangeSet policy, services, repositories — the
+commit persistence seam) ·
+`eee_agent/modeling` (sandbox coordinator + `scratch_build`/`scratch_commit`
+tools; `orientation_math.py` pure-Python PCA/axis math; `scratch_verify.py`
+gates; retained Brief/Spec compiler/proposal for the legacy path) ·
 `eee_agent/knowledge` (read-only Houdini knowledge cache build/store/service) ·
 `eee_agent/vision` (advisory post-Apply evaluation contracts/router) ·
 `eee_agent/panel` (Runtime panel state projection) ·
@@ -132,7 +142,8 @@ directories; do not restore or invoke them.
 events, protocol, auth, checkpoints, agent runner, service, server) ·
 `eee_agent/model`, `eee_agent/app`, `eee_agent/cli` ·
 `houdini_side/secure_bridge.py`, `secure_bridge_host.py`, `runtime_panel/`
-(three-pane panel package), `changeset_executor.py`, `workspace_inspector.py`,
+(three-pane panel package), `changeset_executor.py` (sandbox + verify gates),
+`scratch_verify.py` (bake/structure/orientation/health), `workspace_inspector.py`,
 `install_menu.py`, and `start_phoenix.py` · `eval/` · `skills/` ·
 `MainMenuCommon.xml`.
 

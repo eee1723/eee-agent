@@ -193,8 +193,9 @@ SMOKE OK
 ```
 
 The smoke creates a disposable unsaved root, exercises typed ChangeSet and
-Workspace behavior, and cleans the root before exit. Run it in a fresh process,
-not inside a valuable production HIP session.
+Workspace behavior (and the sandbox scratch ops on the same bridge), and
+cleans the root before exit. Run it in a fresh process, not inside a valuable
+production HIP session.
 
 Houdini 21.0.440 may print this non-fatal Qt warning after successful
 assertions:
