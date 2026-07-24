@@ -266,8 +266,13 @@ class ScratchCoordinator:
 
     @staticmethod
     def _summarize(result: ScratchResult) -> dict[str, object]:
+        # M2: a partial build (some ops failed to apply) is NOT a clean success.
+        # Report ok=False when any per-op error was recorded so the model does
+        # not proceed on a half-applied graph. The errors list still carries the
+        # per-op detail for self-correction; transport/exception failures stay
+        # on the separate ok=False path in _bridge_or_op_failure.
         summary: dict[str, object] = {
-            "ok": True,
+            "ok": not bool(result.errors),
             "sandbox_root": result.sandbox_root,
             "applied_ops": result.applied_ops,
             "output_node": result.output_node,

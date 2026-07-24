@@ -29,7 +29,7 @@ import pytest
 from eee_agent.core.errors import AgentError, AgentException, ErrorCategory
 from eee_agent.houdini_bridge.auth import create_bridge_identity
 from eee_agent.houdini_bridge.client import BridgeClient, BridgeClientError
-from eee_agent.houdini_bridge.contracts import MAX_MESSAGE_BYTES, PROTOCOL, BridgeError
+from eee_agent.houdini_bridge.contracts import PROTOCOL
 from eee_agent.houdini_bridge.scratch import (
     SCRATCH_COMMIT_OPERATION,
     SCRATCH_DESTROY_OPERATION,
@@ -37,14 +37,11 @@ from eee_agent.houdini_bridge.scratch import (
     SCRATCH_V1,
     ScratchCommitRequest,
     ScratchCommitResult,
-    ScratchCommitResponse,
     ScratchDestroyRequest,
     ScratchDestroyResult,
-    ScratchDestroyResponse,
     ScratchGeometry,
     ScratchOp,
     ScratchRequest,
-    ScratchResponse,
     ScratchResult,
     parse_scratch_commit_request,
     parse_scratch_commit_response,
@@ -55,7 +52,6 @@ from eee_agent.houdini_bridge.scratch import (
 )
 from eee_agent.modeling.scratch_coordinator import (
     ScratchCoordinator,
-    ScratchError,
     ScratchSessionContext,
     ScratchToolContext,
     scratch_build,
@@ -854,7 +850,9 @@ class TestScratchCoordinator:
             return await coord.build(operations=[_op_create()])
 
         result = asyncio.run(run())
-        assert result["ok"] is True
+        # M2: a result with per-op errors reports ok=False (partial failure is
+        # not a clean success), while geometry is still surfaced as None.
+        assert result["ok"] is False
         assert result["geometry"] is None
         assert result["errors"] == ["node not found"]
 
@@ -1124,6 +1122,20 @@ class TestScratchCommitRequest:
             target_name="asset",
         )
         assert req.orientation_checks == ()
+
+    def test_unknown_orientation_check_key_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            ScratchCommitRequest.build(
+                request_id="req_commit_001",
+                deadline_ms=10000,
+                scene_epoch=42,
+                sandbox_id="run1",
+                target_parent_path="/obj",
+                target_name="asset",
+                orientation_checks=[
+                    {"component_id": "wheel", "expected_axe": "Y"}  # typo
+                ],
+            )
 
     def test_skip_structure_flag_round_trips(self) -> None:
         req = ScratchCommitRequest.build(

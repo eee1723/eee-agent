@@ -668,7 +668,9 @@ def test_runner_exception_becomes_internal_runtime_failure(
             assert failed.status is RunStatus.FAILED
             assert failed.failure_json is not None
             assert failed.failure_json["code"] == "internal.runtime_failure"
-            # Raw exception text never reaches the run record.
+            # H2: the exception TYPE is recorded for triage, but the raw message
+            # (which may carry secrets) never reaches the run record.
+            assert failed.failure_json["technical_detail_ref"] == "ValueError"
             assert secret not in str(failed.to_dict())
 
             replay = await service.replay(

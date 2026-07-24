@@ -1,6 +1,5 @@
 """Deterministic loop guardrail — steers the agent out of action thrash without
-relying on the model to self-police (it doesn't, per the trace: set_vex x6 +
-delete_node x6 on anchors).
+relying on the model to self-police.
 
 External/deterministic by design (the research-recommended pattern): a sliding
 window over recent MUTATIVE tool-call signatures extracted from the conversation
@@ -8,9 +7,11 @@ history each model call (checkpoint-safe — no instance state needed). When the
 same (tool, target) repeats past a threshold, append an escalating directive to the
 system message; on further recurrence, a hard "stop now" directive.
 
-A signature collapses a call to (tool, node, parm) so legitimate work isn't flagged:
-set_parms on the SAME node but DIFFERENT parms are distinct calls; set_vex / create /
-delete on the SAME target are the retry/thrash we want to catch.
+A signature collapses a call to (tool, target, detail) so legitimate work isn't
+flagged: scratch_build calls with DIFFERENT operation lists are distinct calls
+(build → observe → adjust iteration); the identical operation list repeated on
+the same sandbox, or scratch_commit retried against the same target, is the
+retry/thrash we want to catch.
 
 Tunables (env): EEE_LOOP_GUARD=true|false, EEE_LOOP_REPEAT (soft, default 3),
 EEE_LOOP_HARD (hard stop, default 5), EEE_LOOP_WINDOW (default 16).
@@ -32,12 +33,10 @@ from langchain.agents.middleware.types import (
 )
 from langchain_core.messages import SystemMessage
 
-# Only mutative/retry-prone tools are watched. Read-backs (work_status, geometry_stats)
-# are handled by context_trim; calling those often is not a loop.
-MUTATIVE = frozenset({
-    "delete_node", "create_node", "set_vex", "set_parms", "set_expression",
-    "cook_node", "connect_nodes",
-})
+# Only mutative/retry-prone tools are watched. Read-backs (scene_status,
+# query_scene, geometry_stats) are handled by context_trim; calling those
+# often is not a loop.
+MUTATIVE = frozenset({"scratch_build", "scratch_commit"})
 
 
 def is_enabled() -> bool:
@@ -51,24 +50,48 @@ def _int(env: str, default: int) -> int:
         return default
 
 
+def _ops_signature(ops: object) -> str:
+    """Collapse a scratch_build operations list to a stable, bounded signature."""
+    if not isinstance(ops, list):
+        return str(ops)[:60]
+    parts: list[str] = []
+    for op in ops:
+        if isinstance(op, dict):
+            parts.append(
+                "{}:{}".format(op.get("kind"), op.get("node_name") or op.get("source") or "")
+            )
+        else:
+            parts.append(str(op)[:20])
+    return ",".join(parts)[:120]
+
+
 def _sig(name, args) -> Optional[Tuple[str, str, str]]:
-    """Collapse a tool call to (tool, node, parm) so retries on the same target
-    are recognized while distinct legitimate calls are not."""
+    """Collapse a tool call to (tool, target, detail) so retries on the same
+    target are recognized while distinct legitimate calls are not."""
     if name not in MUTATIVE:
         return None
     args = args or {}
     if not isinstance(args, dict):
         return (str(name), str(args)[:60], "")
-    node = (args.get("node_path") or args.get("component_path")
-            or args.get("parent_path") or args.get("name") or "")
-    parm = args.get("parm") or ""
-    return (str(name), str(node), str(parm))
+    if name == "scratch_build":
+        return (name, _ops_signature(args.get("operations")), "")
+    # scratch_commit: the target path is the retry identity.
+    target = "{}/{}".format(args.get("target_parent_path") or "", args.get("target_name") or "")
+    return (name, target, "")
 
 
-def _recent_calls(messages: List[Any], limit: int) -> List[Tuple[str, str, str]]:
+def _iter_call_signatures(message: Any) -> List[Tuple[str, str, str]]:
+    """Yield (tool, target, detail) signatures for every mutative call on a
+    message — both well-formed ``tool_calls`` AND ``invalid_tool_calls``.
+
+    M3: invalid calls (malformed-args calls LangChain demoted) were previously
+    invisible here, so a model retry-storm of the SAME malformed scratch_build
+    never tripped the guard. An invalid call's ``args`` is a raw string (not a
+    dict); ``_sig`` already collapses that to a bounded string signature, so the
+    repeated-malformed-call case now registers like any other retry."""
     out: List[Tuple[str, str, str]] = []
-    for m in messages:
-        for tc in (getattr(m, "tool_calls", None) or []):
+    for attr in ("tool_calls", "invalid_tool_calls"):
+        for tc in (getattr(message, attr, None) or []):
             if isinstance(tc, dict):
                 nm, ar = tc.get("name"), tc.get("args")
             else:
@@ -76,6 +99,13 @@ def _recent_calls(messages: List[Any], limit: int) -> List[Tuple[str, str, str]]
             sg = _sig(nm, ar)
             if sg:
                 out.append(sg)
+    return out
+
+
+def _recent_calls(messages: List[Any], limit: int) -> List[Tuple[str, str, str]]:
+    out: List[Tuple[str, str, str]] = []
+    for m in messages:
+        out.extend(_iter_call_signatures(m))
     return out[-limit:]
 
 
@@ -104,12 +134,12 @@ class LoopGuardMiddleware(AgentMiddleware[AgentState[ResponseT], ContextT, Respo
         what = f"{tool}({node}{(' ' + parm) if parm else ''})"
         if n >= hard:
             return (f"[LOOP GUARD] You have called {what} {n} times. You MUST stop now: "
-                    "call save_hip and print your final summary. Do NOT call any more tools.")
+                    "print your final summary. Do NOT call any more tools.")
         if n >= soft:
             return (f"[LOOP GUARD] You've called {what} {n} times and it isn't working. "
-                    "STOP retrying it. Change approach (a different SOP, simplify the graph, "
-                    "or re-read the actual error and fix that line) — or, if genuinely "
-                    "blocked, save_hip and STOP with a clear summary.")
+                    "STOP retrying it. Change approach (different operations, simplify "
+                    "the graph, or re-read the actual error and fix that) — or, if "
+                    "genuinely blocked, STOP with a clear summary of what you tried.")
         return None
 
     def _maybe_steer(self, request: ModelRequest[ContextT]) -> ModelRequest[ContextT]:

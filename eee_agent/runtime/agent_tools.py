@@ -7,6 +7,7 @@ Tools in this module accept only model-safe values and call an injected
 from __future__ import annotations
 
 import json
+import logging
 import math
 from collections.abc import Mapping
 from typing import Any
@@ -15,7 +16,9 @@ from langchain.tools import ToolRuntime, tool
 
 from eee_agent.runtime.agent_context import PlainData, RuntimeToolContext
 
-_MAX_RESULT_BYTES = 16 * 1024
+_log = logging.getLogger("eee_agent.runtime.agent_tools")
+
+_MAX_TOOL_RESULT_BYTES = 16 * 1024
 _MAX_DEPTH = 8
 _MAX_ITEMS = 64
 _MAX_INT_DIGITS = 128
@@ -79,7 +82,7 @@ def _plain_value(
     custom iterator/accessor exception.
     """
     if budget is None:
-        budget = {"items": _MAX_ITEMS, "bytes": _MAX_RESULT_BYTES}
+        budget = {"items": _MAX_ITEMS, "bytes": _MAX_TOOL_RESULT_BYTES}
     if depth > _MAX_DEPTH:
         return True
     if budget["items"] <= 0:
@@ -179,7 +182,7 @@ def _finish(value: Any) -> dict[str, object]:
             "bridge.unavailable",
             "The read-only provider returned unsupported data.",
         )
-    while result_bytes > _MAX_RESULT_BYTES:
+    while result_bytes > _MAX_TOOL_RESULT_BYTES:
         largest = max(
             ((key, repr(item)) for key, item in result.items()),
             key=lambda pair: len(pair[1]),
@@ -212,12 +215,69 @@ async def _call(runtime: ToolRuntime, method: str, *args: object) -> dict[str, o
     try:
         provider_method = getattr(context.read_only, method)
         result = await provider_method(*args)
-    except Exception:
-        return _error(
-            "bridge.unavailable",
-            "The trusted read-only provider is unavailable.",
-        )
+    except Exception as exc:
+        # M1: surface a specific code + the real cause instead of collapsing
+        # every provider failure to the opaque bridge.unavailable. The model
+        # needs to distinguish "retry a transient timeout" from "a programmer
+        # error / bad data" to recover; logs get the structured code too.
+        return _provider_error(exc)
     return _finish(result)
+
+
+def _provider_error(exc: BaseException) -> dict[str, object]:
+    """Classify a provider exception into a bounded error code + safe message.
+
+    M1: previously every provider failure collapsed to the single opaque
+    ``bridge.unavailable``. Now the code distinguishes timeout / unreachable /
+    structured AgentException / other, so the model can decide whether to retry
+    and the log carries the structured code. The model-facing message stays
+    generic (the original exception text may contain sensitive detail and is
+    NOT returned to the model); the real cause is logged via _log.exception."""
+    import asyncio
+
+    from eee_agent.core import AgentException
+
+    # Record the real cause for operators regardless of classification.
+    _log.exception("read-only provider call failed")
+
+    if isinstance(exc, AgentException) and exc.error is not None:
+        # A structured error already carries a model-safe message_for_user.
+        err = exc.error
+        return {"ok": False, "code": err.code, "message": err.message_for_user}
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return _error(
+            "bridge.provider_timeout",
+            "The trusted read-only provider timed out. This is usually "
+            "transient — retry the call once.",
+        )
+    if _is_connection_error(exc):
+        return _error(
+            "bridge.provider_unreachable",
+            "Could not reach the trusted read-only provider (connection "
+            "error). This is usually transient — retry the call once.",
+        )
+    return _error(
+        "bridge.provider_error",
+        "The trusted read-only provider returned an error. Inspect the "
+        "runtime log for detail; adjust the request if it was malformed.",
+    )
+
+
+def _is_connection_error(exc: BaseException) -> bool:
+    """True for socket/connection-level failures (refused, reset, broken pipe)."""
+    name = type(exc).__name__
+    if name in {
+        "ConnectionError",
+        "ConnectionRefusedError",
+        "ConnectionResetError",
+        "ConnectionAbortedError",
+        "BrokenPipeError",
+    }:
+        return True
+    # OSError subtypes (e.g. socket.gaierror) carry connection-like text.
+    if isinstance(exc, OSError):
+        return True
+    return False
 
 
 def _valid_text(value: object, *, max_len: int = 512) -> str | None:

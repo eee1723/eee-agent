@@ -164,8 +164,58 @@ def test_provider_exception_is_bounded() -> None:
 
     tool = next(item for item in build_read_only_tools() if item.name == "scene_status")
     result = _run(tool.coroutine(runtime=_runtime(FailedProvider())))
-    assert result["code"] == "bridge.unavailable"
+    # M1: a generic provider error is now classified as bridge.provider_error
+    # (not the old collapsed bridge.unavailable), but the model-facing message
+    # still must NOT leak the raw exception text ("secret ...").
+    assert result["code"] == "bridge.provider_error"
     assert "secret" not in str(result)
+
+
+def test_provider_timeout_is_classified_distinctly() -> None:
+    """M1: timeouts get their own retryable code so the model knows to retry."""
+    import asyncio
+
+    class SlowProvider(_Provider):
+        async def scene_status(self):
+            raise asyncio.TimeoutError()
+
+    tool = next(item for item in build_read_only_tools() if item.name == "scene_status")
+    result = _run(tool.coroutine(runtime=_runtime(SlowProvider())))
+    assert result["code"] == "bridge.provider_timeout"
+    assert "transient" in result["message"].lower()
+
+
+def test_provider_connection_error_is_classified_distinctly() -> None:
+    """M1: connection errors get their own retryable code."""
+    class DeadProvider(_Provider):
+        async def scene_status(self):
+            raise ConnectionResetError("peer reset")
+
+    tool = next(item for item in build_read_only_tools() if item.name == "scene_status")
+    result = _run(tool.coroutine(runtime=_runtime(DeadProvider())))
+    assert result["code"] == "bridge.provider_unreachable"
+    # Raw exception text ("peer reset") must not leak into the model message.
+    assert "peer reset" not in str(result)
+
+
+def test_provider_agent_exception_reuses_structured_error() -> None:
+    """M1: a structured AgentException surfaces its own code/message_for_user."""
+    from eee_agent.core import AgentError, AgentException, ErrorCategory
+
+    class StructProvider(_Provider):
+        async def scene_status(self):
+            raise AgentException(
+                AgentError(
+                    code="bridge.auth_failed",
+                    category=ErrorCategory.PROVIDER_TRANSIENT,
+                    message_for_user="The bridge credentials were rejected.",
+                )
+            )
+
+    tool = next(item for item in build_read_only_tools() if item.name == "scene_status")
+    result = _run(tool.coroutine(runtime=_runtime(StructProvider())))
+    assert result["code"] == "bridge.auth_failed"
+    assert result["message"] == "The bridge credentials were rejected."
 
 
 def test_finish_fails_closed_when_custom_mapping_iteration_raises() -> None:

@@ -48,6 +48,7 @@ from eee_agent.changesets.service import (
     expired_error,
     summary_from_decision,
 )
+from eee_agent.config import DEFAULT_VISION_TIMEOUT_SECONDS
 from eee_agent.changesets.workspace_service import (
     WorkspaceFactProvider,
     WorkspaceHealth,
@@ -107,6 +108,7 @@ from eee_agent.runtime.database import RuntimeDatabase
 from eee_agent.runtime.events import EventStore, ReplayResult
 from eee_agent.runtime.knowledge import KnowledgeRuntime
 from eee_agent.runtime.models import (
+    TERMINAL_RUN_STATUSES,
     EventRecord,
     RetentionClass,
     RunRecord,
@@ -114,7 +116,7 @@ from eee_agent.runtime.models import (
     SessionRecord,
 )
 from eee_agent.runtime.paths import RuntimePaths
-from eee_agent.runtime.runs import RunRepository
+from eee_agent.runtime.runs import RunRepository, _INTERRUPTED_ERROR
 from eee_agent.runtime.sessions import EMPTY_SESSION_TITLE, SessionRepository
 from eee_agent.runtime.titles import derive_session_title
 
@@ -127,7 +129,13 @@ _T = TypeVar("_T")
 
 
 class _LegacyRunner(Protocol):
-    """Compatibility stream surface retained for injected test runners."""
+    """Structural stream surface accepted at the service boundary.
+
+    Production injects a real ``AgentRunner``; tests inject lightweight fakes
+    with the narrower signature below. Kept as a protocol (rather than
+    widening ``AgentRunner.stream``) so the production runner's contract
+    stays strict.
+    """
 
     def stream(
         self, *, session_id: str, user_input: str
@@ -167,26 +175,43 @@ class _CaptureProvider(Protocol):
 # Bounded wait for an active run to reach a terminal state during shutdown.
 _GRACEFUL_TIMEOUT_SECONDS = 10.0
 
-_TERMINAL_STATUSES = frozenset(
-    {RunStatus.COMPLETED, RunStatus.CANCELLED, RunStatus.FAILED}
-)
+_TERMINAL_STATUSES = TERMINAL_RUN_STATUSES
 
-# Generic failure surfaced at the service boundary. Raw exception text and
-# tracebacks never reach persisted Run/Event records; only this structured
-# error is stored and broadcast.
+# Generic failure surfaced at the service boundary. Used as the fallback when
+# no exception is available (e.g. reconciliation of an interrupted run). When a
+# real exception is caught, _runtime_failure_error() builds a richer AgentError
+# carrying the actual cause so failures are diagnosable instead of collapsing
+# to this one opaque string (H2).
 _RUNTIME_FAILURE_ERROR = AgentError(
     code="internal.runtime_failure",
     category=ErrorCategory.INTERNAL_INVARIANT,
     message_for_user="The runtime encountered an unexpected error.",
 )
 
-# Matches RunRepository's interrupted-run error so reconciliation emits the
-# identical structured error that the run row already stores.
-_INTERRUPTED_ERROR = AgentError(
-    code="runtime.interrupted",
-    category=ErrorCategory.INTERNAL_INVARIANT,
-    message_for_user="The previous Runtime process stopped before this run completed.",
-)
+
+def _runtime_failure_error(exc: BaseException | None) -> AgentError:
+    """Build a structured runtime-failure AgentError that preserves the real
+    cause for diagnostics. If ``exc`` is an AgentException its structured error
+    is reused verbatim; otherwise ONLY the exception TYPE NAME is recorded in
+    technical_detail_ref (e.g. "ValueError", "ConnectionError") — never the raw
+    message text, which may carry secrets/tokens and must not reach the
+    persisted run record or any client-facing replay. The full traceback lives
+    in the runtime log via the _log.exception call in _run (operators-only)."""
+    if exc is None:
+        return _RUNTIME_FAILURE_ERROR
+    if isinstance(exc, AgentException):
+        return exc.error
+    type_name = type(exc).__name__
+    return AgentError(
+        code="internal.runtime_failure",
+        category=ErrorCategory.INTERNAL_INVARIANT,
+        message_for_user="The runtime encountered an unexpected error.",
+        # Type name only: safe to persist, enough to triage, never leaks args.
+        technical_detail_ref=type_name,
+    )
+
+# RunRepository owns this error; reconciliation emits the identical structured
+# error that the run row already stores (imported, not duplicated).
 
 # B-1: diagnostic logger for swallowed exception paths in this module. Keep
 # all ``except Exception`` returns (capability unavailability is still
@@ -470,7 +495,7 @@ class RuntimeService:
         read_only_provider: ReadOnlyProvider | None = None,
         knowledge_runtime: KnowledgeRuntime | None = None,
         vision_provider: VisionProvider | None = None,
-        vision_timeout_seconds: float = 30.0,
+        vision_timeout_seconds: float = DEFAULT_VISION_TIMEOUT_SECONDS,
     ) -> None:
         self._database = database
         self._paths = paths
@@ -649,7 +674,7 @@ class RuntimeService:
         read_only_provider: ReadOnlyProvider | None = None,
         knowledge_runtime: KnowledgeRuntime | None = None,
         vision_provider: VisionProvider | None = None,
-        vision_timeout_seconds: float = 30.0,
+        vision_timeout_seconds: float = DEFAULT_VISION_TIMEOUT_SECONDS,
     ) -> AsyncIterator["RuntimeService"]:
         """Open a service in the approved order and close it in reverse.
 
@@ -761,12 +786,14 @@ class RuntimeService:
         try:
             active_id = await self._runs.active_run_id()
         except Exception:
+            _log.exception("active-run sweep: active_run_id lookup failed")
             return
         if active_id is None:
             return
         try:
             current = await self._runs.get(active_id)
         except Exception:
+            _log.exception("active-run sweep: run lookup failed (run=%s)", active_id)
             return
         if current.status in _TERMINAL_STATUSES:
             return
@@ -777,7 +804,10 @@ class RuntimeService:
         except asyncio.CancelledError:
             pass
         except Exception:
-            pass
+            _log.exception(
+                "active-run sweep: cancellation convergence failed (run=%s)",
+                active_id,
+            )
 
     # ------------------------------------------------------------------
     # session operations
@@ -1758,7 +1788,13 @@ class RuntimeService:
         except asyncio.CancelledError:
             pass
         except Exception:
-            pass
+            # M5: a convergence failure (e.g. a transient DB error) leaves the
+            # run non-terminal for the shutdown sweep / reconciliation to pick
+            # up. Log it so the stuck run is diagnosable instead of invisible.
+            _log.exception(
+                "run convergence failed (run=%s); left for reconciliation",
+                run_id,
+            )
 
     async def _build_modeling_context(
         self, session_id: str, run_id: str
@@ -1976,12 +2012,16 @@ class RuntimeService:
             # derived from the prompt. Fire-and-forget; a failure leaves the
             # placeholder intact and never affects the run result.
             self._maybe_autotitle_session(session_id, user_input)
-        except Exception:
+        except Exception as exc:
             # Any failure (a runner exception, or an invalid transition caused
             # by a concurrent stop) is decided by _handle_failure under the state
             # lock. A CancelledError is NOT caught here; it propagates to
             # _run_guarded, whose finally converges the run.
-            await self._handle_failure(session_id, run_id)
+            # H2: log the real cause BEFORE convergence runs (which may itself
+            # raise), so the original traceback is never lost. The structured
+            # error persisted to the run row is derived from this exception.
+            _log.exception("run failed (run=%s)", run_id)
+            await self._handle_failure(session_id, run_id, exc)
 
     def _maybe_autotitle_session(
         self, session_id: str, user_input: str
@@ -2044,9 +2084,13 @@ class RuntimeService:
                 raise
 
     async def _handle_failure(
-        self, session_id: str, run_id: str
+        self, session_id: str, run_id: str, exc: BaseException | None = None
     ) -> None:
-        error = _RUNTIME_FAILURE_ERROR
+        # H2: when a real exception caused the failure, build a richer AgentError
+        # carrying the cause (type/message/traceback) so the persisted run row and
+        # failure events are diagnosable. Falls back to the generic constant when
+        # no exception is available (e.g. interrupted-run reconciliation).
+        error = _runtime_failure_error(exc)
         # Decide failure-vs-stop and persist the full failure bundle (Failed
         # status + model.failed + run.state_changed + run.failed) in one
         # cancellation-deferred critical region, so a task cancel can never leave

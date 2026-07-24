@@ -7,6 +7,7 @@ Runtime code.
 """
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Sequence
 from typing import NotRequired, TypedDict
@@ -23,6 +24,8 @@ from eee_agent.harness import configure_deepagents_harness
 from eee_agent.model import build_model
 from eee_agent.system_prompt import build_system_prompt
 
+
+_log = logging.getLogger("eee_agent.app")
 
 _Middleware = AgentMiddleware[AgentState[object], None, object]
 
@@ -50,41 +53,44 @@ def build_agent(
     setup_tracing()
     model = build_model()
     middleware: list[_Middleware] = []
+    # tool_call_guard runs first: it promotes silently-dropped invalid tool
+    # calls into error replies so the model self-corrects instead of the run
+    # exiting on a malformed call (2026-07-24 incident). Without it the whole
+    # class of "provider streamed bad JSON args" failures end the run early.
+    try:
+        from eee_agent import tool_call_guard
+        if tool_call_guard.is_enabled():
+            middleware.append(tool_call_guard.InvalidToolCallGuardMiddleware())
+            _log.info("tool-call guard middleware enabled")
+    except Exception as e:  # noqa: BLE001
+        _log.warning("tool-call guard disabled: %s", e, exc_info=True)
     try:
         from eee_agent import context_trim
         if context_trim.is_enabled():
             middleware.append(context_trim.TrimReadbacksMiddleware())
-            print("[eee] read-back trimming middleware enabled", flush=True)
+            _log.info("read-back trimming middleware enabled")
     except Exception as e:  # noqa: BLE001
-        print(f"[eee] read-back trimming disabled: {e}", flush=True)
+        _log.warning("read-back trimming disabled: %s", e, exc_info=True)
     try:
         from eee_agent import loop_guard
         if loop_guard.is_enabled():
             middleware.append(loop_guard.LoopGuardMiddleware())
-            print("[eee] loop guard middleware enabled", flush=True)
+            _log.info("loop guard middleware enabled")
     except Exception as e:  # noqa: BLE001
-        print(f"[eee] loop guard disabled: {e}", flush=True)
+        _log.warning("loop guard disabled: %s", e, exc_info=True)
     try:
         from eee_agent import tool_error_trace
         middleware.append(tool_error_trace.ToolErrorTraceMiddleware())
-        print("[eee] tool-error tracing middleware enabled", flush=True)
+        _log.info("tool-error tracing middleware enabled")
     except Exception as e:  # noqa: BLE001
-        print(f"[eee] tool-error tracing disabled: {e}", flush=True)
+        _log.warning("tool-error tracing disabled: %s", e, exc_info=True)
     try:
         from eee_agent import context_store
         if context_store.is_enabled():
             middleware.append(context_store.build_middleware(model))
-            print("[eee] ContextSeek memory enabled (scope="
-                  f"{context_store.SCOPE})", flush=True)
+            _log.info("ContextSeek memory enabled (scope=%s)", context_store.SCOPE)
     except Exception as e:  # noqa: BLE001 — memory is optional, never block the agent
-        print(f"[eee] ContextSeek disabled: {e}", flush=True)
-    try:
-        from eee_agent import workflow_middleware
-        if workflow_middleware.is_enabled():
-            middleware.append(workflow_middleware.WorkflowStatusMiddleware())
-            print("[eee] workflow status middleware enabled", flush=True)
-    except Exception as e:  # noqa: BLE001
-        print(f"[eee] workflow status middleware disabled: {e}", flush=True)
+        _log.warning("ContextSeek disabled: %s", e, exc_info=True)
     # On-demand compaction: a `compact_conversation` tool so the agent can shed
     # history between components/tasks. Shares a StateBackend with the agent. The
     # built-in auto-summarization's 85%-of-window trigger is ineffective for us
@@ -97,9 +103,9 @@ def build_agent(
             from deepagents.middleware import create_summarization_tool_middleware
             backend = StateBackend()
             middleware.append(create_summarization_tool_middleware(model, backend))
-            print("[eee] compact_conversation tool enabled", flush=True)
+            _log.info("compact_conversation tool enabled")
         except Exception as e:  # noqa: BLE001
-            print(f"[eee] compact_conversation tool disabled: {e}", flush=True)
+            _log.warning("compact_conversation tool disabled: %s", e, exc_info=True)
             backend = None
     # Copy the caller sequence so later mutation cannot affect this graph.
     selected_tools = list(tools)
