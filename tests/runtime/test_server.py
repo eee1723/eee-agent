@@ -539,6 +539,26 @@ def test_wrong_token_returns_401(service, identity) -> None:
     _run(scenario())
 
 
+def test_multiple_authorization_headers_rejected(service, identity) -> None:
+    # A request with two Authorization values (even if one is a valid token)
+    # must be rejected before the token is inspected. _authenticate uses
+    # Headers.get_all and accepts exactly one credential; this locks the
+    # behavior so a future change cannot regress to accepting the first value.
+    from websockets.datastructures import Headers
+
+    async def scenario():
+        async with _server(service, identity) as s:
+            multi = Headers()
+            multi["Authorization"] = f"Bearer {identity.token}"
+            multi["Authorization"] = "Bearer attacker"
+            with pytest.raises(Exception):
+                async with connect(
+                    _uri(s), additional_headers=multi, compression=None,
+                ):
+                    pass
+    _run(scenario())
+
+
 def test_url_query_token_not_accepted(service, identity) -> None:
     async def scenario():
         async with _server(service, identity) as s:

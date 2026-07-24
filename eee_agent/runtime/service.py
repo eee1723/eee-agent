@@ -1692,21 +1692,30 @@ class RuntimeService:
     async def _run_guarded(
         self, session_id: str, run_id: str, user_input: str
     ) -> None:
+        # _run catches ordinary Exceptions itself (funneling them to
+        # _handle_failure); only a CancelledError (or a BaseException such as
+        # KeyboardInterrupt) propagates here. We must still guarantee a terminal
+        # state and in-memory cleanup on EVERY exit path — including cancellation
+        # — so the convergence + bookkeeping live in a finally. The finally must
+        # not 'return' (that would swallow a propagating BaseException silently);
+        # it also must not raise a secondary exception that masks the original.
         try:
             await self._run(session_id, run_id, user_input)
         finally:
-            # Guarantee a terminal state when the task ends, even if _run was
-            # cancelled (including double-cancel) or a failure handler yielded.
             # Convergence is cancellation-deferred so it cannot be interrupted.
             await self._ensure_terminal(session_id, run_id)
             # Drop the in-memory reference only after confirming the run is
             # terminal; a non-terminal residual is left for _shutdown's
-            # active-slot sweep / startup reconciliation.
+            # active-slot sweep / startup reconciliation. A _runs.get failure
+            # is logged but never re-raised from the finally.
             try:
                 current = await self._runs.get(run_id)
             except Exception:
-                return
-            if current.status in _TERMINAL_STATUSES:
+                _log.exception(
+                    "post-run status lookup failed (run=%s)", run_id
+                )
+                current = None
+            if current is not None and current.status in _TERMINAL_STATUSES:
                 # Best-effort scratch sandbox cleanup so a crashed/cancelled run
                 # does not leak its /obj/eee_scratch_<run> container. Failure
                 # is logged but never blocks the already-terminal run.

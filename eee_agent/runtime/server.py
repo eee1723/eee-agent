@@ -304,12 +304,15 @@ class RuntimeWebSocketServer:
     # ------------------------------------------------------------------
 
     async def _authenticate(self, connection, request):
-        # Read exactly one Authorization header. Multiple values raise and are
-        # rejected. Path, headers, and token are never logged.
+        # Accept exactly one Authorization header. Headers.get_all returns every
+        # value for the name (websockets Headers is a MultiDict); a request with
+        # zero or more than one credential is rejected before the token is
+        # inspected. Path, headers, and token are never logged.
         try:
-            auth = request.headers.get("Authorization")
+            values = request.headers.get_all("Authorization")
         except Exception:
-            auth = None
+            values = []
+        auth = values[0] if len(values) == 1 else None
         if not validate_bearer(auth, self._identity):
             return connection.respond(HTTPStatus.UNAUTHORIZED, "Unauthorized\n")
         return None
