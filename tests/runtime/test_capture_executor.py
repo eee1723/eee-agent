@@ -762,3 +762,16 @@ def test_capture_restart_performs_no_replay_and_starts_clean(tmp_path: Path) -> 
     result = restarted_executor.capture(_request(restarted_adapter, tmp_path))
     assert result.sha256 == hashlib.sha256(_FAKE_PNG).hexdigest()
     assert _capture_nodes(restarted_adapter._hou._nodes) == []  # type: ignore[attr-defined]
+
+
+def test_verify_capture_file_rejects_oversized_png(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from houdini_side import changeset_executor as executor_module
+
+    png = tmp_path / "big.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 1024)
+    monkeypatch.setattr(executor_module, "_MAX_PNG_BYTES", 512)
+    with pytest.raises(HoudiniAdapterError) as exc:
+        executor_module._verify_capture_file(png)
+    assert exc.value.code == "capture.render_failed"

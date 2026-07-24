@@ -15,6 +15,7 @@ from eee_agent.houdini_bridge.auth import (
     BridgeTokenError,
 )
 from eee_agent.houdini_bridge.client import BridgeClient, BridgeClientError
+from eee_agent.houdini_bridge.contracts import MAX_DEADLINE_MS, MIN_DEADLINE_MS
 from eee_agent.houdini_bridge.workspaces import (
     WorkspaceInspectRequest,
     WorkspaceInspectResult,
@@ -39,7 +40,7 @@ class BridgeWorkspaceFactProvider:
         self._state_dir = Path(state_dir)
         if type(deadline_ms) is not int:
             raise TypeError("deadline_ms must be an exact integer")
-        if deadline_ms < 1 or deadline_ms > 30_000:
+        if deadline_ms < MIN_DEADLINE_MS or deadline_ms > MAX_DEADLINE_MS:
             raise ValueError("deadline_ms must be in 1..30000")
         self._deadline_ms = deadline_ms
 

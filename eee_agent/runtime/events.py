@@ -8,6 +8,7 @@ from eee_agent.core import AgentError, AgentException, ErrorCategory, IdKind, re
 from eee_agent.core.events import DomainEvent, JsonValue
 from eee_agent.runtime.database import RuntimeDatabase
 from eee_agent.runtime.models import (
+    TERMINAL_RUN_STATUSES,
     EventRecord,
     RetentionClass,
     RunRecord,
@@ -21,10 +22,8 @@ from eee_agent.runtime.sessions import _SESSION_COLUMNS, _row_to_session
 
 _MAX_PAYLOAD_BYTES = 262_144
 _MAX_REPLAY_LIMIT = 1000
-_TERMINAL_RUN_VALUES = (
-    RunStatus.COMPLETED.value,
-    RunStatus.CANCELLED.value,
-    RunStatus.FAILED.value,
+_TERMINAL_RUN_VALUES = tuple(
+    status.value for status in RunStatus if status in TERMINAL_RUN_STATUSES
 )
 _TERMINAL_PLACEHOLDERS = ",".join("?" for _ in _TERMINAL_RUN_VALUES)
 

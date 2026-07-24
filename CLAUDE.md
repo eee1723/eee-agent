@@ -15,7 +15,7 @@ the agent now builds iteratively in an isolated `/obj/eee_scratch_<run>`
 container (`scratch_build`), observes cooked results, and promotes verified
 geometry through four hard gates (`scratch_commit` → bake / structure /
 orientation / health) inside one undo group. `propose_modeling` is retired
-from the agent graph (module retained). Full offline gate: 3446 passed, 12
+from the agent graph (module retained). Full offline gate: 3458 passed, 11
 skipped. The remaining acceptance gate is a real-Houdini end-to-end smoke of
 the full build → observe → commit cycle.
 

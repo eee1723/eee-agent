@@ -343,3 +343,16 @@ def test_snapshot_boundary_parses_control_event_and_rejects_bad_seq() -> None:
     bad["payload"] = {"snapshot_seq": True}
     with pytest.raises(PanelClientError):
         snapshot_boundary(bad)
+
+
+def test_build_command_knowledge_rebuild() -> None:
+    assert '"type":"knowledge.rebuild"' in build_command(
+        "req_kb", "knowledge.rebuild", {}
+    )
+    assert '"hfs":"C:/Houdini21"' in build_command(
+        "req_kb2", "knowledge.rebuild", {"hfs": "C:/Houdini21"}
+    )
+    with pytest.raises(PanelClientError):
+        build_command("req_kb3", "knowledge.rebuild", {"hfs": 3})
+    with pytest.raises(PanelClientError):
+        build_command("req_kb4", "knowledge.rebuild", {"unknown": 1})

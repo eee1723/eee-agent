@@ -21,7 +21,6 @@ the service still owns no transport or unrestricted execution surface.
 
 from __future__ import annotations
 
-import hashlib
 import inspect
 from copy import deepcopy
 from collections.abc import Callable
@@ -55,7 +54,7 @@ from eee_agent.core import AgentError, AgentException, ErrorCategory
 from eee_agent.core.ids import IdKind, new_id
 from eee_agent.houdini_bridge.changesets import PreflightResult
 from eee_agent.houdini_bridge.contracts import SceneBinding
-from eee_agent.runtime.models import EventRecord, canonical_json_dumps
+from eee_agent.runtime.models import EventRecord, canonical_digest, canonical_json_dumps
 
 # Conservative pending-approval lifetime. Every allowed decision remains
 # per-ChangeSet and explicit; a short window bounds how long a stale approval
@@ -914,7 +913,7 @@ def _failed_postconditions(changeset: ChangeSet) -> tuple[ConditionResult, ...]:
 
 
 def _evidence_digest(value: object) -> str:
-    return hashlib.sha256(canonical_json_dumps(value).encode("utf-8")).hexdigest()
+    return canonical_digest(value)
 
 
 def _recovery_from_completion(

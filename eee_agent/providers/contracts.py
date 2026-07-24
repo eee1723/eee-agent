@@ -23,17 +23,6 @@ class ThinkingEffort(StrEnum):
     MAX = "max"
 
 
-class ModelRole(StrEnum):
-    PRIMARY = "primary"
-    VISION = "vision"
-
-
-class VerificationStatus(StrEnum):
-    UNVERIFIED = "unverified"
-    VERIFIED = "verified"
-    INVALID = "invalid"
-
-
 @dataclass(frozen=True, slots=True)
 class ModelCapabilities:
     streaming: bool
@@ -79,36 +68,6 @@ class ModelProfile:
             raise ValueError("max_output_tokens must be positive")
         if self.thinking_enabled and not self.capabilities.thinking:
             raise ValueError("thinking cannot be enabled for a non-thinking profile")
-
-
-@dataclass(frozen=True, slots=True)
-class RoleBindings:
-    primary_profile_id: str
-    vision_profile_id: str | None = None
-
-    def __post_init__(self) -> None:
-        if not self.primary_profile_id.strip():
-            raise ValueError("primary_profile_id must not be empty")
-
-    def profile_for(self, role: ModelRole) -> str | None:
-        if role is ModelRole.PRIMARY:
-            return self.primary_profile_id
-        return self.vision_profile_id
-
-
-@dataclass(frozen=True, slots=True)
-class VerificationCheck:
-    name: str
-    passed: bool
-    detail: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class ModelVerification:
-    status: VerificationStatus
-    requested_model_name: str
-    actual_model_name: str | None
-    checks: tuple[VerificationCheck, ...]
 
 
 @dataclass(frozen=True, slots=True)

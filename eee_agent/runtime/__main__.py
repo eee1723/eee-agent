@@ -40,13 +40,14 @@ from eee_agent.runtime.lock import RuntimeLock
 from eee_agent.runtime.paths import RuntimePaths
 from eee_agent.runtime.protocol import PROTOCOL
 from eee_agent.runtime.server import RuntimeWebSocketServer
-from eee_agent.runtime.service import RuntimeService
+from eee_agent.runtime.service import RuntimeService, _GRACEFUL_TIMEOUT_SECONDS
 from eee_agent.vision.router import VisionProvider
 
 # The first implementation binds 127.0.0.1 exclusively (spec §3.3).
 _DEFAULT_HOST = "127.0.0.1"
 _DEFAULT_PORT = 0
-_DEFAULT_GRACEFUL_TIMEOUT = 10.0
+# The service owns the graceful-shutdown bound; the CLI default mirrors it.
+_DEFAULT_GRACEFUL_TIMEOUT = _GRACEFUL_TIMEOUT_SECONDS
 
 # Signals that request a graceful shutdown (POSIX only; Windows falls back to
 # KeyboardInterrupt / task cancellation — see :func:`_await_shutdown`).
@@ -182,12 +183,12 @@ async def _serve_until_shutdown(
 
 def _vision_settings() -> tuple[VisionProvider | None, float]:
     """Resolve one consistent provider/timeout snapshot from the environment."""
-    from eee_agent.config import vision_config
+    from eee_agent.config import DEFAULT_VISION_TIMEOUT_SECONDS, vision_config
     from eee_agent.vision.provider import build_vision_provider
 
     config = vision_config()
     if config is None:
-        return None, 30.0
+        return None, DEFAULT_VISION_TIMEOUT_SECONDS
     return build_vision_provider(config), config.timeout_seconds
 
 

@@ -8,7 +8,6 @@ modes, Bridge calls, or Apply authority.
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import re
 from collections.abc import Mapping, Sequence
@@ -16,6 +15,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TypeVar
 
+from eee_agent.core.strict_json import load_strict_json
 from eee_agent.runtime.models import canonical_json_dumps
 
 MAX_MODELING_JSON_BYTES = 256 * 1024
@@ -1150,35 +1150,8 @@ class RepairTicket:
         )
 
 
-class _DuplicateKeyError(ValueError):
-    pass
-
-
-def _reject_duplicate_keys(
-    pairs: list[tuple[str, object]],
-) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise _DuplicateKeyError("duplicate object key")
-        result[key] = value
-    return result
-
-
 def _load_strict_json(raw: str | bytes, label: str) -> object:
-    if type(raw) is str:
-        data = raw.encode("utf-8")
-    elif type(raw) is bytes:
-        data = raw
-    else:
-        raise TypeError(f"{label} must be str or bytes")
-    if len(data) > MAX_MODELING_JSON_BYTES:
-        raise ValueError(f"{label} exceeds the maximum size")
-    try:
-        text = data.decode("utf-8")
-        return json.loads(text, object_pairs_hook=_reject_duplicate_keys)
-    except (UnicodeDecodeError, json.JSONDecodeError, _DuplicateKeyError) as exc:
-        raise ValueError(f"{label} is not strict JSON") from exc
+    return load_strict_json(raw, label, max_bytes=MAX_MODELING_JSON_BYTES)
 
 
 def _load_strict_mapping(raw: str | bytes, label: str) -> dict[str, object]:

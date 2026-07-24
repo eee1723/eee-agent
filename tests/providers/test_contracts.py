@@ -7,16 +7,11 @@ from eee_agent.core.errors import AgentException
 from eee_agent.providers.contracts import (
     ModelCapabilities,
     ModelProfile,
-    ModelRole,
-    ModelVerification,
     ProviderConnection,
     ProviderKind,
     ResolvedModel,
-    RoleBindings,
     ThinkingEffort,
     Transport,
-    VerificationCheck,
-    VerificationStatus,
 )
 from eee_agent.providers.registry import ProviderRegistry
 from eee_agent.providers.secrets import resolve_secret
@@ -88,22 +83,6 @@ def test_registry_rejects_profile_connection_mismatch() -> None:
 
     with pytest.raises(ValueError, match="connection_id"):
         registry.resolve(connection(), wrong)
-
-
-def test_role_bindings_and_verification_are_provider_neutral() -> None:
-    bindings = RoleBindings(primary_profile_id="primary", vision_profile_id=None)
-    verification = ModelVerification(
-        status=VerificationStatus.VERIFIED,
-        requested_model_name="deepseek-v4-pro",
-        actual_model_name="deepseek-v4-pro",
-        checks=(
-            VerificationCheck(name="tool_replay", passed=True, detail=None),
-        ),
-    )
-
-    assert bindings.profile_for(ModelRole.PRIMARY) == "primary"
-    assert bindings.profile_for(ModelRole.VISION) is None
-    assert verification.status is VerificationStatus.VERIFIED
 
 
 def test_resolve_secret_rejects_unsupported_prefix() -> None:
@@ -210,13 +189,6 @@ def test_model_profile_rejects_thinking_without_capability() -> None:
             ),
             thinking_enabled=True,
         )
-
-
-@pytest.mark.parametrize("value", ["", "   ", "\t"])
-def test_role_bindings_rejects_empty_primary(value) -> None:
-    with pytest.raises(ValueError, match="must not be empty"):
-        RoleBindings(primary_profile_id=value)
-
 
 def test_resolved_value_objects_are_frozen_and_slotted() -> None:
     registry = ProviderRegistry()

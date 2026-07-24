@@ -1,8 +1,9 @@
 """Stable request/response contracts and error codes for the knowledge service.
 
 All DTOs are frozen and serialize through ``to_dict()``. ``KnowledgeService``
-returns these directly; the LangChain tool adapter (Stage 6) only validates
-inputs, converts DTOs to dicts and maps exceptions to these codes.
+returns these directly; the Runtime facade (``eee_agent.runtime.knowledge``)
+and the LangChain tool adapter (``eee_agent.runtime.agent_tools``) validate
+inputs, convert DTOs to dicts, and map exceptions to these codes.
 """
 
 from __future__ import annotations

@@ -6,8 +6,6 @@ Houdini module and provide no scene mutation surface.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -16,18 +14,20 @@ from eee_agent.changesets.contracts import WorkspaceManifest
 from eee_agent.core.ids import IdKind, require_id
 from eee_agent.houdini_bridge.changesets import _decode_manifest
 from eee_agent.houdini_bridge.contracts import (
-    MAX_MESSAGE_BYTES,
+    MAX_DEADLINE_MS,
+
     PROTOCOL,
     BridgeError,
     SceneBinding,
+    _load_strict_json,
 )
-from eee_agent.runtime.models import canonical_json_dumps
+from eee_agent.runtime.models import canonical_digest, canonical_json_dumps
 
 WORKSPACE_V1 = "workspace.v1"
 WORKSPACE_INSPECT_OPERATION = "workspace.inspect"
 
 _MAX_REQUEST_ID_LEN = 128
-_MAX_DEADLINE_MS = 30_000
+_MAX_DEADLINE_MS = MAX_DEADLINE_MS
 _MAX_NODE_PATH_LEN = 1024
 _MAX_NODE_TYPE_LEN = 256
 _MAX_IDENTIFIER_LEN = 128
@@ -105,35 +105,6 @@ class WorkspaceInspectError(Exception):
 
 class WorkspaceInspectLimitError(ValueError):
     """A locally constructed result exceeds its aggregate byte budget."""
-
-
-class _DuplicateKeyError(ValueError):
-    pass
-
-
-def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    out: dict[str, object] = {}
-    for key, value in pairs:
-        if key in out:
-            raise _DuplicateKeyError("duplicate JSON key")
-        out[key] = value
-    return out
-
-
-def _load_strict_json(raw: object, label: str) -> object:
-    if type(raw) is str:
-        data = raw.encode("utf-8")
-    elif type(raw) is bytes:
-        data = raw
-    else:
-        raise TypeError(f"{label} must be an exact str or bytes")
-    if len(data) > MAX_MESSAGE_BYTES:
-        raise ValueError(f"{label} exceeds the maximum message size")
-    try:
-        text = data.decode("utf-8")
-        return json.loads(text, object_pairs_hook=_reject_duplicate_keys)
-    except (UnicodeDecodeError, json.JSONDecodeError, _DuplicateKeyError) as exc:
-        raise ValueError(f"{label} must be strict JSON") from exc
 
 
 def _exact_dict(value: object, label: str) -> dict[str, object]:
@@ -330,7 +301,7 @@ def _result_revision(
         "mode": mode,
         "observations": [item.to_dict() for item in observations],
     }
-    return hashlib.sha256(canonical_json_dumps(payload).encode("utf-8")).hexdigest()
+    return canonical_digest(payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -431,7 +402,6 @@ class WorkspaceInspectResult:
         binding: SceneBinding,
         mode: str,
         observations: Sequence[WorkspaceNodeObservation],
-        scene_may_have_changed: bool = False,
     ) -> "WorkspaceInspectResult":
         checked_mode = _mode(mode)
         normalized = _normalize_observations(
@@ -442,7 +412,6 @@ class WorkspaceInspectResult:
             mode=checked_mode,
             observations=normalized,
             observed_revision=_result_revision(binding, checked_mode, normalized),
-            scene_may_have_changed=scene_may_have_changed,
         )
 
     def to_dict(self) -> dict[str, object]:

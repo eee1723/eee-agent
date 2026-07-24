@@ -2,8 +2,9 @@
 
 This module deliberately imports no Qt, SQLite, agent graph, Bridge transport,
 or Houdini module. It validates the existing Runtime identity handoff, builds
-the small read-only command subset used by Task 17-A, and tracks reconnect
-cursors without owning persistence.
+the bounded panel command subset (protocol constants mirrored from
+``eee_agent.runtime.protocol``), and tracks reconnect cursors without owning
+persistence.
 """
 
 from __future__ import annotations
@@ -19,8 +20,16 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
 
-PROTOCOL = "eee.runtime/1"
-MAX_MESSAGE_BYTES = 1_048_576
+from eee_agent.core.strict_json import DuplicateKeyError, reject_duplicate_keys
+from eee_agent.runtime import protocol as _protocol
+
+# Mirrored from the Runtime protocol module (imported, never re-declared) so a
+# protocol bump cannot silently desynchronize the panel.
+PROTOCOL = _protocol.PROTOCOL
+MAX_MESSAGE_BYTES = _protocol.MAX_MESSAGE_BYTES
+# Panel-side mirror of the server's ``sessions.EMPTY_SESSION_TITLE`` (kept
+# Qt/SQLite-free here; a drift-guard test asserts the two stay equal).
+EMPTY_SESSION_TITLE = "New session"
 RUNTIME_DISCOVERY_FILENAME = "runtime.json"
 RUNTIME_TOKEN_FILENAME = "runtime.token"
 _DISCOVERY_FIELDS = frozenset(
@@ -59,6 +68,7 @@ _PANEL_COMMANDS = frozenset(
         "workspace.create",
         "workspace.bind",
         "workspace.inspect",
+        "knowledge.rebuild",
     }
 )
 
@@ -67,17 +77,9 @@ class PanelClientError(ValueError):
     """Bounded panel-client failure that never includes a credential."""
 
 
-class _DuplicateKeyError(ValueError):
-    pass
-
-
-def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise _DuplicateKeyError("duplicate key")
-        result[key] = value
-    return result
+# Shared dup-key-rejecting hook (single authority: eee_agent.core.strict_json).
+_DuplicateKeyError = DuplicateKeyError
+_reject_duplicate_keys = reject_duplicate_keys
 
 
 def _strict_json(raw: str | bytes, *, label: str) -> object:
@@ -325,6 +327,10 @@ def _validate_panel_payload(command_type: str, payload: dict) -> None:
             )
             and _valid_nullable_epoch(payload["expected_scene_epoch"])
         )
+    elif command_type == "knowledge.rebuild":
+        valid = _exact_keys(payload, set()) or (
+            _exact_keys(payload, {"hfs"}) and type(payload["hfs"]) is str
+        )
     if not valid:
         raise PanelClientError("Runtime command payload is invalid.")
 
@@ -450,7 +456,7 @@ def choose_empty_placeholder(
             raise PanelClientError("Runtime Session list is invalid.")
         if (
             item.get("status") == "active"
-            and item.get("title") == "New session"
+            and item.get("title") == EMPTY_SESSION_TITLE
         ):
             placeholder = item
     return None if placeholder is None else MappingProxyType(dict(placeholder))

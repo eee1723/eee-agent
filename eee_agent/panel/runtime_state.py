@@ -10,6 +10,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from eee_agent.panel.client_state import PanelClientError
+from eee_agent.runtime.models import TOOL_RESULT_PREVIEW_CHARS
 
 _TERMINAL_RUN_STATES = frozenset({"Completed", "Cancelled", "Failed"})
 _SESSION_STATES = frozenset({"active", "archived"})
@@ -629,7 +630,7 @@ class RuntimePanelState:
                 if event_type == "tool.completed":
                     content = payload.get("content")
                     if type(content) is str:
-                        detail = content[:600]
+                        detail = content[:TOOL_RESULT_PREVIEW_CHARS]
                     status = "done"
                 self._activity.append(
                     {"type": event_type, "name": name, "detail": detail}

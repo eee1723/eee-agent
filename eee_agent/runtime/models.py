@@ -1,16 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
-import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
-from types import MappingProxyType
-from typing import cast
 
+from eee_agent.core import events as _events
 from eee_agent.core.ids import IdKind, require_id
+from eee_agent.core.strict_json import DuplicateKeyError, reject_duplicate_keys
 
 # Namespaced event type grammar, matching Foundation DomainEvent exactly.
 _EVENT_TYPE_RE = re.compile(r"[a-z0-9_]+(?:\.[a-z0-9_]+)+")
@@ -32,6 +32,13 @@ class RunStatus(StrEnum):
     CANCELLED = "Cancelled"
     RETRYING = "Retrying"
     FAILED = "Failed"
+
+
+# Single authority for the terminal Run statuses; repositories, the event
+# store, and the service all derive from this set.
+TERMINAL_RUN_STATUSES = frozenset(
+    {RunStatus.COMPLETED, RunStatus.CANCELLED, RunStatus.FAILED}
+)
 
 
 class RetentionClass(StrEnum):
@@ -98,63 +105,12 @@ def _require_utc_aware(field: str, value: datetime) -> datetime:
 
 
 # --- Canonical JSON freeze/thaw (Foundation strictness) --------------------
-# Mirrors eee_agent.core.events: exact primitive types (bool stays bool),
-# finite floats, exact-string dict keys, cycle rejection, and TypeError on any
-# non-JSON value. Lives here so EventStore and the records share one helper.
+# The single canonical implementation lives in ``eee_agent.core.events``;
+# imported here so EventStore, the records, and existing consumers of this
+# module share one helper.
 
-
-def freeze_json(value: object) -> object:
-    return _freeze(value, set())
-
-
-def _freeze(value: object, active: set[int]) -> object:
-    # Direct exact-type branches (no cached type() local) so mypy narrows each
-    # branch: math.isfinite sees a float, dicts expose .items, lists iterate.
-    if (
-        type(value) is None.__class__
-        or type(value) is str
-        or type(value) is bool
-        or type(value) is int
-    ):
-        return value
-    if type(value) is float:
-        if not math.isfinite(value):
-            raise ValueError("json float values must be finite")
-        return value
-    if type(value) is dict:
-        data = cast(dict[object, object], value)
-        identity = id(value)
-        if identity in active:
-            raise ValueError("json value must not contain a cycle")
-        active.add(identity)
-        try:
-            frozen: dict[str, object] = {}
-            for key, item in data.items():
-                if type(key) is not str:
-                    raise TypeError("json dict keys must be exact strings")
-                frozen[key] = _freeze(item, active)
-            return MappingProxyType(frozen)
-        finally:
-            active.discard(identity)
-    if type(value) is list:
-        items = cast(list[object], value)
-        identity = id(value)
-        if identity in active:
-            raise ValueError("json value must not contain a cycle")
-        active.add(identity)
-        try:
-            return tuple(_freeze(item, active) for item in items)
-        finally:
-            active.discard(identity)
-    raise TypeError(f"unsupported JSON value type: {type(value).__name__}")
-
-
-def thaw_json(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {key: thaw_json(item) for key, item in value.items()}
-    if type(value) is tuple:
-        return [thaw_json(item) for item in value]
-    return value
+freeze_json = _events.freeze_json
+thaw_json = _events.thaw_json
 
 
 def canonical_json_dumps(value: object) -> str:
@@ -178,15 +134,27 @@ def canonical_json_dumps(value: object) -> str:
 def canonical_json_loads(text: object) -> object:
     """Parse canonical JSON text back into plain Python JSON values.
 
+    Rejects duplicate object keys at any depth (mirroring the strict writer).
     The result is plain (not frozen); callers feed it back into a record
     constructor, which re-validates and deep-freezes it.
     """
     if type(text) is not str:
         raise TypeError("canonical JSON text must be an exact string")
     try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
+        return json.loads(text, object_pairs_hook=reject_duplicate_keys)
+    except (DuplicateKeyError, json.JSONDecodeError) as exc:
         raise ValueError(f"invalid canonical JSON text: {exc}") from exc
+
+
+# Tool-result preview cap for run-activity rendering. Shared by the agent
+# runner (event payloads) and the runtime panel (activity view) so the two
+# never drift.
+TOOL_RESULT_PREVIEW_CHARS = 600
+
+
+def canonical_digest(value: object) -> str:
+    """SHA-256 hex digest of a value's canonical JSON (single authority)."""
+    return hashlib.sha256(canonical_json_dumps(value).encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

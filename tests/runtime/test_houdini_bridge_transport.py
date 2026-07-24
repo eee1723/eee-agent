@@ -42,7 +42,12 @@ from eee_agent.houdini_bridge.workspaces import (
     WorkspaceInspectResult,
 )
 from eee_agent.houdini_bridge.queue import MainThreadReadQueue
-from houdini_side.secure_bridge import BridgeServer, HoudiniSceneAdapter
+from houdini_side.secure_bridge import (
+    BridgeServer,
+    HoudiniAdapterError,
+    HoudiniSceneAdapter,
+    _QueuedError,
+)
 
 
 # --------------------------------------------------------------------------
@@ -1352,3 +1357,46 @@ async def test_normal_request_response_survives_disconnect_watch(tmp_path: Path)
         await client.close()
     finally:
         await harness.stop()
+
+
+# ==========================================================================
+# technical_detail_ref survives the queue error mapping
+# ==========================================================================
+
+
+@async_test
+async def test_adapter_error_technical_detail_ref_reaches_envelope(
+    tmp_path: Path,
+) -> None:
+    class _FailingQueue:
+        def submit(self, *args: object, **kwargs: object) -> object:
+            raise HoudiniAdapterError(
+                code="changeset.policy_denied",
+                category="policy",
+                message_for_user="The ChangeSet violates the scene policy.",
+                retryable=False,
+                technical_detail_ref="policy:critical_write",
+            )
+
+    adapter, _hou = _make_adapter(selected=[_geo_node()])
+    server = BridgeServer(
+        adapter=adapter,
+        identity=create_bridge_identity(),
+        state_dir=tmp_path,
+        queue=_FailingQueue(),  # type: ignore[arg-type]
+    )
+    result = await server._run_on_queue("req_ref", 1000, lambda: None)
+    assert isinstance(result, _QueuedError)
+    assert result.technical_detail_ref == "policy:critical_write"
+    envelope = server._error_envelope(
+        "req_ref",
+        code=result.code,
+        category=result.category,
+        message_for_user=result.message_for_user,
+        retryable=result.retryable,
+        technical_detail_ref=result.technical_detail_ref,
+    )
+    payload = json.loads(envelope.decode("utf-8"))
+    assert (
+        payload["error"]["technical_detail_ref"] == "policy:critical_write"
+    )

@@ -28,6 +28,23 @@ class VisionConfig:
     timeout_seconds: float
 
 
+# Single authority for per-provider default models. ``llm_config`` accepts the
+# full table; ``vision_config`` accepts only providers whose LangChain chat
+# adapter is known to accept image input (DeepSeek is excluded).
+_DEFAULT_MODELS = {
+    "deepseek": "deepseek-v4-pro",
+    "anthropic": "claude-sonnet-5",
+    "openai": "gpt-4.1",
+}
+_VISION_PROVIDERS = frozenset({"anthropic", "openai"})
+
+# Advisory-Vision request timeout bounds (seconds). Imported by the runtime
+# wiring and the vision router so the default lives in exactly one place.
+DEFAULT_VISION_TIMEOUT_SECONDS = 30.0
+MIN_VISION_TIMEOUT_SECONDS = 0.1
+MAX_VISION_TIMEOUT_SECONDS = 120.0
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -42,14 +59,9 @@ def _env_bool(name: str, default: bool) -> bool:
 
 def llm_config() -> LlmConfig:
     provider = os.getenv("EEE_LLM_PROVIDER", "deepseek").strip().lower()
-    defaults = {
-        "deepseek": "deepseek-v4-pro",
-        "anthropic": "claude-sonnet-5",
-        "openai": "gpt-4.1",
-    }
-    if provider not in defaults:
+    if provider not in _DEFAULT_MODELS:
         raise ValueError(f"unknown EEE_LLM_PROVIDER: {provider!r}")
-    model = os.getenv("EEE_LLM_MODEL") or defaults[provider]
+    model = os.getenv("EEE_LLM_MODEL") or _DEFAULT_MODELS[provider]
     thinking_enabled = _env_bool("EEE_LLM_THINKING", provider == "deepseek")
     _effort_env = (os.getenv("EEE_LLM_EFFORT") or "").strip().lower()
     effort = _effort_env or ("max" if provider == "deepseek" else None)
@@ -80,13 +92,9 @@ def vision_config() -> VisionConfig | None:
     provider = (os.getenv("EEE_VISION_PROVIDER") or "").strip().lower()
     if not provider:
         return None
-    defaults = {
-        "anthropic": "claude-sonnet-5",
-        "openai": "gpt-4.1",
-    }
-    if provider not in defaults:
+    if provider not in _VISION_PROVIDERS:
         raise ValueError(f"unknown EEE_VISION_PROVIDER: {provider!r}")
-    model = (os.getenv("EEE_VISION_MODEL") or defaults[provider]).strip()
+    model = (os.getenv("EEE_VISION_MODEL") or _DEFAULT_MODELS[provider]).strip()
     if not model:
         raise ValueError("EEE_VISION_MODEL must not be empty")
     try:
@@ -98,10 +106,14 @@ def vision_config() -> VisionConfig | None:
     if not 1 <= max_image_bytes <= 16_777_216:
         raise ValueError("EEE_VISION_MAX_IMAGE_BYTES must be between 1 and 16777216")
     try:
-        timeout_seconds = float(os.getenv("EEE_VISION_TIMEOUT_SECONDS", "30"))
+        timeout_seconds = float(
+            os.getenv(
+                "EEE_VISION_TIMEOUT_SECONDS", str(DEFAULT_VISION_TIMEOUT_SECONDS)
+            )
+        )
     except ValueError:
         raise ValueError("EEE_VISION_TIMEOUT_SECONDS must be a number") from None
-    if not 0.1 <= timeout_seconds <= 120.0:
+    if not MIN_VISION_TIMEOUT_SECONDS <= timeout_seconds <= MAX_VISION_TIMEOUT_SECONDS:
         raise ValueError("EEE_VISION_TIMEOUT_SECONDS must be between 0.1 and 120")
     return VisionConfig(
         provider=provider,
@@ -120,7 +132,7 @@ def recursion_limit() -> int:
 
     Default 999 — generous headroom for long-horizon procedural modeling and for
     the recommended Claude swap (DeepSeek V4 Pro tends to over-iterate near the
-    old 120 cap; see CLAUDE.md "Known limitation"). Lower if the agent loops."""
+    old 120 cap). Lower if the agent loops."""
     return int(os.getenv("EEE_RECURSION_LIMIT", "999"))
 
 

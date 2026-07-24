@@ -108,7 +108,6 @@ def _result(**overrides: object) -> WorkspaceInspectResult:
         "binding": _binding(),
         "mode": "selection",
         "observations": observations,
-        "scene_may_have_changed": False,
     }
     values.update(overrides)
     return WorkspaceInspectResult.build(**values)  # type: ignore[arg-type]
@@ -270,7 +269,13 @@ def test_result_rejects_duplicate_ids_paths_bad_revision_and_uncertain_scene() -
             scene_may_have_changed=False,
         )
     with pytest.raises(ValueError):
-        _result(scene_may_have_changed=True)
+        WorkspaceInspectResult(
+            binding=valid.binding,
+            mode=valid.mode,
+            observations=valid.observations,
+            observed_revision=valid.observed_revision,
+            scene_may_have_changed=True,
+        )
 
 
 def test_result_rejects_noncanonical_wire_order() -> None:

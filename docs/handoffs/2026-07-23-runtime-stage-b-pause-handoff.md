@@ -1,5 +1,11 @@
 # Runtime Stage B Pause Handoff
 
+> **SUPERSEDED (2026-07-24).** This pause handoff is historical. Stage B
+> acceptance later recorded B-07 (interactive GUI checklist) and B-08
+> (Vision real-provider journey) as PASS and merged to `main`. The current
+> entry doc is `docs/handoffs/2026-07-24-sandbox-verify-commit-handoff.md`.
+
+
 Date: 2026-07-23
 Owner on pause: Codex
 Working directory: `Z:/EEE_Project/EEEProceduralModeling/.worktrees/runtime`

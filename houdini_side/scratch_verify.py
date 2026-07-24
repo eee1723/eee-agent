@@ -364,7 +364,9 @@ def verify_orientation(
                 "point_count": len(pts),
                 "error": (
                     f"{cid} has no valid edini_world_axis prim attribute. "
-                    f"Bake it with an attribwrangle: v@edini_world_axis = {0,1,0};"
+                    "Bake it onto the prim before commit (note: the current "
+                    "scratch catalog has no attribute-writing node, so "
+                    "catalog-built assets cannot carry component axes yet)."
                 ),
             })
             results.append(entry)

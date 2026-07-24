@@ -26,35 +26,27 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
 
 from eee_agent.changesets.contracts import (
     ChangeReceipt,
     ChangeSet,
-    CheckpointPlan,
     ConditionResult,
     ConnectInput,
     CreateNode,
-    NodeAbsent,
-    NodeIdentityEquals,
     NodeRef,
     OwnedNodeRef,
-    ParmSnapshot,
-    ParmValueEquals,
-    RiskSummary,
-    SceneBindingEquals,
     SetParm,
-    WireInputEquals,
     WireRef,
-    WireSnapshot,
     WorkspaceManifest,
-    WorkspaceRevisionEquals,
     _parm_value_json,
     _validate_parm_value,
 )
 from eee_agent.changesets import codec
 from eee_agent.core.ids import IdKind, require_id
 from eee_agent.houdini_bridge.contracts import (
+    MAX_DEADLINE_MS,
+    MIN_DEADLINE_MS,
+
     PROTOCOL,
     BridgeError,
     SceneBinding,
@@ -72,8 +64,8 @@ APPLY_OPERATION = "changeset.apply"
 RECEIPT_OPERATION = "changeset.receipt"
 
 _MAX_REQUEST_ID_LEN = 128
-_MIN_DEADLINE_MS = 1
-_MAX_DEADLINE_MS = 30_000
+_MIN_DEADLINE_MS = MIN_DEADLINE_MS
+_MAX_DEADLINE_MS = MAX_DEADLINE_MS
 _MAX_RESULT_BYTES = 256 * 1024
 _MAX_NODE_PATH_LEN = 1024
 _MAX_NODE_TYPE_LEN = 256
@@ -270,28 +262,6 @@ def _require_optional_identifier(value: object, label: str) -> str | None:
     return _require_identifier(value, label)
 
 
-def _decode_dt(value: object, label: str) -> datetime:
-    if type(value) is not str:
-        raise TypeError(f"{label} must be an ISO timestamp string")
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError as exc:
-        raise ValueError(f"{label} is not a valid timestamp: {value!r}") from exc
-
-
-# --------------------------------------------------------------------------
-# ChangeSet / manifest deserializers (self-contained; mirror the repository)
-# --------------------------------------------------------------------------
-
-
-# --------------------------------------------------------------------------
-# DTO decoders: thin private wrappers over the shared contract codec. The
-# codec owns the single typed decode path; these names are kept so existing
-# call sites (including houdini_bridge.workspaces._decode_manifest and tests)
-# are unchanged. Bridge-only decoders (preflight facts / envelope parsing)
-# stay in this module further below.
-# --------------------------------------------------------------------------
-
 
 def _decode_owned(data: object) -> OwnedNodeRef:
     return codec.decode_owned_node_ref(data)
@@ -309,33 +279,9 @@ def _decode_operation(data: object) -> CreateNode | SetParm | ConnectInput:
     return codec.decode_operation(data)
 
 
-def _decode_condition(
-    data: object,
-) -> (
-    SceneBindingEquals
-    | WorkspaceRevisionEquals
-    | NodeIdentityEquals
-    | ParmValueEquals
-    | WireInputEquals
-    | NodeAbsent
-):
-    return codec.decode_condition(data)
 
 
-def _decode_risk(data: object) -> RiskSummary:
-    return codec.decode_risk_summary(data)
 
-
-def _decode_parm_snapshot(data: object) -> ParmSnapshot:
-    return codec.decode_parm_snapshot(data)
-
-
-def _decode_wire_snapshot(data: object) -> WireSnapshot:
-    return codec.decode_wire_snapshot(data)
-
-
-def _decode_checkpoint(data: object) -> CheckpointPlan:
-    return codec.decode_checkpoint_plan(data)
 
 
 def _decode_condition_result(data: object) -> ConditionResult:
@@ -1077,8 +1023,9 @@ class ReceiptRequest:
     """A parsed, validated ``changeset.receipt`` request envelope.
 
     Carries only the exact ``change_id`` and the expected canonical digest. A
-    receipt query never touches the scene; the ``scene_epoch`` envelope field is
-    kept for protocol-shape consistency but is not used to gate scene access.
+    receipt query never reads the scene; the ``scene_epoch`` envelope field is
+    checked against the executor's in-memory tracked epoch (a mismatch fails
+    closed) but never gates a scene access.
     """
 
     request_id: str

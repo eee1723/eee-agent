@@ -23,13 +23,17 @@ Strictness rules (mirroring ``eee_agent.runtime.models``):
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import cast
 
+from eee_agent.core.strict_json import (
+    DuplicateKeyError,
+    load_strict_json,
+    reject_duplicate_keys,
+)
 from eee_agent.runtime.models import (
     canonical_json_dumps,
     freeze_json,
@@ -40,8 +44,10 @@ from eee_agent.runtime.models import (
 
 PROTOCOL = "eee.bridge/1"
 MAX_MESSAGE_BYTES = 1_048_576
+MAX_DEADLINE_MS = 30_000
+MIN_DEADLINE_MS = 1
 _MAX_REQUEST_ID_LEN = 128
-_MAX_DEADLINE_MS = 30_000
+_MAX_DEADLINE_MS = MAX_DEADLINE_MS
 _MAX_NODE_PATHS = 128
 
 # The only fields a scene.query request payload may carry.
@@ -83,20 +89,11 @@ class BridgeOperation(StrEnum):
 
 
 # --- strict JSON parsing helpers -------------------------------------------
+# Shared implementation lives in ``eee_agent.core.strict_json``; the private
+# names below are kept as thin aliases so existing importers are unchanged.
 
-
-class _DuplicateKeyError(ValueError):
-    """Raised by the JSON ``object_pairs_hook`` on any duplicate object key."""
-
-
-def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    """``object_pairs_hook`` that rejects duplicate keys at any object depth."""
-    seen: set[str] = set()
-    for key, _value in pairs:
-        if key in seen:
-            raise _DuplicateKeyError("duplicate object key")
-        seen.add(key)
-    return dict(pairs)
+_DuplicateKeyError = DuplicateKeyError
+_reject_duplicate_keys = reject_duplicate_keys
 
 
 def _load_strict_json(raw: object, label: str) -> object:
@@ -105,22 +102,7 @@ def _load_strict_json(raw: object, label: str) -> object:
     Rejects non-str/bytes input, payloads over :data:`MAX_MESSAGE_BYTES` UTF-8
     bytes, invalid UTF-8, invalid JSON, and duplicate object keys at any depth.
     """
-    if type(raw) is str:
-        data = raw.encode("utf-8")
-    elif type(raw) is bytes:
-        data = raw
-    else:
-        raise TypeError(f"{label} must be str or bytes")
-    if len(data) > MAX_MESSAGE_BYTES:
-        raise ValueError(f"{label} exceeds the maximum message size")
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"{label} is not valid UTF-8") from exc
-    try:
-        return json.loads(text, object_pairs_hook=_reject_duplicate_keys)
-    except (_DuplicateKeyError, json.JSONDecodeError) as exc:
-        raise ValueError(f"{label} is not strict JSON") from exc
+    return load_strict_json(raw, label, max_bytes=MAX_MESSAGE_BYTES)
 
 
 def _require_exact_dict(value: object, label: str) -> dict[str, object]:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Mapping
 from pathlib import Path
 
 from eee_agent.changesets.contracts import ChangeReceipt, ChangeSet, WorkspaceManifest
@@ -35,6 +36,9 @@ from eee_agent.houdini_bridge.changesets import (
 )
 from eee_agent.houdini_bridge.client import BridgeClient, BridgeClientError
 from eee_agent.houdini_bridge.contracts import (
+    MAX_DEADLINE_MS,
+    MIN_DEADLINE_MS,
+
     BridgeOperation,
     BridgeRequest,
     SceneBinding,
@@ -100,7 +104,7 @@ class BridgeChangeSetProvider:
         self._state_dir = Path(state_dir)
         if type(deadline_ms) is not int:
             raise TypeError("deadline_ms must be an exact integer")
-        if deadline_ms < 1 or deadline_ms > 30_000:
+        if deadline_ms < MIN_DEADLINE_MS or deadline_ms > MAX_DEADLINE_MS:
             raise ValueError("deadline_ms must be in 1..30000")
         self._deadline_ms = deadline_ms
 

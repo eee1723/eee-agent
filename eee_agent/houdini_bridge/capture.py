@@ -11,9 +11,11 @@ pattern (Task 19-A). It defines:
 
 It imports **neither** ``hou`` **nor** ``rpyc``. The operation is an internal
 trusted Runtime-to-Bridge operation exactly like ``changeset.apply``: it runs
-only on the single main-thread FIFO, the Houdini side writes the PNG to the
-Runtime-owned artifacts directory (``<name>.png.tmp`` then an atomic rename)
-and returns only content-addressed reference fields — image bytes NEVER cross
+only on the single main-thread FIFO, the Houdini side renders the PNG into a
+sibling temp directory (``.tmp_<artifact_id>/<name>.png``) inside the
+Runtime-owned artifacts directory, verifies it (magic, SHA-256, size budget),
+and atomically renames it into place — returning only content-addressed
+reference fields. Image bytes NEVER cross
 the bridge wire. Any uncertainty (stale scene, an unresolvable evidence node,
 a cook/framing/render failure, or a temp-scope cleanup failure) fails closed
 with a structured error instead of a guessed visual success. The request

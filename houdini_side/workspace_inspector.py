@@ -103,7 +103,6 @@ class WorkspaceInspector:
                 binding=binding,
                 mode=request.mode,
                 observations=observations,
-                scene_may_have_changed=False,
             )
         except WorkspaceInspectLimitError as exc:
             raise WorkspaceInspectorError(

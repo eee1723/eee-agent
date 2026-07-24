@@ -10,6 +10,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
 from eee_agent.config import LlmConfig, VisionConfig
+from eee_agent.core.strict_json import DuplicateKeyError, reject_duplicate_keys
 from eee_agent.providers.factory import resolve_model
 from eee_agent.vision.contracts import ProviderCapability, VisionRequest
 
@@ -17,20 +18,9 @@ from eee_agent.vision.contracts import ProviderCapability, VisionRequest
 _MEDIA_TYPES = ("image/png", "image/jpeg", "image/webp")
 _MAX_RESPONSE_CHARS = 16 * 1024
 
-
-class _DuplicateKeyError(ValueError):
-    pass
-
-
-def _reject_duplicate_keys(
-    pairs: list[tuple[str, object]],
-) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise _DuplicateKeyError("duplicate response field")
-        result[key] = value
-    return result
+# Shared dup-key-rejecting hook (single authority: eee_agent.core.strict_json).
+_DuplicateKeyError = DuplicateKeyError
+_reject_duplicate_keys = reject_duplicate_keys
 
 
 def _response_text(response: object) -> str:

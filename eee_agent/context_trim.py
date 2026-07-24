@@ -36,8 +36,8 @@ from langchain_core.messages import AnyMessage
 
 # Tools whose results are re-derivable snapshots — keep only the latest, stub the rest.
 READBACK_TOOLS = frozenset({
-    "work_status", "geometry_stats", "anchor_graph",
-    "describe_node_type", "hou_status", "validate_geometry",
+    "scene_status", "query_scene", "inspect_workspace",
+    "geometry_stats", "work_status",
 })
 STUB = "[older result omitted — re-call the tool to see the current state]"
 

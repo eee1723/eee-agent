@@ -121,7 +121,7 @@ git diff --check
 git status --short --branch
 ```
 
-The offline baseline is **3446 tests passing with 12** Houdini-Knowledge
+The offline baseline is **3458 tests passing with 11** Houdini-Knowledge
 skips (opt-in via `EEE_RUN_HOUDINI_KB_TESTS=true`). Later commits may
 legitimately increase the count, but setup is blocked by any failure or
 unexplained new skip/xfail.
@@ -232,5 +232,7 @@ Read:
 3. `docs/superpowers/plans/2026-07-21-runtime-panel-three-pane.md` (latest panel work)
 
 The Foundation, Runtime, Secure Bridge, Docked UI, and Strict Modeling
-milestones are complete; the interactive Houdini 21 GUI checklist and the
-Vision real-provider journey are the remaining open gates before an RC tag.
+milestones are complete; the interactive GUI checklist and the Vision
+real-provider journey both passed in Stage B acceptance. The remaining gate
+is a real-Houdini end-to-end smoke of the sandbox build → verify → commit
+cycle before an RC tag.

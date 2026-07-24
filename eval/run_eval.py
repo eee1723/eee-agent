@@ -2,8 +2,11 @@
 
 ``--dry`` is the only executable evaluation path: it checks already-exported
 geometry files against declarative case expectations. Live agent execution is
-intentionally deferred until Runtime MVP S6 provides a bounded, authenticated
-provider. This module must not load removed legacy tools or reset Houdini scenes.
+deferred: it would drive the Runtime's authenticated sandbox → verify → commit
+pipeline, and no bounded harness for that exists yet. A fresh checkout has no
+``output/*.obj`` exports, so ``--dry`` reports 0 passed until the case exports
+are produced. This module must not load removed legacy tools or reset Houdini
+scenes.
 
 Examples:
   python -m eval.run_eval --dry

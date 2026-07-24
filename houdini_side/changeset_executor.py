@@ -1,11 +1,18 @@
-"""Read-only ChangeSet preflight adapter for the secure HoudiniBridge (Task 16-C).
+"""ChangeSet preflight adapter + transactional executor for the secure bridge.
 
-:class:`ChangeSetPreflightAdapter` derives bounded, typed scene facts needed to
-independently verify a :class:`~eee_agent.houdini_bridge.changesets.PreflightRequest`,
-and evaluates the supplied preconditions against those facts. It performs **no
-mutation**: it never creates/destroys nodes, sets parms, connects inputs, writes
-user data, touches undo, loads/saves/clears the HIP, installs HDAs or source,
-runs a shell, or evaluates arbitrary Python/VEX.
+Two classes share this module:
+
+* :class:`ChangeSetPreflightAdapter` (Task 16-C) derives bounded, typed scene
+  facts needed to independently verify a
+  :class:`~eee_agent.houdini_bridge.changesets.PreflightRequest`, and evaluates
+  the supplied preconditions against those facts. It performs **no mutation**:
+  it never creates/destroys nodes, sets parms, connects inputs, writes user
+  data, touches undo, loads/saves/clears the HIP, installs HDAs or source,
+  runs a shell, or evaluates arbitrary Python/VEX.
+* :class:`ChangeSetExecutor` is the mutating counterpart: transactional
+  ChangeSet apply, sensitivity sampling, capture rendering, and the
+  ``scratch.exec/commit/destroy`` sandbox operations — all serialized through
+  the same main-thread FIFO with journaled rollback on failure.
 
 The adapter never imports ``hou`` at module import time. ``hou`` is reached
 through the injected :class:`~houdini_side.secure_bridge.HoudiniSceneAdapter`
@@ -64,6 +71,7 @@ from eee_agent.changesets.contracts import (
 from eee_agent.changesets.policy import evaluate_policy
 from eee_agent.houdini_bridge.capture import (
     PNG_MEDIA_TYPE,
+    _MAX_PNG_BYTES,
     CaptureFramingReport,
     CaptureRequest,
     CaptureResult,
@@ -1037,6 +1045,11 @@ def _verify_capture_file(path: Path) -> tuple[str, int]:
                 if not chunk:
                     break
                 size += len(chunk)
+                if size > _MAX_PNG_BYTES:
+                    # Fail before the atomic rename: an oversized render must
+                    # never land at the final path and surface later as an
+                    # opaque agent-side ``CaptureResult`` validation error.
+                    raise _capture_render_failed()
                 digest.update(chunk)
     except HoudiniAdapterError:
         raise

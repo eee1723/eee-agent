@@ -65,27 +65,39 @@ def build_middleware(model):
     )
 
 
-# Lessons distilled from the Phoenix trace of the looping run.
+# Lessons distilled from trace analysis, retargeted to the
+# sandbox → verify → commit workflow (scratch_build / scratch_commit).
 _LESSONS = [
-    "Houdini VEX has NO per-prim getbbox(0,@primnum,...). To iterate a prim's "
-    "points use `int pts[] = primpoints(0, @primnum);`. To mark windows on a grid, "
-    "run an attribwrangle over PRIMITIVES with `i@is_window = (@primnum % 2);` then "
-    "a Blast node with group `@is_window==1`, grouptype=prims to cut the holes.",
+    "Iterate with scratch_build ONE small step at a time: add a primitive, set "
+    "its parms, read the returned cook errors and geometry stats, then adjust "
+    "the SAME sandbox with the next scratch_build call. Do NOT try to build the "
+    "whole asset in a single call, and do NOT restart from scratch on a cook "
+    "error — the error names the failing node; fix that operation.",
 
-    "When a wrangle cook fails, set_vex/cook_node return vex_errors naming the "
-    "function and line:col (and matching-function candidates). READ it and fix "
-    "that one line in place. Do NOT delete the wrangle and rewrite from scratch.",
+    "scratch_build set_parm accepts literal values only — no expressions, no "
+    "ch() references, no VEX. If you need a driven relationship, bake the "
+    "values yourself and set the numbers. There is no attribwrangle in the "
+    "catalog; procedural logic belongs in your op sequence (copytopoints2, "
+    "sweep2, boolean2, polyextrude2), not in code snippets.",
 
-    "Build the building ONCE per the recipe and export; do not create variant "
-    "nodes (wall2, wall3, front_3d_b...) to try alternatives — refine the existing "
-    "nodes in place. Aim to finish and export within ~40 tool calls.",
+    "Only call scratch_commit AFTER scratch_build iterations produce the "
+    "geometry you want. A refused commit is not an error to retry blindly: "
+    "read the gates list, fix the named defect in the sandbox, then re-commit. "
+    "Never use skip_structure_check to bypass a monolithic-structure failure.",
 ]
+
+_SEED_VERSION = "v2"
 
 
 def _seed_lessons(ctx) -> None:
-    """Idempotent seed via a marker file (file backend persists across runs)."""
+    """Idempotent seed via a versioned marker file (file backend persists)."""
     marker = os.path.join(repo_root(), ".contextseek_seeded")
-    if os.path.isfile(marker):
+    try:
+        if os.path.isfile(marker):
+            with open(marker) as fh:
+                if fh.read().strip() == _SEED_VERSION:
+                    return
+    except OSError:
         return
     for i, lesson in enumerate(_LESSONS):
         try:
@@ -95,6 +107,6 @@ def _seed_lessons(ctx) -> None:
     try:
         os.makedirs(os.path.dirname(marker), exist_ok=True)
         with open(marker, "w") as fh:
-            fh.write("v1")
+            fh.write(_SEED_VERSION)
     except Exception:
         pass

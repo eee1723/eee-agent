@@ -28,6 +28,16 @@ def _freeze_payload(payload: object) -> Mapping[str, _FrozenJsonValue]:
     return cast(Mapping[str, _FrozenJsonValue], _freeze_json(payload, set()))
 
 
+def freeze_json(value: object) -> _FrozenJsonValue:
+    """Deep-freeze a JSON value into an immutable tree.
+
+    Single canonical implementation (shared by ``eee_agent.runtime.models``):
+    exact primitive types (bool stays bool), finite floats, exact-string dict
+    keys, cycle rejection, and TypeError on any non-JSON value.
+    """
+    return _freeze_json(value, set())
+
+
 def _freeze_json(value: object, active: set[int]) -> _FrozenJsonValue:
     # Direct exact-type branches (not a cached type() local) so mypy narrows the
     # value inside each branch: math.isfinite sees a float, dicts expose .items,
@@ -71,11 +81,12 @@ def _freeze_json(value: object, active: set[int]) -> _FrozenJsonValue:
     raise TypeError(f"unsupported JSON value type: {type(value).__name__}")
 
 
-def _thaw_json(value: _FrozenJsonValue) -> JsonValue:
+def thaw_json(value: _FrozenJsonValue) -> JsonValue:
+    """Return a fresh, mutable plain-JSON copy of a frozen tree."""
     if isinstance(value, Mapping):
-        return {key: _thaw_json(item) for key, item in value.items()}
+        return {key: thaw_json(item) for key, item in value.items()}
     if type(value) is tuple:
-        return [_thaw_json(item) for item in cast(tuple[_FrozenJsonValue, ...], value)]
+        return [thaw_json(item) for item in cast(tuple[_FrozenJsonValue, ...], value)]
     # Remaining _FrozenJsonValue members are exactly the JSON primitives
     # (str | int | float | bool | None), all valid JsonValue returns.
     return cast(JsonPrimitive, value)
@@ -194,6 +205,6 @@ class DomainEvent:
             "event_id": self.event_id,
             "event_type": self.event_type,
             "timestamp": self.timestamp.isoformat(),
-            "payload": _thaw_json(self.payload),
+            "payload": thaw_json(self.payload),
             "schema_version": self.schema_version,
         }

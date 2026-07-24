@@ -8,6 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Protocol, runtime_checkable
 
+from eee_agent.config import (
+    DEFAULT_VISION_TIMEOUT_SECONDS,
+    MAX_VISION_TIMEOUT_SECONDS,
+    MIN_VISION_TIMEOUT_SECONDS,
+)
 from eee_agent.runtime.artifacts import ArtifactStore
 from eee_agent.vision.contracts import (
     FinalVisionDecision,
@@ -116,13 +121,18 @@ class VisionRouter:
         artifacts: ArtifactStore,
         provider: VisionProvider | None,
         *,
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float = DEFAULT_VISION_TIMEOUT_SECONDS,
     ) -> None:
         if type(artifacts) is not ArtifactStore:
             raise TypeError("artifacts must be an exact ArtifactStore")
         if provider is not None and not isinstance(provider, VisionProvider):
             raise TypeError("provider must implement VisionProvider")
-        if type(timeout_seconds) is not float or not 0.1 <= timeout_seconds <= 120.0:
+        if (
+            type(timeout_seconds) is not float
+            or not MIN_VISION_TIMEOUT_SECONDS
+            <= timeout_seconds
+            <= MAX_VISION_TIMEOUT_SECONDS
+        ):
             raise ValueError("timeout_seconds is invalid")
         self._artifacts = artifacts
         self._provider = provider

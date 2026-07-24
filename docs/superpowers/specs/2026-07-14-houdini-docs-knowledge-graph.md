@@ -1,5 +1,11 @@
 # Houdini 文档知识图谱（按需查询）设计
 
+> 实现注记（2026-07-24）：本文是设计稿，模块名以实际代码为准 —— 构建器为
+> `eee_agent/knowledge/build.py`（CLI `python -m eee_agent.knowledge.build`），
+> 运行时出口为 `eee_agent/runtime/knowledge.py` + `runtime/agent_tools.py`
+> （`search_houdini_knowledge` / `get_houdini_knowledge`），文中 `build_kb.py`、
+> `eee_agent/tools/knowledge.py` 均为设计期名称。
+
 - 状态：设计稿（待实现）
 - 日期：2026-07-14
 - 范围：为 Agent 增加一个离线构建、本地查询的 Houdini 文档知识图谱工具

@@ -14,7 +14,6 @@ orchestrator's pass/fail aggregation.
 
 from __future__ import annotations
 
-import pytest
 
 from houdini_side.scratch_verify import (
     HEALTH_ADVISORY_CHECKS,

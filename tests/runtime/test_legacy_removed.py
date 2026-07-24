@@ -78,16 +78,14 @@ def test_runtime_system_prompt_describes_only_current_capabilities() -> None:
 
 def test_runtime_import_isolated_from_legacy_bridge_and_tools() -> None:
     script = """
-import os, sys
-os.environ['EEE_WORKFLOW_STATUS'] = 'true'
+import importlib.util, sys
 import eee_agent.runtime.agent_runner
-import eee_agent.workflow_middleware
 if any(name == 'eee_agent.bridge' or name.startswith('eee_agent.bridge.')
        or name == 'eee_agent.tools' or name.startswith('eee_agent.tools.')
        for name in sys.modules):
     raise SystemExit('legacy module imported')
-if eee_agent.workflow_middleware.is_enabled():
-    raise SystemExit('legacy workflow middleware enabled')
+if importlib.util.find_spec('eee_agent.workflow_middleware') is not None:
+    raise SystemExit('tombstone workflow middleware reintroduced')
 """
     result = subprocess.run(
         [sys.executable, "-c", script], cwd=ROOT, env=os.environ.copy(),

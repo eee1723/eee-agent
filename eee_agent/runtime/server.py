@@ -25,12 +25,14 @@ from eee_agent.runtime.protocol import (
     DEFERRED_COMMAND_TYPES,
     MAX_MESSAGE_BYTES,
     PROTOCOL,
+    _invalid_envelope,
     encode_envelope,
     error_response,
     event_envelope,
     parse_command,
     success_response,
 )
+from eee_agent.runtime.service import _RUNTIME_FAILURE_ERROR
 
 _QUEUE_MAX = 256
 _INITIAL_QUEUE_TIMEOUT_SECONDS = 5.0
@@ -56,21 +58,9 @@ class _CloseAction:
         self.code = code
         self.reason = reason
 
-_INTERNAL_FAILURE_ERROR = AgentError(
-    code="internal.runtime_failure",
-    category=ErrorCategory.INTERNAL_INVARIANT,
-    message_for_user="The runtime encountered an unexpected error.",
-)
-
-
-def _invalid_envelope() -> AgentException:
-    return AgentException(
-        AgentError(
-            code="protocol.invalid_envelope",
-            category=ErrorCategory.PROTOCOL,
-            message_for_user="The Runtime command envelope is invalid.",
-        )
-    )
+# Single authority: the service owns the boundary failure error; the protocol
+# module owns the envelope error. Aliased here so call sites stay unchanged.
+_INTERNAL_FAILURE_ERROR = _RUNTIME_FAILURE_ERROR
 
 
 def _capability_unavailable() -> AgentException:

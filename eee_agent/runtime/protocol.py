@@ -12,6 +12,12 @@ from dataclasses import dataclass
 
 from eee_agent.core import AgentError, AgentException, ErrorCategory
 from eee_agent.core.events import JsonValue
+from eee_agent.core.strict_json import (
+    DuplicateKeyError as _DuplicateKeyError,
+)
+from eee_agent.core.strict_json import (
+    reject_duplicate_keys as _reject_duplicate_keys,
+)
 from eee_agent.runtime.models import freeze_json, thaw_json
 
 PROTOCOL = "eee.runtime/1"
@@ -106,20 +112,6 @@ def _payload_too_large() -> AgentException:
         ErrorCategory.VALIDATION,
         "The Runtime message exceeds the maximum allowed size.",
     )
-
-
-class _DuplicateKeyError(ValueError):
-    """Raised by the JSON object_pairs_hook on any duplicate object key."""
-
-
-def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    """object_pairs_hook that rejects duplicate keys at any object depth."""
-    seen: set[str] = set()
-    for key, _value in pairs:
-        if key in seen:
-            raise _DuplicateKeyError("duplicate object key")
-        seen.add(key)
-    return dict(pairs)
 
 
 def _snapshot_json(value: object) -> object:

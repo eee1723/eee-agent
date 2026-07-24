@@ -575,15 +575,22 @@ def _require_orientation_checks(value: object, label: str) -> tuple[dict[str, ob
     if len(value) > _MAX_OPS:
         raise ValueError(f"{label} exceeds {_MAX_OPS} checks")
     out: list[dict[str, object]] = []
+    known = {
+        "component_id", "kind", "expected_axis",
+        "tolerance_deg", "signed", "construction_axis",
+    }
     for item in value:
         if not isinstance(item, Mapping):
             raise TypeError(f"{label} items must be objects")
-        clean: dict[str, object] = {}
-        for key in ("component_id", "kind", "expected_axis",
-                    "tolerance_deg", "signed", "construction_axis"):
-            if key in item:
-                clean[key] = item[key]
-        out.append(clean)
+        unknown = set(item) - known
+        if unknown:
+            # Reject rather than silently drop: a typo'd key would otherwise
+            # pass validation while the Houdini-side gate runs without the
+            # intended check.
+            raise ValueError(
+                f"{label} items contain unknown keys: {sorted(unknown)}"
+            )
+        out.append(dict(item))
     return tuple(out)
 
 
@@ -602,9 +609,12 @@ class ScratchCommitRequest:
 
     Promotes a verified sandbox into the real scene. The Houdini side runs the
     four verify gates (bake/structure/orientation/health) on the sandbox output
-    node; on pass, it renames the sandbox container into ``target_parent_path``
-    under ``target_name`` inside a single ``hou.undos.group`` (so a gate failure
-    rolls back atomically). On refusal, the sandbox is preserved.
+    node BEFORE any promotion; a gate failure is a refusal, not a rollback —
+    the sandbox is preserved untouched. On pass, the sandbox container is
+    renamed into ``target_parent_path`` under ``target_name``; the rename is
+    journaled so a mid-promotion failure restores the original name (a
+    ``hou.undos.group`` is not a transaction and is not relied on for
+    atomicity).
     """
 
     request_id: str

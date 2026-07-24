@@ -1,9 +1,11 @@
-"""Secure read-only HoudiniBridge — DTO and error contracts.
+"""Secure HoudiniBridge — DTO and error contracts.
 
 This package defines the strict, frozen, JSON-canonical data transfer objects
-for the loopback-only read-only HoudiniBridge. It is the foundation for a
-future authenticated transport (15-B), a main-thread queue (15-C), and a real
-Houdini-side adapter (15-D).
+for the loopback-only, token-authenticated HoudiniBridge. The authenticated
+transport, the main-thread queue, and the Houdini-side adapter all exist and
+serve the typed operation set: ``scene.query`` (read-only), ``workspace.inspect``,
+``changeset.preflight/apply/receipt``, ``sensitivity.sample``, ``capture.capture``,
+and the ``scratch.exec/commit/destroy`` sandbox operations.
 
 The package imports **neither** ``hou`` **nor** ``rpyc``. Runtime consumes only
 plain JSON DTOs from this surface; no live HOM object ever crosses the boundary.

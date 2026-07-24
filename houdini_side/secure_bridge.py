@@ -52,6 +52,8 @@ from eee_agent.houdini_bridge.changesets import (
 )
 from eee_agent.houdini_bridge.contracts import (
     MAX_MESSAGE_BYTES,
+    _reject_duplicate_keys,
+    _DuplicateKeyError,
     PROTOCOL,
     BridgeError,
     BridgeResponse,
@@ -91,6 +93,7 @@ from eee_agent.houdini_bridge.workspaces import (
     WorkspaceInspectResponse,
     parse_workspace_inspect_request,
 )
+from eee_agent.runtime.models import canonical_json_dumps
 from eee_agent.houdini_bridge.queue import (
     AwaitSignal,
     MainThreadReadQueue,
@@ -271,7 +274,12 @@ class HoudiniSceneAdapter:
 
     def _hip_path(self) -> str | None:
         name = self._hou.hipFile.name()
-        if not isinstance(name, str) or not name or name == _HIP_UNSAVED_SENTINEL:
+        if not isinstance(name, str) or not name:
+            return None
+        # An unsaved scene reports some ``untitled[.hip]`` variant (often a
+        # full temp path); match on the basename stem, not exact equality.
+        stem = name.replace("\\", "/").rsplit("/", 1)[-1]
+        if stem == _HIP_UNSAVED_SENTINEL or stem == _HIP_UNSAVED_SENTINEL + ".hip":
             return None
         return name
 
@@ -385,7 +393,7 @@ class HoudiniSceneAdapter:
 
 
 # ==========================================================================
-# Task 15-D: loopback read-only bridge server
+# Loopback, token-authenticated bridge server
 #
 # The connection handler is a pure ``async def`` over asyncio reader/writer
 # objects. It deliberately imports neither ``asyncio`` nor ``threading`` and
@@ -413,19 +421,6 @@ class _FrameError(Exception):
     """A frame length is invalid (zero / oversize) — reject before the payload."""
 
 
-class _DuplicateKeyError(ValueError):
-    """Raised by the JSON object_pairs_hook on any duplicate object key."""
-
-
-def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    seen: set[str] = set()
-    for key, _value in pairs:
-        if key in seen:
-            raise _DuplicateKeyError("duplicate object key")
-        seen.add(key)
-    return dict(pairs)
-
-
 def _loads_object(data: bytes) -> dict[str, object] | None:
     """Strictly decode a frame to a dict, or ``None`` if it is not valid."""
     try:
@@ -440,13 +435,7 @@ def _loads_object(data: bytes) -> dict[str, object] | None:
 
 
 def _canonical_dumps(obj: object) -> str:
-    return json.dumps(
-        obj,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
+    return canonical_json_dumps(obj)
 
 
 async def _await_listener_closed(listener: object) -> None:
@@ -499,28 +488,44 @@ class _QueuedError:
     dispatcher can render a leak-free error envelope for either operation.
     """
 
-    __slots__ = ("code", "category", "message_for_user", "retryable")
+    __slots__ = (
+        "code",
+        "category",
+        "message_for_user",
+        "retryable",
+        "technical_detail_ref",
+    )
 
     def __init__(
-        self, code: str, category: str, message_for_user: str, retryable: bool
+        self,
+        code: str,
+        category: str,
+        message_for_user: str,
+        retryable: bool,
+        technical_detail_ref: str | None = None,
     ) -> None:
         self.code = code
         self.category = category
         self.message_for_user = message_for_user
         self.retryable = retryable
+        self.technical_detail_ref = technical_detail_ref
 
 
 class BridgeServer:
-    """Read-only, loopback, token-authenticated bridge server.
+    """Loopback, token-authenticated bridge server.
 
     Lifecycle is split: identity publication and shutdown are synchronous
     methods owned by this object; the TCP listener is owned by the host process
     (which calls ``asyncio.start_server(server.handle_connection, ...)``). The
     handler authenticates the first hello frame, dispatches only explicit typed
-    scene/workspace/ChangeSet operations, submits every operation to one
-    :class:`MainThreadReadQueue`, awaits its result, and serializes a frozen
-    response DTO. It never dispatches arbitrary names or returns a HOM object;
-    the workspace inspection path never mutates the scene.
+    operations — ``scene.query``, ``workspace.inspect``,
+    ``changeset.preflight/apply/receipt``, ``sensitivity.sample``,
+    ``capture.capture``, and ``scratch.exec/commit/destroy`` — submits every
+    operation to one :class:`MainThreadReadQueue`, awaits its result, and
+    serializes a frozen response DTO. It never dispatches arbitrary names or
+    returns a HOM object. Mutating operations (changeset apply, scratch
+    exec/commit/destroy) run on the same serialized FIFO as the reads, so HOM
+    access never interleaves.
     """
 
     def __init__(
@@ -747,7 +752,8 @@ class BridgeServer:
 
         Accepted operations are ``scene.query``, ``workspace.inspect``, the
         typed ChangeSet preflight/apply/receipt handlers, ``sensitivity.sample``,
-        and ``capture.capture``.
+        ``capture.capture``, and the ``scratch.exec/commit/destroy`` sandbox
+        handlers.
         The operation name is read through strict JSON (rejecting malformed,
         non-UTF-8, and duplicate-key frames) and dispatched explicitly — there is
         no arbitrary name dispatch surface. All operations share the single
@@ -886,7 +892,6 @@ class BridgeServer:
                 )
             return await self._serve_scratch_destroy(frame_bytes, reader=reader)
         request_id = obj.get("request_id")
-        request_id = obj.get("request_id")
         if type(request_id) is not str:
             request_id = _MALFORMED_REQUEST_ID
         return self._error_envelope(
@@ -934,6 +939,7 @@ class BridgeServer:
                 category=result.category,
                 message_for_user=result.message_for_user,
                 retryable=result.retryable,
+                technical_detail_ref=result.technical_detail_ref,
             )
         response = BridgeResponse(request_id=request_id, result=result, error=None)
         return response.to_json().encode("utf-8")
@@ -966,6 +972,7 @@ class BridgeServer:
                 category=result.category,
                 message_for_user=result.message_for_user,
                 retryable=result.retryable,
+                technical_detail_ref=result.technical_detail_ref,
             )
         response = WorkspaceInspectResponse(
             request_id=request_id,
@@ -1009,6 +1016,7 @@ class BridgeServer:
                 category=result.category,
                 message_for_user=result.message_for_user,
                 retryable=result.retryable,
+                technical_detail_ref=result.technical_detail_ref,
             )
         response = PreflightResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
         return response.to_json().encode("utf-8")
@@ -1060,6 +1068,7 @@ class BridgeServer:
                 category=result.category,
                 message_for_user=result.message_for_user,
                 retryable=result.retryable,
+                technical_detail_ref=result.technical_detail_ref,
             )
         response = ApplyResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
         return response.to_json().encode("utf-8")
@@ -1103,6 +1112,7 @@ class BridgeServer:
                 category=result.category,
                 message_for_user=result.message_for_user,
                 retryable=result.retryable,
+                technical_detail_ref=result.technical_detail_ref,
             )
         if result is None:
             return self._error_envelope(
@@ -1164,6 +1174,7 @@ class BridgeServer:
                 category=result.category,
                 message_for_user=result.message_for_user,
                 retryable=result.retryable,
+                technical_detail_ref=result.technical_detail_ref,
             )
         response = SensitivitySampleResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
         return response.to_json().encode("utf-8")
@@ -1209,6 +1220,7 @@ class BridgeServer:
                 category=result.category,
                 message_for_user=result.message_for_user,
                 retryable=result.retryable,
+                technical_detail_ref=result.technical_detail_ref,
             )
         response = CaptureResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
         return response.to_json().encode("utf-8")
@@ -1262,6 +1274,7 @@ class BridgeServer:
                 category=result.category,
                 message_for_user=result.message_for_user,
                 retryable=result.retryable,
+                technical_detail_ref=result.technical_detail_ref,
             )
         response = ScratchResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
         return response.to_json().encode("utf-8")
@@ -1313,6 +1326,7 @@ class BridgeServer:
                 category=result.category,
                 message_for_user=result.message_for_user,
                 retryable=result.retryable,
+                technical_detail_ref=result.technical_detail_ref,
             )
         response = ScratchCommitResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
         return response.to_json().encode("utf-8")
@@ -1354,6 +1368,7 @@ class BridgeServer:
                 category=result.category,
                 message_for_user=result.message_for_user,
                 retryable=result.retryable,
+                technical_detail_ref=result.technical_detail_ref,
             )
         response = ScratchDestroyResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
         return response.to_json().encode("utf-8")
@@ -1380,7 +1395,11 @@ class BridgeServer:
             )
         except HoudiniAdapterError as exc:
             return _QueuedError(
-                exc.code, exc.category, exc.message_for_user, exc.retryable
+                exc.code,
+                exc.category,
+                exc.message_for_user,
+                exc.retryable,
+                exc.technical_detail_ref,
             )
         except WorkspaceInspectError as exc:
             return _QueuedError(

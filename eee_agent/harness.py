@@ -1,8 +1,8 @@
 """Explicit Deep Agents harness configuration.
 
-Foundation keeps the existing tool surface for compatibility but explicitly
+The Runtime registers its profile explicitly (no implicit ``task`` tool) and
 disables Deep Agents' auto-added general-purpose subagent. Capability-specific
-subagents will be registered later with bounded tools and structured outputs.
+subagents may be registered later with bounded tools and structured outputs.
 """
 from __future__ import annotations
 

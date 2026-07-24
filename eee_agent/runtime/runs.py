@@ -14,6 +14,7 @@ from eee_agent.core import (
 from eee_agent.core.events import JsonValue
 from eee_agent.runtime.database import RuntimeDatabase
 from eee_agent.runtime.models import (
+    TERMINAL_RUN_STATUSES,
     RunRecord,
     RunStatus,
     SessionStatus,
@@ -33,11 +34,7 @@ _ACTIVE_EXECUTION_STATES = frozenset({
     RunStatus.FINALIZING,
     RunStatus.RETRYING,
 })
-_TERMINAL_STATES = frozenset({
-    RunStatus.COMPLETED,
-    RunStatus.CANCELLED,
-    RunStatus.FAILED,
-})
+_TERMINAL_STATES = TERMINAL_RUN_STATUSES
 _TERMINAL_VALUES = tuple(state.value for state in _TERMINAL_STATES)
 
 _RUN_COLUMNS = (

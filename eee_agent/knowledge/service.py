@@ -53,7 +53,7 @@ _SIGNATURES_MAX = 5
 _GET_CHARS_DEFAULT = 4000
 _GET_CHARS_MAX = 8000
 
-_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:")
 
 

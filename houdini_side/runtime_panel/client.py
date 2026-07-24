@@ -18,6 +18,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from eee_agent.panel.client_state import (  # noqa: E402
+    EMPTY_SESSION_TITLE,
     PanelClientError,
     RuntimeCursorBook,
     build_command,
@@ -548,7 +549,7 @@ class RuntimeObserverClient(QtCore.QObject):
         current = self._sessions.get(self._current_session_id or "")
         if (
             type(current) is dict
-            and current.get("title") == "New session"
+            and current.get("title") == EMPTY_SESSION_TITLE
             and not self._runtime_state.snapshot().get("runs")
         ):
             # Already on the empty placeholder. A duplicate create is not sent
@@ -559,7 +560,7 @@ class RuntimeObserverClient(QtCore.QObject):
         self._session_create_inflight = True
         self._send(
             "session.create",
-            {"title": "New session"},
+            {"title": EMPTY_SESSION_TITLE},
             "session.create",
         )
 
@@ -974,7 +975,7 @@ class RuntimeObserverClient(QtCore.QObject):
             return
         if (
             bootstrap
-            and selected.get("title") == "New session"
+            and selected.get("title") == EMPTY_SESSION_TITLE
             and not self._bootstrap_archiving
         ):
             # A leftover empty placeholder from a previous Houdini session was
@@ -1001,7 +1002,7 @@ class RuntimeObserverClient(QtCore.QObject):
         _save_preferred_session_id(session_id)
         self._current_session_id = session_id
         self._current_session_title = (
-            "未命名对话" if title == "New session" else title
+            "未命名对话" if title == EMPTY_SESSION_TITLE else title
         )
         # Bootstrap from one bounded snapshot, then subscribe from that exact
         # boundary. Events committed between the snapshot and subscribe are

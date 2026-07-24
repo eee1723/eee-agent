@@ -27,7 +27,6 @@ shared Runtime canonical-JSON helpers, and :class:`RuntimeDatabase`.
 from __future__ import annotations
 
 import hashlib
-import json
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -65,7 +64,13 @@ from eee_agent.core import AgentError, AgentException, ErrorCategory, IdKind, re
 from eee_agent.core.events import JsonValue
 from eee_agent.houdini_bridge.contracts import SceneBinding
 from eee_agent.runtime.database import RuntimeDatabase
-from eee_agent.runtime.models import EventRecord, RetentionClass, canonical_json_dumps
+from eee_agent.runtime.models import (
+    EventRecord,
+    RetentionClass,
+    canonical_digest,
+    canonical_json_dumps,
+    canonical_json_loads,
+)
 
 if TYPE_CHECKING:
     # EventStore lives in the runtime package; importing it eagerly here would
@@ -280,34 +285,14 @@ class WorkspaceMutationResult:
 # --------------------------------------------------------------------------
 
 
-class _DuplicateKeyError(ValueError):
-    pass
-
-
-def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    seen: set[str] = set()
-    for key, _value in pairs:
-        if key in seen:
-            raise _DuplicateKeyError("duplicate object key")
-        seen.add(key)
-    return dict(pairs)
-
-
 def _loads_canonical(text: str) -> object:
     """Parse canonical JSON text, rejecting duplicate keys at any depth."""
-    if type(text) is not str:
-        raise TypeError("canonical JSON text must be an exact string")
-    try:
-        return json.loads(text, object_pairs_hook=_reject_duplicate_keys)
-    except (_DuplicateKeyError, json.JSONDecodeError) as exc:
-        raise ValueError(f"invalid canonical JSON text: {exc}") from exc
+    return canonical_json_loads(text)
 
 
 def _storage_digest(dto: object) -> str:
     """SHA-256 of the DTO's canonical JSON — the storage integrity digest."""
-    return hashlib.sha256(
-        canonical_json_dumps(dto.to_dict()).encode("utf-8")  # type: ignore[attr-defined]
-    ).hexdigest()
+    return canonical_digest(dto.to_dict())  # type: ignore[attr-defined]
 
 
 # --------------------------------------------------------------------------
