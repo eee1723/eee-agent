@@ -189,10 +189,16 @@ def axis_angle_between(
 
 
 def dominant_axis_name(vec: Vec3) -> str:
-    """Return 'X' / 'Y' / 'Z' (or '-X' etc.) for the axis closest to vec."""
+    """Return 'X' / 'Y' / 'Z' (or '-X' etc.) for the axis closest to vec.
+
+    A (near-)zero vector has no dominant axis; return '?' so a degenerate PCA
+    estimate is not silently reported as a spurious 'X'.
+    """
     ax = abs(vec[0])
     ay = abs(vec[1])
     az = abs(vec[2])
+    if ax + ay + az < 1e-12:
+        return "?"
     if ax >= ay and ax >= az:
         return "X" if vec[0] >= 0 else "-X"
     if ay >= ax and ay >= az:

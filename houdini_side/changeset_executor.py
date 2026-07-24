@@ -2349,11 +2349,27 @@ class ChangeSetExecutor:
             verify_world_axes_baked,
         )
 
-        # Cook the output node so the gates read fresh geometry.
+        # Cook the output node so the gates read fresh geometry. A cook failure
+        # is a single root cause that would otherwise make every geometry-reading
+        # gate report its own "could not read geometry"; surface it once as a
+        # dedicated hard pre-gate failure instead.
+        cook_error: str | None = None
         try:
             output_node.cook(force=True)  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001 — cook failure surfaces as gate failure
-            pass
+        except Exception as exc:  # noqa: BLE001 — cook failure -> pre-gate
+            cook_error = str(exc)[:_MAX_ERROR_CHARS] or "cook failed"
+
+        if cook_error is not None:
+            cook_gate = {
+                "gate": "cook", "passed": False, "hard": True,
+                "reason": f"The sandbox output did not cook: {cook_error}",
+                "detail": {"cook_error": cook_error},
+            }
+            return {
+                "passed": False,
+                "gates": [cook_gate],
+                "hard_failures": [cook_gate],
+            }
 
         bake = verify_world_axes_baked(output_node)
         if skip_structure_check:

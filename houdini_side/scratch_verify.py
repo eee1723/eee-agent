@@ -176,6 +176,13 @@ def check_modular_structure(root: Any) -> dict[str, Any]:
     Monolithic (a failure) when: >= 3 distinct component_ids AND all geometry
     originates from a single Python SOP AND there are NO modular assembly nodes
     (copytopoints/sweep/foreach/boolean/polyextrude).
+
+    Known limitation: this walks the whole sandbox container
+    (``root.allSubChildren()``). A scratch sandbox is reused across several
+    scratch_exec calls, so abandoned intermediate nodes the agent left behind
+    are counted too, which can inflate component counts and bias the
+    monolithic heuristic. Ideally the scope would be the output node's input
+    dependency subgraph; that requires a HOM dependency walk and is deferred.
     """
     try:
         children = [
@@ -387,25 +394,35 @@ def verify_orientation(
             "passed": passed_check,
         })
 
-        # Optional PCA crosscheck (warning-only).
+        # Optional PCA crosscheck (warning-only). The PCA estimate is flipped
+        # to the expected_axis hemisphere (the independent ground truth), NOT to
+        # detected_vec — flipping to the value under test would mask an overall
+        # sign error in the baked axis (e.g. Y baked as -Y) by forcing PCA onto
+        # the wrong hemisphere and shrinking the reported divergence.
         if len(pts) >= 4:
             try:
                 cov, _ = compute_covariance(pts)
                 _, vecs = jacobi_eigen_3x3(cov)
                 pca_vec = vecs[KIND_EIGEN_RANK[kind]]
-                if not signed_kind:
-                    pca_vec = flip_to_hemisphere(pca_vec, detected_vec)
-                pca_angle, _ = axis_angle_between(pca_vec, detected_vec, signed=False)
-                entry["pca_crosscheck"] = {
-                    "pca_axis": dominant_axis_name(pca_vec),
-                    "divergence_deg": round(pca_angle, 2),
-                }
-                if pca_angle > 2.0 * tol_deg:
-                    entry["pca_crosscheck"]["warning"] = (
-                        f"Declared construction axis ({detected_axis}) diverges "
-                        f"from PCA estimate ({dominant_axis_name(pca_vec)}) by "
-                        f"{round(pca_angle, 1)} deg."
-                    )
+                if pca_vec == (0.0, 0.0, 0.0):
+                    # Degenerate covariance (collinear/coplanar points): the
+                    # PCA estimate is not meaningful. Report it rather than let
+                    # a zero vector read as a spurious axis downstream.
+                    entry["pca_crosscheck"] = {"pca_axis": "degenerate"}
+                else:
+                    if not signed_kind:
+                        pca_vec = flip_to_hemisphere(pca_vec, expected_vec)
+                    pca_angle, _ = axis_angle_between(pca_vec, detected_vec, signed=False)
+                    entry["pca_crosscheck"] = {
+                        "pca_axis": dominant_axis_name(pca_vec),
+                        "divergence_deg": round(pca_angle, 2),
+                    }
+                    if pca_angle > 2.0 * tol_deg:
+                        entry["pca_crosscheck"]["warning"] = (
+                            f"Declared construction axis ({detected_axis}) diverges "
+                            f"from PCA estimate ({dominant_axis_name(pca_vec)}) by "
+                            f"{round(pca_angle, 1)} deg."
+                        )
             except Exception:
                 pass
 

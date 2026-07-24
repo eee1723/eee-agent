@@ -86,6 +86,15 @@ class TestDominantAxisName:
     def test_named_axes(self, vec, expected) -> None:
         assert dominant_axis_name(vec) == expected
 
+    @pytest.mark.parametrize("vec", [
+        (0.0, 0.0, 0.0),
+        (1e-13, 1e-13, 1e-13),
+    ])
+    def test_zero_vector_reports_no_axis(self, vec) -> None:
+        # A degenerate PCA estimate (collinear/coplanar points -> zero
+        # eigenvector) must NOT read as a spurious 'X'; it reports '?'.
+        assert dominant_axis_name(vec) == "?"
+
 
 class TestAxisAngleBetween:
     def test_identical_axes_zero_angle(self) -> None:
