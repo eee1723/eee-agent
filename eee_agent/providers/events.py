@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TypeAlias
 
-from eee_agent.core.errors import AgentError
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,26 +30,19 @@ class ToolCallArgumentsDelta:
 
 
 @dataclass(frozen=True, slots=True)
-class ToolCallCompleted:
-    call_id: str
-    name: str
-
-
-@dataclass(frozen=True, slots=True)
 class UsageUpdated:
     input_tokens: int
     output_tokens: int
     total_tokens: int
+    # Prompt-cache metrics from the provider (0 when the provider doesn't
+    # report them). cache_read = tokens served from the KV cache (free/cheap);
+    # cache_creation = tokens written to the cache this turn. Tracking these
+    # lets us observe whether the stable-prefix strategy is actually hitting
+    # the provider's automatic cache (DeepSeek caches implicitly; Anthropic
+    # needs explicit cache_control markers).
+    cache_read: int = 0
+    cache_creation: int = 0
 
-
-@dataclass(frozen=True, slots=True)
-class ModelCompleted:
-    model_name: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class ModelFailed:
-    error: AgentError
 
 
 ProviderEvent: TypeAlias = (
@@ -58,8 +50,5 @@ ProviderEvent: TypeAlias = (
     | TextDelta
     | ToolCallStarted
     | ToolCallArgumentsDelta
-    | ToolCallCompleted
     | UsageUpdated
-    | ModelCompleted
-    | ModelFailed
 )

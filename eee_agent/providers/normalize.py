@@ -51,11 +51,19 @@ def normalize_message_chunk(chunk: AIMessageChunk) -> tuple[ProviderEvent, ...]:
 
     usage = chunk.usage_metadata
     if usage:
+        # Extract prompt-cache metrics if the provider reports them. langchain
+        # nests them under input_token_details (cache_read / cache_creation).
+        # Both default to 0 when absent (most non-Anthropic providers don't
+        # populate them, and DeepSeek's auto-cache may not surface them either
+        # — but when present they let us observe cache hit rate).
+        input_details = usage.get("input_token_details") or {}
         events.append(
             UsageUpdated(
                 int(usage.get("input_tokens", 0)),
                 int(usage.get("output_tokens", 0)),
                 int(usage.get("total_tokens", 0)),
+                cache_read=int(input_details.get("cache_read", 0) or 0),
+                cache_creation=int(input_details.get("cache_creation", 0) or 0),
             )
         )
     return tuple(events)

@@ -347,10 +347,17 @@ async def scratch_build(
     committed to the real scene by this tool; committing happens later through
     a separate hard-gated step.
 
-    Iterate ONE small step at a time. Do NOT try to build the whole asset in a
-    single call. A typical scratch_build call adds one or a few nodes (a
-    primitive + maybe a transform), sets their parms, and returns the cooked
-    result so you can verify before adding the next piece.
+    Submit operations in FUNCTIONAL UNITS, not one node at a time. One
+    scratch_build call should build a complete, independently verifiable piece
+    of the asset — e.g. (create a template primitive + set all its parms) or
+    (create a scatter source + set its parms + create a copy-to-points + wire
+    both inputs). Batching a functional unit into one call keeps the agent loop
+    short (fewer turns, far fewer repeated-input tokens) while still letting you
+    observe and correct each unit before moving on. The hard cap is 64
+    operations per call; stay well under it and group by what you can verify at
+    once. Avoid the opposite extreme too — don't dump an entire complex asset's
+    whole node tree in one call, since a single bad parm then fails the whole
+    batch and is harder to localize.
 
     operations — a non-empty list (<=64) of operation objects. Each has:
       kind: "create_node" | "set_parm" | "connect"
@@ -387,11 +394,21 @@ async def scratch_build(
     the output_node path for deeper inspection. Repeat scratch_build until the
     cooked geometry matches your intent, then proceed to verify + commit.
 
-    Minimal example (create a box, set its size, observe):
+    Example — a full functional unit in one call (template + scatter source +
+    copy-to-points, all wired), verifiable as one piece:
       operations = [
-        {"kind": "create_node", "node_name": "top", "node_type": "box"},
-        {"kind": "set_parm", "node_name": "top", "parm": "sizex", "value": 120.0},
-        {"kind": "set_parm", "node_name": "top", "parm": "sizey", "value": 4.0},
+        {"kind": "create_node", "node_name": "template", "node_type": "tube"},
+        {"kind": "set_parm", "node_name": "template", "parm": "rad1", "value": 0.5},
+        {"kind": "set_parm", "node_name": "template", "parm": "rad2", "value": 0.0},
+        {"kind": "set_parm", "node_name": "template", "parm": "height", "value": 2.0},
+        {"kind": "create_node", "node_name": "pts", "node_type": "grid"},
+        {"kind": "set_parm", "node_name": "pts", "parm": "size", "value": [10.0, 10.0]},
+        {"kind": "create_node", "node_name": "scatter", "node_type": "scatter"},
+        {"kind": "set_parm", "node_name": "scatter", "parm": "npts", "value": 100},
+        {"kind": "connect", "node_name": "scatter", "input_index": 0, "source": "pts", "source_output_index": 0},
+        {"kind": "create_node", "node_name": "copy", "node_type": "copytopoints2"},
+        {"kind": "connect", "node_name": "copy", "input_index": 0, "source": "template", "source_output_index": 0},
+        {"kind": "connect", "node_name": "copy", "input_index": 1, "source": "scatter", "source_output_index": 0},
       ]
     """
     context = getattr(runtime, "context", None)

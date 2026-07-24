@@ -213,7 +213,10 @@ def test_combined_chunk_maps_to_ordered_events() -> None:
         assert op[3].payload == {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
         assert op[4].retention_class is RetentionClass.DURABLE
         assert events[-1] == RunnerCompleted(
-            "hello", {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+            "hello", {
+                "input_tokens": 10, "output_tokens": 5, "total_tokens": 15,
+                "cache_read_tokens": 0, "cache_creation_tokens": 0,
+            }
         )
 
     _run(scenario())
@@ -421,7 +424,10 @@ def test_empty_stream_yields_empty_response() -> None:
         runner = AgentRunner(graph)
         events = await _drain(runner, session_id="ses_x", user_input="hi")
         assert events[-1].final_response == ""
-        assert events[-1].usage == {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        assert events[-1].usage == {
+            "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+            "cache_read_tokens": 0, "cache_creation_tokens": 0,
+        }
 
     _run(scenario())
 
@@ -438,7 +444,10 @@ def test_usage_accumulates_across_chunks() -> None:
         ])
         runner = AgentRunner(graph)
         events = await _drain(runner, session_id="ses_x", user_input="hi")
-        assert events[-1].usage == {"input_tokens": 13, "output_tokens": 7, "total_tokens": 20}
+        assert events[-1].usage == {
+            "input_tokens": 13, "output_tokens": 7, "total_tokens": 20,
+            "cache_read_tokens": 0, "cache_creation_tokens": 0,
+        }
 
     _run(scenario())
 

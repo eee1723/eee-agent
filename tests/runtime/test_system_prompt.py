@@ -8,14 +8,27 @@ typed-proposal+approval path: scratch_commit returns a bounded receipt the
 LLM must reference (it cannot rewrite the numbers), and a refused commit
 preserves the sandbox for retry. These tests assert the new contract is
 present in the prompt.
+
+The prompt also drives efficiency: it steers the agent to batch functional
+units (not one node per turn) and to query the KB only for registered pitfall
+nodes (not every node), grown dynamically via EEE_PITFALL_NODES.
 """
 from __future__ import annotations
 
-from eee_agent.system_prompt import BASE_PROMPT, build_system_prompt
+import importlib
+
+from eee_agent.system_prompt import BASE_PROMPT
 
 
-def test_build_system_prompt_returns_base_prompt() -> None:
-    assert build_system_prompt() == BASE_PROMPT
+def test_build_system_prompt_returns_base_prompt_when_no_pitfalls(monkeypatch) -> None:
+    # With no pitfalls registered, the dynamic clause is empty, so the built
+    # prompt equals BASE_PROMPT exactly.
+    monkeypatch.delenv("EEE_PITFALL_NODES", raising=False)
+    from eee_agent import known_pitfalls
+    importlib.reload(known_pitfalls)
+    importlib.reload(importlib.import_module("eee_agent.system_prompt"))
+    from eee_agent.system_prompt import build_system_prompt as bsp
+    assert bsp() == BASE_PROMPT
 
 
 def test_prompt_lists_scratch_tools_as_available() -> None:
@@ -74,7 +87,41 @@ def test_prompt_directs_kb_unavailable_to_rebuild_button() -> None:
     assert "search_houdini_knowledge" in BASE_PROMPT
 
 
-def test_prompt_requires_kb_lookup_before_building() -> None:
-    # The agent must query the knowledge base to confirm node types/parameters
-    # before creating nodes, to avoid blind-guess failures.
-    assert "search_houdini_knowledge" in BASE_PROMPT
+def test_prompt_no_longer_forces_kb_before_every_node() -> None:
+    # The old unconditional "必须先用 search_houdini_knowledge 查询你要使用的节点
+    # 类型" mandate wasted ~38% of tool calls on doc queries. The new prompt
+    # trusts common-sense nodes and only queries for unfamiliar/pitfall nodes.
+    assert "必须先用 search_houdini_knowledge 查询你要使用的节点类型" not in BASE_PROMPT
+    # It now frames KB use as on-demand, not mandatory-before-everything.
+    assert "按需查询" in BASE_PROMPT or "常见节点" in BASE_PROMPT
+
+
+def test_prompt_encourages_functional_unit_batching() -> None:
+    # The agent must batch a functional unit per scratch_build call (not one
+    # node per turn) to cut turns and repeated-input tokens.
+    assert "功能单元" in BASE_PROMPT
+
+
+def test_build_system_prompt_injects_pitfalls_dynamically(monkeypatch) -> None:
+    # When pitfalls are registered, the built prompt appends a clause naming
+    # them as KB-required — grown from observed failures, not a static list.
+    monkeypatch.setenv("EEE_PITFALL_NODES", "copytopoints2,sweep2")
+    from eee_agent import known_pitfalls
+    importlib.reload(known_pitfalls)
+    importlib.reload(importlib.import_module("eee_agent.system_prompt"))
+    from eee_agent.system_prompt import build_system_prompt as bsp
+    prompt = bsp()
+    assert "特别注意的易错节点" in prompt
+    assert "copytopoints2" in prompt
+    assert "sweep2" in prompt
+    # BASE_PROMPT itself is untouched (the clause is appended at build time).
+    assert "特别注意的易错节点" not in BASE_PROMPT
+
+
+def test_build_system_prompt_omits_clause_when_no_pitfalls(monkeypatch) -> None:
+    monkeypatch.delenv("EEE_PITFALL_NODES", raising=False)
+    from eee_agent import known_pitfalls
+    importlib.reload(known_pitfalls)
+    importlib.reload(importlib.import_module("eee_agent.system_prompt"))
+    from eee_agent.system_prompt import build_system_prompt as bsp
+    assert "特别注意的易错节点" not in bsp()

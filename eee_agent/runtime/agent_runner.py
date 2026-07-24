@@ -20,12 +20,11 @@ from eee_agent.providers.events import (
     UsageUpdated,
 )
 from eee_agent.providers.normalize import normalize_message_chunk
-from eee_agent.runtime.models import RetentionClass
+from eee_agent.runtime.models import RetentionClass, TOOL_RESULT_PREVIEW_CHARS
 from eee_agent.runtime.agent_context import RuntimeToolContext
 from eee_agent.runtime.agent_tools import build_read_only_tools
 
-# Tool-result preview cap, matching the existing CLI preview behavior.
-TOOL_RESULT_PREVIEW_CHARS = 600
+
 
 
 @runtime_checkable
@@ -171,7 +170,13 @@ class AgentRunner:
     ) -> AsyncIterator[RunnerEvent | RunnerCompleted]:
         text_deltas: list[str] = []
         final_message: AIMessage | None = None
-        usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        usage: dict[str, int] = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+        }
 
         context: object | None = None
         if self._context_factory is not None:
@@ -237,13 +242,30 @@ class AgentRunner:
                                 usage["input_tokens"] += event.input_tokens
                                 usage["output_tokens"] += event.output_tokens
                                 usage["total_tokens"] += event.total_tokens
+                                usage["cache_read_tokens"] = (
+                                    usage.get("cache_read_tokens", 0)
+                                    + event.cache_read
+                                )
+                                usage["cache_creation_tokens"] = (
+                                    usage.get("cache_creation_tokens", 0)
+                                    + event.cache_creation
+                                )
+                                payload: dict[str, JsonValue] = {
+                                    "input_tokens": event.input_tokens,
+                                    "output_tokens": event.output_tokens,
+                                    "total_tokens": event.total_tokens,
+                                }
+                                # Surface cache metrics only when the provider
+                                # actually reported them (0 = not reported vs
+                                # reported-as-zero is indistinguishable, but
+                                # omitting keeps payloads small for providers
+                                # that never populate the field).
+                                if event.cache_read or event.cache_creation:
+                                    payload["cache_read_tokens"] = event.cache_read
+                                    payload["cache_creation_tokens"] = event.cache_creation
                                 yield RunnerEvent(
                                     event_type="model.usage_updated",
-                                    payload={
-                                        "input_tokens": event.input_tokens,
-                                        "output_tokens": event.output_tokens,
-                                        "total_tokens": event.total_tokens,
-                                    },
+                                    payload=payload,
                                     retention_class=RetentionClass.OPERATIONAL,
                                 )
                     elif isinstance(chunk, ToolMessage):
