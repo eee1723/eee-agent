@@ -64,6 +64,8 @@ from eee_agent.houdini_bridge.contracts import (
     PROTOCOL,
     BridgeRequest,
     SceneQueryResult,
+    _DuplicateKeyError,
+    _reject_duplicate_keys,
     parse_response,
 )
 from eee_agent.houdini_bridge.sensitivity import (
@@ -190,17 +192,6 @@ class _StreamReaderTransport:
 # --------------------------------------------------------------------------
 
 
-class _DuplicateKeyError(ValueError):
-    """Raised by the JSON object_pairs_hook on any duplicate object key."""
-
-
-def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    seen: set[str] = set()
-    for key, _value in pairs:
-        if key in seen:
-            raise _DuplicateKeyError("duplicate object key")
-        seen.add(key)
-    return dict(pairs)
 
 
 def _loads_strict_json(data: bytes, *, label: str) -> object:

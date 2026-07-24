@@ -23,7 +23,6 @@ and an explicit size limit.
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -56,10 +55,10 @@ from eee_agent.changesets.contracts import (
 from eee_agent.changesets import codec
 from eee_agent.core.ids import IdKind, require_id
 from eee_agent.houdini_bridge.contracts import (
-    MAX_MESSAGE_BYTES,
     PROTOCOL,
     BridgeError,
     SceneBinding,
+    _load_strict_json,
 )
 from eee_agent.runtime.models import canonical_json_dumps
 
@@ -165,40 +164,11 @@ def validate_capabilities(value: object) -> tuple[str, ...]:
 
 
 # --------------------------------------------------------------------------
-# strict JSON + primitive helpers (mirror contracts._load_strict_json)
+# strict JSON + primitive helpers — _load_strict_json is shared from
+# contracts.py (the single authority, with _DuplicateKeyError and
+# _reject_duplicate_keys); only changesets-specific helpers
+# (_load_strict_dict, _require_exact_*) live here.
 # --------------------------------------------------------------------------
-
-
-class _DuplicateKeyError(ValueError):
-    """Raised by the JSON object_pairs_hook on any duplicate object key."""
-
-
-def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    seen: set[str] = set()
-    for key, _value in pairs:
-        if key in seen:
-            raise _DuplicateKeyError("duplicate object key")
-        seen.add(key)
-    return dict(pairs)
-
-
-def _load_strict_json(raw: object, label: str) -> object:
-    if type(raw) is str:
-        data = raw.encode("utf-8")
-    elif type(raw) is bytes:
-        data = raw
-    else:
-        raise TypeError(f"{label} must be str or bytes")
-    if len(data) > MAX_MESSAGE_BYTES:
-        raise ValueError(f"{label} exceeds the maximum message size")
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"{label} is not valid UTF-8") from exc
-    try:
-        return json.loads(text, object_pairs_hook=_reject_duplicate_keys)
-    except (_DuplicateKeyError, json.JSONDecodeError) as exc:
-        raise ValueError(f"{label} is not strict JSON") from exc
 
 
 def _load_strict_dict(raw: object, label: str) -> dict[str, object]:
