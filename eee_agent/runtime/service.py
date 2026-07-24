@@ -1838,6 +1838,13 @@ class RuntimeService:
         self, session_id: str, run_id: str
     ) -> RuntimeToolContext:
         """Build one secure context for a Run, including optional modeling."""
+        # NOTE: the modeling context (ModelingToolContext) is built for the
+        # legacy propose_modeling seam, but propose_modeling is retired from the
+        # agent graph and NO registered tool currently consumes context.modeling.
+        # It is retained so the change-set/ownership/recovery kernel and a
+        # future revival of the legacy path stay wired; if that path is
+        # permanently abandoned, _build_modeling_context + RuntimeToolContext
+        # .modeling + ModelingToolContext can be removed together.
         modeling = None
         if self._modeling_catalog_provider is not None:
             modeling = await self._build_modeling_context(session_id, run_id)

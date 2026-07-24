@@ -131,25 +131,6 @@ _WIRE_FACT_FIELDS = frozenset({"target", "input_index", "source"})
 _CONDITION_RESULT_FIELDS = frozenset({"kind", "passed", "detail"})
 _RESPONSE_REQUIRED_FIELDS = frozenset({"protocol", "kind", "request_id", "ok"})
 
-# ChangeSet/manifest deserializer field sets (mirror the accepted repository).
-# Shared ChangeSet/Manifest/Receipt field sets live in the contract codec; the
-# names below are re-exported for any internal reference and kept stable.
-_CHANGESET_FIELDS = codec._CHANGESET_FIELDS
-_MANIFEST_FIELDS = codec._MANIFEST_FIELDS
-_OWNED_FIELDS = codec._OWNED_FIELDS
-_NODEREF_FIELDS = codec._NODEREF_FIELDS
-_WIREREF_FIELDS = codec._WIREREF_FIELDS
-_CREATE_FIELDS = codec._CREATE_FIELDS
-_SETPARM_FIELDS = codec._SETPARM_FIELDS
-_CONNECT_FIELDS = codec._CONNECT_FIELDS
-_RISK_FIELDS = codec._RISK_FIELDS
-_CHECKPOINT_FIELDS = codec._CHECKPOINT_FIELDS
-_PARM_SNAPSHOT_FIELDS = codec._PARM_SNAPSHOT_FIELDS
-_WIRE_SNAPSHOT_FIELDS = codec._WIRE_SNAPSHOT_FIELDS
-# ChangeReceipt wire fields (mirror the accepted repository decoder).
-_RECEIPT_FIELDS = codec._RECEIPT_FIELDS
-
-
 
 # --------------------------------------------------------------------------
 # capability negotiation

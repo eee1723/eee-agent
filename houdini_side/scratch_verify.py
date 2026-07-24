@@ -63,13 +63,6 @@ MODULAR_NODE_TYPES = frozenset({
     "pack", "unpack",
 })
 
-# Pure post-processing node types (don't count toward modularity).
-POSTPROCESS_NODE_TYPES = frozenset({
-    "normal", "polybevel", "polybevel::3.0", "subdivide", "facet",
-    "clean", "null", "merge", "blast", "group", "attribwrangle",
-    "attribpromote", "attribcreate", "transform", "xform",
-    "display", "output", "out", "edini_generate",
-})
 
 
 # --------------------------------------------------------------------------
@@ -750,7 +743,6 @@ __all__ = [
     "HEALTH_ADVISORY_CHECKS",
     "HEALTH_BLOCKING_CHECKS",
     "MODULAR_NODE_TYPES",
-    "POSTPROCESS_NODE_TYPES",
     "check_modular_structure",
     "inspect_geometry_health",
     "run_verify_gates",

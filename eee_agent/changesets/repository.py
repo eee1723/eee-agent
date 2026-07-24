@@ -315,30 +315,13 @@ def _storage_digest(dto: object) -> str:
 # --------------------------------------------------------------------------
 
 # --------------------------------------------------------------------------
-# DTO field sets + strict decoders: delegated to the shared contract codec.
-# The codec owns the single typed decode path (exact types, exact field sets,
-# tuple collection fields); the names below are kept as thin private wrappers
-# plus re-exports so existing internal call sites and tests are unchanged.
-# Storage-only boundaries (canonical JSON loading, digest verification) stay
-# in this module and never enter the codec.
+# DTO strict decoders: delegated to the shared contract codec. The codec owns
+# the single typed decode path (exact types, exact field sets, tuple
+# collection fields). The thin wrappers below forward to it so internal call
+# sites read naturally; the codec's private field sets are NOT re-exported
+# here (they had no local consumers). Storage-only boundaries (canonical JSON
+# loading, digest verification) stay in this module and never enter the codec.
 # --------------------------------------------------------------------------
-
-_OWNED_FIELDS = codec._OWNED_FIELDS
-_NODEREF_FIELDS = codec._NODEREF_FIELDS
-_WIREREF_FIELDS = codec._WIREREF_FIELDS
-_CREATE_FIELDS = codec._CREATE_FIELDS
-_SETPARM_FIELDS = codec._SETPARM_FIELDS
-_CONNECT_FIELDS = codec._CONNECT_FIELDS
-_RISK_FIELDS = codec._RISK_FIELDS
-_PARM_SNAPSHOT_FIELDS = codec._PARM_SNAPSHOT_FIELDS
-_WIRE_SNAPSHOT_FIELDS = codec._WIRE_SNAPSHOT_FIELDS
-_CHECKPOINT_FIELDS = codec._CHECKPOINT_FIELDS
-# Historical repository spelling for the ConditionResult field set.
-_RESULT_FIELDS = codec._CONDITION_RESULT_FIELDS
-_MANIFEST_FIELDS = codec._MANIFEST_FIELDS
-_CHANGESET_FIELDS = codec._CHANGESET_FIELDS
-_APPROVAL_FIELDS = codec._APPROVAL_FIELDS
-_RECEIPT_FIELDS = codec._RECEIPT_FIELDS
 
 
 def _require_dict(value: object, label: str) -> dict[str, object]:

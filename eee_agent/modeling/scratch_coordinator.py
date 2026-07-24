@@ -39,13 +39,11 @@ from eee_agent.houdini_bridge.scratch import (
 )
 from eee_agent.runtime.agent_context import RuntimeToolContext
 
-# Bounded input limits — must match scratch.py exactly so the tool rejects
-# oversized input before it ever reaches the bridge wire.
+# Bounded input limit enforced at the tool seam before the bridge wire.
+# Per-field length bounds (node name/type/parm name, sandbox id) are enforced
+# by the DTO layer in scratch.py (ScratchOp.from_dict / ScratchRequest), so
+# they are not duplicated here.
 _MAX_OPS_PER_CALL = 64
-_MAX_NODE_NAME_LEN = 64
-_MAX_NODE_TYPE_LEN = 64
-_MAX_PARM_NAME_LEN = 64
-_MAX_SANDBOX_ID_LEN = 128
 
 
 class ScratchError(ValueError):
