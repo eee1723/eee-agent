@@ -89,9 +89,9 @@ _WORKER_STOP_TIMEOUT_SECONDS = 120.0
 # Bounded modeling brief. It is persisted in runtime events (normal runtime
 # behavior) but never copied into stdout/stderr or the evidence record.
 _BRIEF = (
-    "Use the propose_modeling tool to propose a procedural model of a simple "
-    "parametric table: one box tabletop and four legs. Stop after the "
-    "proposal is created."
+    "Use the scratch_build tool to create a simple parametric table in the "
+    "sandbox: one box tabletop. Set its size. Observe the cooked result, then "
+    "use scratch_commit to promote it into the real scene. Stop after the commit."
 )
 
 

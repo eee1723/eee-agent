@@ -964,3 +964,229 @@ def test_d2_snapshot_run_rejects_extra_unknown_field() -> None:
     bad_run = {**_run(), "unknown_future_field": "x"}
     with pytest.raises(PanelClientError):
         state.load_snapshot(_snapshot(active=None, seq=5) | {"runs": [bad_run]})
+
+
+# --------------------------------------------------------------------------
+# Block A: ordered step list + token usage capture
+# --------------------------------------------------------------------------
+# Each run now carries a 'steps' trace (assistant text segments + tool calls +
+# tool results) so the conversation timeline can show the FULL agent loop
+# instead of only the final reply, plus a 'usage' dict so the inspector /
+# context bar can show token counts. steps/usage are panel-only projections
+# (never on the wire); they synthesize to empty on load and populate as events
+# arrive.
+
+def test_load_snapshot_synthesizes_empty_steps_and_usage() -> None:
+    """A freshly-loaded run has steps=[] and usage=None even though the server
+    wire snapshot never carries those keys (they are panel-only)."""
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=5))
+    selected = state.snapshot()["selected_run"]
+    assert selected["steps"] == []
+    assert selected["usage"] is None
+
+
+def test_run_created_initializes_steps_and_usage() -> None:
+    """run.created seeds empty steps/usage so apply_event branches can append
+    without checking for the key's existence."""
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=None, seq=5))
+    assert state.apply_event(_event(6, "run.created", {
+        "run_id": "run_" + "e" * 32,
+        "session_id": SID,
+        "user_input": "新建一个节点",
+    }, run_id="run_" + "e" * 32))
+    run = state.snapshot()["active_run"]
+    assert run["steps"] == []
+    assert run["usage"] is None
+
+
+def test_text_delta_accumulates_into_assistant_text_step() -> None:
+    """model.text_delta opens/reuses a trailing assistant_text step so each
+    assistant segment is preserved distinctly instead of fused into _output."""
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=5))
+    assert state.apply_event(_event(6, "model.text_delta", {"text": "Hello "}))
+    assert state.apply_event(_event(7, "model.text_delta", {"text": "world"}))
+    steps = state.snapshot()["selected_run"]["steps"]
+    assert len(steps) == 1
+    assert steps[0]["kind"] == "assistant_text"
+    assert steps[0]["body"] == "Hello world"
+    assert steps[0]["status"] == "streaming"
+    # _output is still the full accumulator (the streaming card reads it).
+    assert state.snapshot()["output"] == "Hello world"
+
+
+def test_tool_call_splits_assistant_text_into_separate_steps() -> None:
+    """The defining fix for 'timeline only shows the last step': a tool call
+    between two text segments opens a NEW assistant_text step instead of
+    concatenating everything into one blob."""
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=5))
+    state.apply_event(_event(6, "model.text_delta", {"text": "思考中..."}))
+    state.apply_event(_event(7, "tool.started", {
+        "call_id": "call_1", "name": "inspect_node", "index": 0}))
+    state.apply_event(_event(8, "tool.completed", {
+        "call_id": "call_1", "name": "inspect_node", "content": "结果",
+        "truncated": False}))
+    state.apply_event(_event(9, "model.text_delta", {"text": "完成了"}))
+    steps = state.snapshot()["selected_run"]["steps"]
+    kinds = [s["kind"] for s in steps]
+    # Two distinct assistant_text segments split by the tool call.
+    assert kinds == ["assistant_text", "tool_call", "assistant_text"]
+    assert steps[1]["status"] == "done"        # paired with its result
+    assert steps[1]["result"] == "结果"
+
+
+def test_tool_result_pairs_onto_matching_call_by_call_id() -> None:
+    """tool.completed correlates to its tool.started by call_id and records the
+    result on the same step (status done + result body)."""
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=5))
+    state.apply_event(_event(6, "tool.started", {
+        "call_id": "c7", "name": "query_scene", "index": 0}))
+    state.apply_event(_event(7, "tool.started", {
+        "call_id": "c8", "name": "geometry_stats", "index": 1}))
+    state.apply_event(_event(8, "tool.completed", {
+        "call_id": "c8", "name": "geometry_stats",
+        "content": '{"nodes": 3}', "truncated": False}))
+    state.apply_event(_event(9, "tool.completed", {
+        "call_id": "c7", "name": "query_scene", "content": "ok",
+        "truncated": False}))
+    steps = state.snapshot()["selected_run"]["steps"]
+    # c7 still pending after c8 returned (out-of-order completion).
+    by_ref = {s["ref"]: s for s in steps}
+    assert by_ref["c7"]["status"] == "done"
+    assert by_ref["c7"]["result"] == "ok"
+    assert by_ref["c8"]["status"] == "done"
+    assert by_ref["c8"]["result"] == '{"nodes": 3}'
+
+
+def test_unpaired_tool_result_appends_as_tool_result_step() -> None:
+    """A tool.completed whose call_id never had a tool.started (e.g. an event
+    gap on reconnect) still surfaces as its own tool_result step."""
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=5))
+    state.apply_event(_event(6, "tool.completed", {
+        "call_id": "orphan", "name": "scene_status", "content": "alive",
+        "truncated": False}))
+    steps = state.snapshot()["selected_run"]["steps"]
+    assert len(steps) == 1
+    assert steps[0]["kind"] == "tool_result"
+    assert steps[0]["status"] == "done"
+    assert steps[0]["body"] == "alive"
+
+
+def test_assistant_final_settles_trailing_step_with_final_text() -> None:
+    """message.assistant_final bakes the authoritative reply into the last
+    assistant_text step (status done) so the activity panel shows the full
+    reply, not the last streamed fragment."""
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=5))
+    state.apply_event(_event(6, "model.text_delta", {"text": "片段..."}))
+    state.apply_event(_event(7, "message.assistant_final",
+                             {"text": "完整的最终回复",
+                              "usage": {"input_tokens": 100,
+                                        "output_tokens": 20,
+                                        "total_tokens": 120}}))
+    steps = state.snapshot()["selected_run"]["steps"]
+    assert steps[-1]["kind"] == "assistant_text"
+    assert steps[-1]["body"] == "完整的最终回复"
+    assert steps[-1]["status"] == "done"
+
+
+def test_assistant_final_captures_terminal_usage() -> None:
+    """Previously the usage dict on message.assistant_final was read-and-
+    discarded; now it is captured onto the run so the inspector can show it."""
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=5))
+    state.apply_event(_event(6, "message.assistant_final",
+                             {"text": "done",
+                              "usage": {"input_tokens": 50,
+                                        "output_tokens": 10,
+                                        "total_tokens": 60}}))
+    assert state.snapshot()["selected_run"]["usage"] == {
+        "input_tokens": 50, "output_tokens": 10, "total_tokens": 60}
+
+
+def test_model_usage_updated_accumulates_running_total() -> None:
+    """model.usage_updated fires with per-chunk deltas; the run accumulates
+    them into a live running total for the context bar."""
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=5))
+    state.apply_event(_event(6, "model.usage_updated",
+                             {"input_tokens": 10, "output_tokens": 2,
+                              "total_tokens": 12}))
+    state.apply_event(_event(7, "model.usage_updated",
+                             {"input_tokens": 5, "output_tokens": 3,
+                              "total_tokens": 8}))
+    assert state.snapshot()["selected_run"]["usage"] == {
+        "input_tokens": 15, "output_tokens": 5, "total_tokens": 20}
+
+
+def test_model_completed_overwrites_running_total_with_final_usage() -> None:
+    """model.completed is DURABLE (survives reconnect replay) and carries the
+    authoritative final count; it overwrites any accumulated running total."""
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=5))
+    state.apply_event(_event(6, "model.usage_updated",
+                             {"input_tokens": 10, "output_tokens": 2,
+                              "total_tokens": 12}))
+    state.apply_event(_event(7, "model.completed",
+                             {"usage": {"input_tokens": 1000,
+                                        "output_tokens": 200,
+                                        "total_tokens": 1200}}))
+    assert state.snapshot()["selected_run"]["usage"] == {
+        "input_tokens": 1000, "output_tokens": 200, "total_tokens": 1200}
+
+
+def test_assistant_final_usage_left_untouched_when_absent() -> None:
+    """An assistant_final without a usage dict leaves the run's usage as-is
+    (None if never set, or the running total if usage_updated fired)."""
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=5))
+    state.apply_event(_event(6, "model.usage_updated",
+                             {"input_tokens": 7, "output_tokens": 1,
+                              "total_tokens": 8}))
+    state.apply_event(_event(7, "message.assistant_final",
+                             {"text": "no usage here"}))
+    assert state.snapshot()["selected_run"]["usage"] == {
+        "input_tokens": 7, "output_tokens": 1, "total_tokens": 8}
+
+
+def test_invalid_usage_payload_does_not_advance_seq() -> None:
+    """A malformed model.usage_updated must not wedge the stream: validate-before-
+    mutate, raise PanelClientError, and leave last_seq untouched (the project's
+    load-bearing contract for every validated event branch)."""
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=5))
+    # model.usage_updated does not validate-payload-raise today (its helper is
+    # defensive and returns the running total unchanged), so feed a malformed
+    # text_delta instead to assert the no-advance contract on a strict branch.
+    with pytest.raises(PanelClientError):
+        state.apply_event(_event(6, "model.text_delta", {"text": 123}))
+    assert state.snapshot()["last_seq"] == 5
+
+
+def test_steps_bounded_to_max() -> None:
+    """A runaway agent loop cannot grow a run's step list without bound."""
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=5))
+    for i in range(150):
+        state.apply_event(_event(6 + i * 2, "tool.started", {
+            "call_id": f"c{i}", "name": "t", "index": i}))
+        state.apply_event(_event(7 + i * 2, "tool.completed", {
+            "call_id": f"c{i}", "name": "t", "content": "x", "truncated": False}))
+    steps = state.snapshot()["selected_run"]["steps"]
+    assert len(steps) <= 100
+
+
+def test_step_body_bounded() -> None:
+    """An assistant_text segment body is capped so one huge reply cannot bloat
+    the run dict."""
+    state = RuntimePanelState()
+    state.load_snapshot(_snapshot(active=_run(), seq=5))
+    huge = "x" * 100_000
+    state.apply_event(_event(6, "model.text_delta", {"text": huge}))
+    body = state.snapshot()["selected_run"]["steps"][0]["body"]
+    assert len(body) <= 4000

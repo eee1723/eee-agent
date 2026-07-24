@@ -21,6 +21,7 @@ _MAX_REQUEST_ID_LEN = 128
 COMMAND_TYPES = frozenset(
     {
         "runtime.ping",
+        "knowledge.rebuild",
         "session.list",
         "session.create",
         "session.rename",

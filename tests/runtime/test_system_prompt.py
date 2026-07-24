@@ -1,11 +1,13 @@
-"""B-3: the BASE_PROMPT must surface propose_modeling and the rolled_back
-feedback contract so the LLM does not improvise.
+"""B-3 + Phase 3: the BASE_PROMPT must surface the sandbox+verify+commit
+workflow so the LLM does not improvise.
 
-The reported symptom from ses_65fefe0a5dbe41798d341d9362a27a0e: after a
-rolled-back apply (applied_op_ids=[]), the LLM described the scene as
-"似乎仅部分应用" because it had no idea the apply had failed at all. The
-tool list in the old prompt also omitted propose_modeling, so the LLM
-could not tell that proposing a fresh spec was even possible.
+The original B-3 concern (ses_65fefe0a5dbe41798d341d9362a27a0e) was that the
+LLM had no feedback contract after a rolled-back apply. With the Phase 3
+retirement of propose_modeling, the commit workflow replaces the old
+typed-proposal+approval path: scratch_commit returns a bounded receipt the
+LLM must reference (it cannot rewrite the numbers), and a refused commit
+preserves the sandbox for retry. These tests assert the new contract is
+present in the prompt.
 """
 from __future__ import annotations
 
@@ -16,10 +18,10 @@ def test_build_system_prompt_returns_base_prompt() -> None:
     assert build_system_prompt() == BASE_PROMPT
 
 
-def test_prompt_lists_propose_modeling_as_available_tool() -> None:
-    # The old prompt enumerated only the read-only tools and never mentioned
-    # propose_modeling. The LLM must see the proposal tool to use it.
-    assert "propose_modeling" in BASE_PROMPT
+def test_prompt_lists_scratch_tools_as_available() -> None:
+    # The iterative sandbox workflow tools must be visible to the LLM.
+    assert "scratch_build" in BASE_PROMPT
+    assert "scratch_commit" in BASE_PROMPT
 
 
 def test_prompt_documents_every_read_only_tool() -> None:
@@ -35,28 +37,44 @@ def test_prompt_documents_every_read_only_tool() -> None:
         assert tool in BASE_PROMPT, f"prompt must mention {tool}"
 
 
-def test_prompt_describes_rolled_back_feedback_contract() -> None:
-    # The LLM must read changeset.applied / changeset.rolled_back events and
-    # branch on error_code; it must NOT infer the outcome from the scene.
-    assert "changeset.rolled_back" in BASE_PROMPT
-    assert "changeset.applied" in BASE_PROMPT
-    assert "error_code" in BASE_PROMPT
-    assert "error_message" in BASE_PROMPT
-    # The "applied_op_ids=[] means zero ops, not partial" rule must be stated.
-    assert "applied_op_ids=[]" in BASE_PROMPT
+def test_prompt_describes_commit_receipt_contract() -> None:
+    # The LLM must read the scratch_commit receipt fields and branch on
+    # committed/refused; it must NOT fabricate a committed result.
+    assert "receipt" in BASE_PROMPT
+    assert "committed" in BASE_PROMPT
+    assert "refused" in BASE_PROMPT
 
 
-def test_prompt_branches_on_known_error_codes() -> None:
-    # The prompt must tell the LLM how to react to each common error code.
-    assert "houdini.operation_failed" in BASE_PROMPT
-    assert "bridge.stale_scene" in BASE_PROMPT
-    assert "apply.postcondition_failed" in BASE_PROMPT
+def test_prompt_describes_refused_commit_preserves_sandbox() -> None:
+    # A refused commit must tell the LLM the sandbox is preserved for retry,
+    # not to blindly re-commit.
+    assert "沙箱保留" in BASE_PROMPT or "保留" in BASE_PROMPT
 
 
-def test_prompt_tells_user_to_approve_in_ui() -> None:
-    # ses_65fefe0a5d symptom: the user approved but the LLM did not realize
-    # approval was a UI action it could not observe directly. The prompt must
-    # tell the LLM to ask the user to approve (批准) in the UI and not claim
-    # success until the apply event arrives. The prompt is Chinese, so assert
-    # the Chinese approval term rather than the English word.
-    assert "批准" in BASE_PROMPT
+def test_prompt_lists_verify_gates() -> None:
+    # The four hard gates must be named so the LLM knows what can refuse.
+    for gate in ("bake", "structure", "orientation", "health"):
+        assert gate in BASE_PROMPT, f"prompt must mention the {gate} gate"
+
+
+def test_prompt_instructs_agent_to_use_todos_for_modeling() -> None:
+    # deepagents injects write_todos but its built-in description tells the
+    # model to SKIP todos for "simple" tasks — which is why modeling runs
+    # produced todos_json=None. Our prompt must explicitly require write_todos
+    # for modeling so the UI's plan view is populated.
+    assert "write_todos" in BASE_PROMPT
+    assert "建模" in BASE_PROMPT
+
+
+def test_prompt_directs_kb_unavailable_to_rebuild_button() -> None:
+    # When search_houdini_knowledge returns kb_unavailable, the agent must tell
+    # the user to click "Rebuild KB" instead of blindly retrying.
+    assert "kb_unavailable" in BASE_PROMPT
+    assert "Rebuild KB" in BASE_PROMPT
+    assert "search_houdini_knowledge" in BASE_PROMPT
+
+
+def test_prompt_requires_kb_lookup_before_building() -> None:
+    # The agent must query the knowledge base to confirm node types/parameters
+    # before creating nodes, to avoid blind-guess failures.
+    assert "search_houdini_knowledge" in BASE_PROMPT

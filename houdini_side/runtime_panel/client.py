@@ -433,6 +433,13 @@ class RuntimeObserverClient(QtCore.QObject):
     sessionChanged = QtCore.Signal(str, str, int)
     sessionsChanged = QtCore.Signal(object, str)
     runtimeSnapshotChanged = QtCore.Signal(object)
+    # Lightweight streaming deltas for in-flight assistant text/thinking.
+    # Carries (run_id, full_output, full_thinking) so the conversation view can
+    # update the trailing streaming card WITHOUT forcing a full snapshot rebuild
+    # (which deep-copies every run and rebuilds the inspector). Emitted only for
+    # model.text_delta / model.reasoning_delta; everything else still goes
+    # through runtimeSnapshotChanged.
+    streamingDelta = QtCore.Signal(str, str, str)
     changesetsChanged = QtCore.Signal(object)
     commandSucceeded = QtCore.Signal(str, object)
     commandFailed = QtCore.Signal(str, str, str, bool, bool)
@@ -454,6 +461,17 @@ class RuntimeObserverClient(QtCore.QObject):
         self._changeset_timer = QtCore.QTimer(self)
         self._changeset_timer.setSingleShot(True)
         self._changeset_timer.timeout.connect(self.refresh_changesets)
+        # Coalesce runtimeSnapshotChanged emissions so the heavy full-snapshot
+        # deep-copy + inspector rebuild runs at most ~10x/sec instead of once
+        # per token. State still advances immediately in _runtime_state; only
+        # the UI notification is batched. A flush is forced on snapshot
+        # boundaries (full reload) and on session/terminal transitions.
+        self._snapshot_flush_interval_ms = 100
+        self._snapshot_dirty = False
+        self._snapshot_timer = QtCore.QTimer(self)
+        self._snapshot_timer.setSingleShot(True)
+        self._snapshot_timer.setInterval(self._snapshot_flush_interval_ms)
+        self._snapshot_timer.timeout.connect(self._flush_snapshot)
         self._request_counter = itertools.count(1)
         self._pending: dict[str, str] = {}
         self._cursors = RuntimeCursorBook()
@@ -494,6 +512,7 @@ class RuntimeObserverClient(QtCore.QObject):
         self._stopping = True
         self._timer.stop()
         self._changeset_timer.stop()
+        self._snapshot_timer.stop()
         socket = self._socket
         self._socket = None
         if socket is not None:
@@ -662,6 +681,18 @@ class RuntimeObserverClient(QtCore.QObject):
             },
             "workspace.inspect",
         )
+
+    def rebuild_knowledge(self, hfs: str | None = None) -> None:
+        """Request an advisory knowledge-cache rebuild.
+
+        The build runs off the runtime's event loop; the response (success or
+        failure) is delivered via ``commandSucceeded`` / ``commandFailed`` with
+        purpose ``knowledge.rebuild`` so the UI can show the result.
+        """
+        payload: dict[str, object] = {}
+        if hfs is not None:
+            payload["hfs"] = hfs
+        self._send("knowledge.rebuild", payload, "knowledge.rebuild")
 
     def _schedule(self, delay_ms: int | None = None) -> None:
         if self._stopping or self._timer.isActive():
@@ -1025,6 +1056,25 @@ class RuntimeObserverClient(QtCore.QObject):
         if not self._changeset_timer.isActive():
             self._changeset_timer.start(80)
 
+    def _schedule_snapshot_flush(self) -> None:
+        """Mark the snapshot dirty and emit it on a coalesced timer.
+
+        This is the load-bearing responsiveness fix: instead of deep-copying
+        every run + rebuilding the inspector on every single event (which froze
+        the Houdini main thread during token streaming), the full snapshot is
+        rebuilt at most ~10x/sec. Only snapshot boundaries and session/terminal
+        transitions force an immediate flush.
+        """
+        self._snapshot_dirty = True
+        if not self._snapshot_timer.isActive():
+            self._snapshot_timer.start()
+
+    def _flush_snapshot(self) -> None:
+        if not self._snapshot_dirty:
+            return
+        self._snapshot_dirty = False
+        self.runtimeSnapshotChanged.emit(self._runtime_state.snapshot())
+
     def _handle_event(self, message) -> None:
         try:
             snapshot = snapshot_boundary(message)
@@ -1040,6 +1090,11 @@ class RuntimeObserverClient(QtCore.QObject):
             except PanelClientError as exc:
                 self.connectionChanged.emit("error", str(exc))
                 return
+            # Full reload: flush any pending coalesced snapshot first, then
+            # emit the authoritative snapshot immediately so history replay
+            # sees it without waiting for the timer.
+            self._snapshot_timer.stop()
+            self._snapshot_dirty = False
             self.runtimeSnapshotChanged.emit(self._runtime_state.snapshot())
             if session_id == self._current_session_id:
                 self.sessionChanged.emit(
@@ -1056,13 +1111,33 @@ class RuntimeObserverClient(QtCore.QObject):
             return
         if advanced:
             seq = self._cursors.last_seq(session_id)
+            event_type = message.get("type")
             if state_advanced:
-                self.runtimeSnapshotChanged.emit(
-                    self._runtime_state.snapshot()
-                )
+                # Streaming token deltas are the hot path: route them through
+                # a lightweight signal that updates only the trailing card,
+                # bypassing the full-snapshot deep-copy + inspector rebuild.
+                # All other state changes are coalesced onto the snapshot timer.
+                if event_type in ("model.text_delta", "model.reasoning_delta"):
+                    self._emit_streaming_delta()
+                    if not self._snapshot_timer.isActive():
+                        self._schedule_snapshot_flush()
+                else:
+                    # Structural / terminal / tool / todos changes: flush now
+                    # if the timer is idle, otherwise let the pending flush
+                    # carry it. A terminal run transition always forces an
+                    # immediate flush so the conversation settles promptly.
+                    if (event_type in ("run.state_changed", "message.assistant_final",
+                                       "run.failed", "run.created")
+                            or not self._snapshot_timer.isActive()):
+                        self._snapshot_timer.stop()
+                        self._snapshot_dirty = False
+                        self.runtimeSnapshotChanged.emit(
+                            self._runtime_state.snapshot())
+                    else:
+                        self._schedule_snapshot_flush()
             # A renamed Session (e.g. auto-titled after the first run) updates
             # the cached title and the sidebar in place — no extra round-trip.
-            if message.get("type") == "session.renamed":
+            if event_type == "session.renamed":
                 self._apply_renamed_session(message.get("payload"))
             if changeset_refresh_required(message):
                 self._schedule_changeset_refresh()
@@ -1084,3 +1159,15 @@ class RuntimeObserverClient(QtCore.QObject):
                 self.sessionChanged.emit(
                     session_id, self._current_session_title, seq
                 )
+
+    def _emit_streaming_delta(self) -> None:
+        """Emit a lightweight streaming update for the selected run.
+
+        Pulls the current output/thinking for the selected run without
+        rebuilding the full snapshot, so token deltas update the conversation
+        card with near-zero main-thread cost.
+        """
+        run_id, output, thinking = self._runtime_state.streaming_delta()
+        if run_id is None:
+            return
+        self.streamingDelta.emit(run_id, output, thinking)

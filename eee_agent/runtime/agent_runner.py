@@ -313,23 +313,28 @@ def build_agent_runner(
 
     The factory only builds the graph/runner; it does not open or own the
     checkpointer. Task 10's RuntimeService supplies the live checkpointer.
+
+    ``modeling=True`` exposes the scratch sandbox tools (scratch_build +
+    scratch_commit) so the agent can build iteratively in an isolated
+    container and promote verified results through hard gates. The legacy
+    ``propose_modeling`` tool (the blind-whole-spec-at-once approach) was
+    retired in favor of the iterative sandbox workflow; its module and tests
+    are retained for now but it is no longer registered on the agent graph.
     """
     if type(modeling) is not bool:
         raise TypeError("modeling must be a bool")
     tools = build_read_only_tools()
     if modeling:
-        from eee_agent.modeling.proposal import propose_modeling
+        from eee_agent.modeling.scratch_coordinator import (
+            scratch_build,
+            scratch_commit,
+        )
 
-        tools.append(propose_modeling)
-        graph = build_agent(
-            tools=tools,
-            checkpointer=checkpointer,
-            context_schema=RuntimeToolContext,
-        )
-    else:
-        graph = build_agent(
-            tools=tools,
-            checkpointer=checkpointer,
-            context_schema=RuntimeToolContext,
-        )
+        tools.append(scratch_build)
+        tools.append(scratch_commit)
+    graph = build_agent(
+        tools=tools,
+        checkpointer=checkpointer,
+        context_schema=RuntimeToolContext,
+    )
     return AgentRunner(graph)

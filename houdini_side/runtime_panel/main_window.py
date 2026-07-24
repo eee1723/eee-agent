@@ -54,9 +54,24 @@ class RuntimePanel(QtWidgets.QWidget):
         self._workspace_id: str | None = None
         self._active_run_id: str | None = None
         self._active_run_status = ""
+        # Block C: model + token total for the shown run, surfaced to the
+        # context bar. Captured in _on_snapshot from the shown run's
+        # model_snapshot_json and usage projection.
+        self._shown_model: str = ""
+        self._shown_total_tokens: int | None = None
+        # Structural signature of the last inspector render. Pure streaming
+        # (text/thinking) deltas leave this unchanged, so the inspector rebuild
+        # is skipped entirely — the dominant cost during token streaming.
+        # Tuple of (active_run_id, run_status, todos_len, activity_len,
+        # apply_outcomes_len, has_failure).
+        self._inspector_signature: tuple = ()
         # Run output is append-only in the card flow (unlike legacy's single
         # text box), so render each run's final output exactly once.
         self._shown_output_run_id: str | None = None
+        # Block B: the run whose steps currently populate the ActivityPanel /
+        # ThinkingPanel. When the shown run changes, the panels are reset so a
+        # new run does not inherit the previous run's step trace.
+        self._shown_steps_run_id: str | None = None
         # C: history replay flag. _on_session sets this when the active
         # session changes (including the first activation after connect);
         # _on_snapshot consumes it once and rebuilds the conversation flow
@@ -132,6 +147,9 @@ class RuntimePanel(QtWidgets.QWidget):
         c.sessionsChanged.connect(self._on_sessions)
         c.sessionChanged.connect(self._on_session)
         c.runtimeSnapshotChanged.connect(self._on_snapshot)
+        # Lightweight streaming path: token deltas update only the trailing
+        # conversation card, skipping the full-snapshot inspector rebuild.
+        c.streamingDelta.connect(self._on_streaming_delta)
         c.changesetsChanged.connect(self._on_changesets)
         c.artifactObserved.connect(self._on_artifact)
         c.visionObserved.connect(self._on_vision)
@@ -153,6 +171,7 @@ class RuntimePanel(QtWidgets.QWidget):
         self.conversation.stopRequested.connect(self._stop_run)
         self.inspector.createWorkspaceRequested.connect(self._create_workspace)
         self.inspector.inspectWorkspaceRequested.connect(self._inspect_workspace)
+        self.inspector.rebuildKnowledgeRequested.connect(self._rebuild_knowledge)
         self.approval_drawer.approved.connect(
             lambda: self._decide_changeset(True))
         self.approval_drawer.rejected.connect(
@@ -258,6 +277,7 @@ class RuntimePanel(QtWidgets.QWidget):
                 self._artifacts = ()
                 self._visions = ()
                 self._shown_output_run_id = None
+                self._shown_steps_run_id = None
                 self.inspector.render_artifacts(())
                 self.inspector.render_visions(())
                 self.conversation.clear_items()
@@ -268,6 +288,7 @@ class RuntimePanel(QtWidgets.QWidget):
                 # First activation after connect: clear any boot notice and
                 # reset the shown-output marker so replay re-emits every run.
                 self._shown_output_run_id = None
+                self._shown_steps_run_id = None
                 self.conversation.clear_items()
             self._current_session_id = session_id
             # C: ask the next snapshot to rebuild the conversation flow from
@@ -276,6 +297,21 @@ class RuntimePanel(QtWidgets.QWidget):
             self._history_needs_replay = True
         self._session_title = title
         self._refresh_context_bar()
+
+    def _on_streaming_delta(self, run_id, output, thinking) -> None:
+        """Lightweight handler for token deltas.
+
+        Updates only the trailing conversation card; the inspector is NOT
+        rebuilt (it refreshes on the coalesced snapshot for structural
+        changes). This is the hot path during token streaming and must stay
+        cheap. Only the active, non-terminal run is streamed live.
+        """
+        if run_id != self._active_run_id:
+            return
+        if self._active_run_status in _TERMINAL_RUN_STATES:
+            return
+        if output or thinking:
+            self.conversation.update_streaming(output, thinking=thinking)
 
     def _on_snapshot(self, snapshot) -> None:
         # Mirrors legacy _set_runtime_snapshot: runs live under
@@ -286,6 +322,7 @@ class RuntimePanel(QtWidgets.QWidget):
             self._active_run_id = None
             self._active_run_status = ""
             self._shown_output_run_id = None
+            self._inspector_signature = ()
             self._run_state = "idle"
             self.conversation.set_composer_state("idle")
             self.inspector.set_run_snapshot(None, ())
@@ -318,15 +355,113 @@ class RuntimePanel(QtWidgets.QWidget):
                 self._run_state = shown_status
         else:
             self._run_state = "idle"
-        self.inspector.set_run_snapshot(
-            shown if type(shown) is dict else None,
-            snapshot.get("activity") if hasattr(snapshot, "get") else (),
-            apply_outcomes=(
-                snapshot.get("apply_outcomes") if hasattr(snapshot, "get") else ()
-            ),
+        # Only rebuild the inspector when structure changed (status, todos,
+        # activity, apply outcomes, failure, or a different run). Pure output/
+        # text deltas leave the signature unchanged and are handled by the
+        # streaming path, so the expensive widget teardown+rebuild is skipped.
+        activity = snapshot.get("activity") if hasattr(snapshot, "get") else ()
+        apply_outcomes = (
+            snapshot.get("apply_outcomes") if hasattr(snapshot, "get") else ()
         )
+        signature = self._inspector_signature_for(
+            shown, activity, apply_outcomes)
+        if signature != self._inspector_signature:
+            self._inspector_signature = signature
+            self.inspector.set_run_snapshot(
+                shown if type(shown) is dict else None,
+                activity,
+                apply_outcomes=apply_outcomes,
+            )
+        # Block C: surface the shown run's model + token total to the context
+        # bar. Model comes from model_snapshot_json (frozen at start_run);
+        # tokens come from the panel-side usage projection.
+        self._capture_runtime_meta(shown)
+        # Block B: feed the shown run's ordered steps + reasoning into the
+        # folding panels below the timeline. Resets when the shown run changes.
+        self._update_activity_panels(snapshot, shown)
         self._maybe_render_output(snapshot, shown)
         self._refresh_context_bar()
+
+    def _update_activity_panels(self, snapshot, shown) -> None:
+        """Incrementally feed the ActivityPanel (steps) and ThinkingPanel.
+
+        The steps list is keyed by ref so re-feeding on every coalesced
+        snapshot only updates existing cards, never rebuilds them. The panels
+        reset when the shown run changes so a new run starts fresh.
+        """
+        run_id = shown.get("run_id") if type(shown) is dict else None
+        if run_id != self._shown_steps_run_id:
+            self._shown_steps_run_id = run_id
+            self.conversation.activity_panel.reset_for_run(run_id)
+            self.conversation.thinking_panel.reset_for_run(run_id)
+        if type(shown) is not dict:
+            return
+        steps = shown.get("steps")
+        self.conversation.activity_panel.set_steps(steps)
+        thinking = snapshot.get("thinking") if hasattr(snapshot, "get") else ""
+        if type(thinking) is str and thinking:
+            self.conversation.thinking_panel.set_thinking(thinking)
+
+    def _capture_runtime_meta(self, shown) -> None:
+        """Pull the shown run's model name + token total for the context bar."""
+        if type(shown) is not dict:
+            self._shown_model = ""
+            self._shown_total_tokens = None
+            return
+        snapshot_json = shown.get("model_snapshot_json")
+        provider = ""
+        model = ""
+        if type(snapshot_json) is dict:
+            p = snapshot_json.get("llm_provider")
+            m = snapshot_json.get("llm_model")
+            if type(p) is str:
+                provider = p
+            if type(m) is str:
+                model = m
+        if provider and model and provider != "-" and model != "-":
+            self._shown_model = f"{provider}/{model}"
+        elif model and model != "-":
+            self._shown_model = model
+        else:
+            self._shown_model = ""
+        usage = shown.get("usage")
+        if type(usage) is dict:
+            total = usage.get("total_tokens")
+            self._shown_total_tokens = (
+                total if type(total) is int and type(total) is not bool else None
+            )
+        else:
+            self._shown_total_tokens = None
+
+    def _inspector_signature_for(self, shown, activity, apply_outcomes) -> tuple:
+        """Cheap structural fingerprint of the inspector-relevant state.
+
+        Two snapshots with the same signature produce the same inspector view,
+        so the rebuild can be skipped. Output/thinking text deliberately NOT
+        included — those are streaming-only and never affect the inspector.
+        """
+        run_id = shown.get("run_id") if type(shown) is dict else None
+        status = shown.get("status") if type(shown) is dict else None
+        has_failure = (
+            type(shown) is dict
+            and bool(shown.get("failure_json"))
+        )
+        todos_len = 0
+        if type(shown) is dict:
+            todos = shown.get("todos")
+            if type(todos) is list:
+                todos_len = len(todos)
+        activity_len = len(activity) if hasattr(activity, "__len__") else 0
+        outcomes_len = (
+            len(apply_outcomes) if hasattr(apply_outcomes, "__len__") else 0)
+        return (
+            run_id,
+            status,
+            has_failure,
+            todos_len,
+            activity_len,
+            outcomes_len,
+        )
 
     def _replay_history(self, snapshot) -> None:
         """C: rebuild the conversation card flow from snapshot["runs"].
@@ -510,6 +645,9 @@ class RuntimePanel(QtWidgets.QWidget):
             self.conversation.append_item(
                 view_models.approval_result_card(False))
             return
+        if purpose == "knowledge.rebuild":
+            self._handle_knowledge_rebuild_result(result)
+            return
         if not purpose.startswith("workspace.") or type(result) is not dict:
             return
         workspace = result.get("workspace")
@@ -524,6 +662,9 @@ class RuntimePanel(QtWidgets.QWidget):
         if purpose == "run.start":
             # The Run never started; release the optimistic composer lock.
             self.conversation.set_composer_state("idle")
+        if purpose == "knowledge.rebuild":
+            self.inspector.set_knowledge_rebuild_state(
+                "error", f"{code}: {message}"[:200])
         self.conversation.append_item(
             view_models.notice_card(f"{purpose} failed: {message}",
                                     tone="error"))
@@ -636,6 +777,42 @@ class RuntimePanel(QtWidgets.QWidget):
     def _inspect_workspace(self) -> None:
         self._client.inspect_workspace(self._workspace_id)
 
+    def _rebuild_knowledge(self) -> None:
+        # Advisory cache rebuild: the build runs off the runtime's event loop.
+        # Show a building state immediately; the command result updates it.
+        self.inspector.set_knowledge_rebuild_state("building")
+        self._client.rebuild_knowledge()
+
+    def _handle_knowledge_rebuild_result(self, result) -> None:
+        """Render the knowledge.rebuild command result in the inspector.
+
+        result is the service's bounded dict: {"ok": bool, "status"?, "summary"?,
+        "code"?, "message"?}. A success also surfaces a notice card so the user
+        sees the outcome in the conversation flow.
+        """
+        if type(result) is not dict:
+            self.inspector.set_knowledge_rebuild_state("error", "Rebuild failed.")
+            return
+        if result.get("ok") is not True:
+            message = result.get("message") or result.get("code") or "failed"
+            self.inspector.set_knowledge_rebuild_state("error", str(message)[:200])
+            self.conversation.append_item(view_models.notice_card(
+                f"知识库重建失败:{message}", tone="error"))
+            return
+        summary = result.get("summary") if type(result.get("summary")) is dict else {}
+        entity_count = summary.get("entity_count")
+        build = summary.get("houdini_build") or ""
+        detail_parts = []
+        if type(entity_count) is int:
+            detail_parts.append(f"{entity_count} entities")
+        if build:
+            detail_parts.append(str(build))
+        detail = " · ".join(detail_parts) if detail_parts else "ready"
+        self.inspector.set_knowledge_rebuild_state("ok", f"Knowledge cache rebuilt ({detail}).")
+        self.conversation.append_item(view_models.notice_card(
+            f"知识库已重建:{detail}。search_houdini_knowledge 现在可用。",
+            tone="ok"))
+
     # -- responsive layout ---------------------------------------------------
 
     def resizeEvent(self, event) -> None:
@@ -686,6 +863,8 @@ class RuntimePanel(QtWidgets.QWidget):
             hip=hip, session_title=self._session_title,
             workspace_id=self._workspace_id, connection=self._connection,
             bridge=self._bridge, run_state=self._run_state,
+            model=self._shown_model,
+            total_tokens=self._shown_total_tokens,
         ))
 
     # -- teardown -------------------------------------------------------------

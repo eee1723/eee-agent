@@ -470,6 +470,21 @@ class RuntimeWebSocketServer:
             self._put(ctx, success_response(req, {"pong": True}))
             return
 
+        if ct == "knowledge.rebuild":
+            # Optional advisory-only cache rebuild. ``hfs`` may be a str path
+            # override (None falls back to the builder's HFS resolution). The
+            # build runs off the event loop inside the service.
+            if set(payload.keys()) not in (set(), {"hfs"}):
+                raise _invalid_envelope()
+            hfs = None
+            if "hfs" in payload:
+                if type(payload["hfs"]) is not str:
+                    raise _invalid_envelope()
+                hfs = payload["hfs"]
+            result = await self._service.rebuild_knowledge(hfs=hfs)
+            self._put(ctx, success_response(req, result))
+            return
+
         if ct in DEFERRED_COMMAND_TYPES:
             raise _capability_unavailable()
 

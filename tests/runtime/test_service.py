@@ -26,6 +26,10 @@ from eee_agent.houdini_bridge.workspaces import (
 )
 from eee_agent.runtime.agent_runner import RunnerCompleted, RunnerEvent
 from eee_agent.runtime.checkpoints import CheckpointManager
+from eee_agent.runtime.knowledge import (
+    KnowledgeRuntimeStatus,
+    KnowledgeStatusCode,
+)
 from eee_agent.runtime.models import (
     RetentionClass,
     RunRecord,
@@ -293,7 +297,94 @@ def test_version_report_frozen_once_per_start_run(
     _run(scenario())
 
 
-def test_start_run_returns_without_waiting_for_runner(paths: RuntimePaths) -> None:
+def test_rebuild_knowledge_runs_build_and_refreshes_status(
+    paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # rebuild_knowledge runs build_cache off the event loop, swaps the cache
+    # atomically, and refreshes KnowledgeRuntime so search becomes available
+    # without a runtime restart. Patch build_cache so no hython is needed.
+    from types import SimpleNamespace
+
+    # The service only reads kb_schema_version / houdini_build /
+    # manifest_sha256 / entity_count_by_kind from the manifest, so a minimal
+    # stand-in suffices (avoids constructing a full BuildManifest).
+    fake_manifest = SimpleNamespace(
+        kb_schema_version=1,
+        houdini_build="21.0.440",
+        manifest_sha256="a" * 64,
+        entity_count_by_kind=(("node", 1000), ("vex_function", 234)),
+    )
+
+    build_calls: list = []
+
+    def fake_build_cache(options):
+        build_calls.append(options)
+        # Simulate the atomic swap by writing an empty file to the output path
+        # so KnowledgeRuntime._classify sees it as present (the real build_cache
+        # would write a valid SQLite). For this test we only assert the wiring
+        # and the refresh; the KnowledgeService validation is covered elsewhere.
+        options.output.parent.mkdir(parents=True, exist_ok=True)
+        return fake_manifest
+
+    monkeypatch.setattr(
+        "eee_agent.knowledge.build.build_cache", fake_build_cache
+    )
+    # Avoid real SQLite classification: force KnowledgeRuntime.refresh to READY.
+    monkeypatch.setattr(
+        "eee_agent.runtime.knowledge.KnowledgeRuntime._classify",
+        lambda self: KnowledgeRuntimeStatus(
+            KnowledgeStatusCode.READY, True,
+            manifest_sha256="a" * 64,
+            schema_version=1,
+            houdini_build="21.0.440",
+        ),
+    )
+
+    runner = FakeRunner(_success_items("done"))
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths, runner_factory=_factory_for(runner)
+        ) as service:
+            result = await service.rebuild_knowledge()
+            assert result["ok"] is True
+            assert result["status"]["available"] is True
+            assert result["status"]["status"] == "ready"
+            assert result["summary"]["entity_count"] == 1234
+            assert result["summary"]["houdini_build"] == "21.0.440"
+            # build_cache was called once with the resolved cache path.
+            assert len(build_calls) == 1
+            assert build_calls[0].output == paths.knowledge_cache_path
+            # The runtime's knowledge status is now ready after refresh.
+            assert service.knowledge_status.available is True
+
+    _run(scenario())
+
+
+def test_rebuild_knowledge_reports_build_failure_without_raising(
+    paths: RuntimePaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A build failure must be reported as ok:False, never raised, so the
+    # command channel does not crash.
+    from eee_agent.knowledge.build import BuildError
+
+    def failing_build(options):
+        raise BuildError("HFS not found on disk")
+
+    monkeypatch.setattr("eee_agent.knowledge.build.build_cache", failing_build)
+
+    runner = FakeRunner(_success_items("done"))
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths, runner_factory=_factory_for(runner)
+        ) as service:
+            result = await service.rebuild_knowledge()
+            assert result["ok"] is False
+            assert result["code"] == "knowledge.build_failed"
+            assert "HFS not found" in result["message"]
+
+    _run(scenario())
     gate = asyncio.Event()
     runner = FakeRunner(_success_items("done"), gate=gate)
 

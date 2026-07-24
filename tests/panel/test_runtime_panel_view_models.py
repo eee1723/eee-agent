@@ -179,14 +179,14 @@ def test_run_view_captures_activity_steps_in_order() -> None:
     activity = [
         {"type": "tool.started", "name": "scene_status", "detail": ""},
         {"type": "tool.completed", "name": "scene_status", "detail": "healthy"},
-        {"type": "tool.started", "name": "propose_modeling", "detail": ""},
+        {"type": "tool.started", "name": "scratch_build", "detail": ""},
     ]
     rv = vm.run_view(_full_snapshot(), activity=activity)
     assert len(rv.activity) == 3
     assert rv.activity[0].name == "scene_status"
     assert rv.activity[1].kind == "tool.completed"
     assert rv.activity[1].detail == "healthy"
-    assert rv.activity[2].name == "propose_modeling"
+    assert rv.activity[2].name == "scratch_build"
 
 
 def test_run_view_picks_latest_apply_outcome_and_maps_tone() -> None:
@@ -602,3 +602,90 @@ def test_terminal_result_non_string_output_treated_as_empty() -> None:
     items = vm.terminal_result_items({"status": "Completed"}, None)
     assert [i.kind for i in items] == ["notice"]
     assert items[0].tone == "normal"
+
+
+# --------------------------------------------------------------------------
+# Block C: usage + model surfacing
+# --------------------------------------------------------------------------
+
+def test_run_view_extracts_usage_from_run_snapshot() -> None:
+    """run_view reads the panel-side 'usage' projection (captured from
+    model.usage_updated / model.completed / message.assistant_final) and
+    normalizes it into a bounded UsageView."""
+    snap = _full_snapshot(usage={
+        "input_tokens": 1234, "output_tokens": 567, "total_tokens": 1801})
+    rv = vm.run_view(snap)
+    assert rv.usage is not None
+    assert rv.usage.input_tokens == 1234
+    assert rv.usage.output_tokens == 567
+    assert rv.usage.total_tokens == 1801
+
+
+def test_run_view_usage_none_when_absent() -> None:
+    """A run with no usage (legacy row, or still-pending) yields usage=None so
+    the inspector can hide the USAGE block."""
+    rv = vm.run_view(_full_snapshot())
+    assert rv.usage is None
+
+
+def test_run_view_usage_none_for_malformed() -> None:
+    """A malformed usage dict (missing field / non-int) yields None instead of
+    crashing — defensive, never raises."""
+    rv = vm.run_view(_full_snapshot(usage={"input_tokens": 10}))  # missing fields
+    assert rv.usage is None
+    rv2 = vm.run_view(_full_snapshot(usage={"input_tokens": "x",
+                                            "output_tokens": 1,
+                                            "total_tokens": 2}))
+    assert rv2.usage is None
+    # bool must not masquerade as an int token count.
+    rv3 = vm.run_view(_full_snapshot(usage={"input_tokens": True,
+                                            "output_tokens": 1,
+                                            "total_tokens": 2}))
+    assert rv3.usage is None
+
+
+def test_environment_view_carries_model_fields() -> None:
+    """The active LLM / vision model (frozen into model_snapshot_json at
+    start_run by runtime_version_report) is surfaced on EnvironmentView so the
+    inspector can show which model produced the run."""
+    snap = _full_snapshot(model_snapshot_json={
+        "eee_agent": "0.1.0", "python": "3.11.7", "platform": "win",
+        "houdini_build": None, "kb_schema_version": None,
+        "knowledge_status": "ok",
+        "llm_provider": "deepseek", "llm_model": "deepseek-v4-pro",
+        "vision_provider": "openai", "vision_model": "gpt-4.1",
+    })
+    rv = vm.run_view(snap)
+    assert rv.environment is not None
+    assert rv.environment.llm_provider == "deepseek"
+    assert rv.environment.llm_model == "deepseek-v4-pro"
+    assert rv.environment.vision_provider == "openai"
+    assert rv.environment.vision_model == "gpt-4.1"
+
+
+def test_environment_view_model_fields_default_to_dash_when_absent() -> None:
+    """A pre-Block-C model_snapshot_json (no llm_provider/llm_model) degrades to
+    '-' so the inspector shows a placeholder instead of crashing."""
+    rv = vm.run_view(_full_snapshot())
+    assert rv.environment is not None
+    assert rv.environment.llm_provider == "-"
+    assert rv.environment.llm_model == "-"
+
+
+def test_context_status_carries_model_and_tokens() -> None:
+    """ContextStatus now carries the active model + live token total for the
+    context bar chip."""
+    status = vm.context_status(
+        hip="x.hip", session_title="S", workspace_id="ws_abcdef1234",
+        connection="online", bridge="ready", run_state="Planning",
+        model="deepseek/deepseek-v4-pro", total_tokens=1234)
+    assert status.model == "deepseek/deepseek-v4-pro"
+    assert status.total_tokens == 1234
+
+
+def test_context_status_model_and_tokens_default_when_absent() -> None:
+    status = vm.context_status(
+        hip="x.hip", session_title="S", workspace_id=None,
+        connection="online", bridge="ready", run_state="idle")
+    assert status.model == ""
+    assert status.total_tokens is None

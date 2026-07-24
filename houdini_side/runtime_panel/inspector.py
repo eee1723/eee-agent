@@ -108,13 +108,17 @@ class _RunViewWidget(QtWidgets.QFrame):
             self._build_failure_block(run_view.failure)
         if run_view.todos:
             self._build_todos_block(run_view.todos)
+        if run_view.usage is not None:
+            self._build_usage_block(run_view.usage)
         if run_view.environment is not None:
             self._build_environment_block(run_view.environment)
         if run_view.dependencies:
             self._build_dependencies_block(run_view.dependencies)
         if run_view.apply_outcome is not None:
             self._build_outcome_block(run_view.apply_outcome)
-        self._build_activity_block(run_view.activity)
+        # NOTE: the ordered step trace (tool calls/results + assistant text
+        # segments) is rendered by the ActivityPanel below the conversation
+        # timeline, not duplicated here in the inspector's RUN tab.
         self._layout.addStretch(1)
 
     def _build_header(self, rv: vm.RunView) -> None:
@@ -178,10 +182,34 @@ class _RunViewWidget(QtWidgets.QFrame):
             card_layout.addWidget(_dim_label("Retry may succeed."))
         self._layout.addWidget(card)
 
+    def _build_usage_block(self, usage: vm.UsageView) -> None:
+        # Block C: token usage (input / output / total). Comma-formatted so
+        # large counts stay readable. Shown only when the run reported tokens.
+        self._layout.addWidget(_dim_label("USAGE"))
+        form = QtWidgets.QFormLayout()
+        form.setSpacing(2)
+        form.addRow("input:", _dim_label(f"{usage.input_tokens:,}"))
+        form.addRow("output:", _dim_label(f"{usage.output_tokens:,}"))
+        form.addRow("total:", _prominent_label(f"{usage.total_tokens:,}"))
+        container = QtWidgets.QWidget()
+        container.setLayout(form)
+        self._layout.addWidget(container)
+
     def _build_environment_block(self, env: vm.EnvironmentView) -> None:
         self._layout.addWidget(_dim_label("ENVIRONMENT"))
         form = QtWidgets.QFormLayout()
         form.setSpacing(2)
+        # Block C: the active model that produced this run is the most
+        # relevant env fact — show it first.
+        form.addRow("model:", _prominent_label(
+            f"{env.llm_provider}/{env.llm_model}"
+            if env.llm_provider not in ("-", "") and env.llm_model not in ("-", "")
+            else env.llm_model if env.llm_model not in ("-", "") else "-"))
+        if env.vision_provider or env.vision_model:
+            form.addRow("vision:", _dim_label(
+                f"{env.vision_provider}/{env.vision_model}"
+                if env.vision_provider and env.vision_model
+                else env.vision_model or env.vision_provider))
         form.addRow("eee agent:", _dim_label(env.eee_agent))
         form.addRow("python:", _dim_label(env.python))
         form.addRow("platform:", _dim_label(env.platform))
@@ -292,45 +320,25 @@ class _RunViewWidget(QtWidgets.QFrame):
             line.setLayout(row)
             self._layout.addWidget(line)
 
-    def _build_activity_block(self, steps: tuple[vm.ActivityStep, ...]) -> None:
-        header_row = QtWidgets.QHBoxLayout()
-        header_row.addWidget(_dim_label(
-            f"ACTIVITY ({len(steps)} step{'s' if len(steps) != 1 else ''})"))
-        header_row.addStretch(1)
-        header = QtWidgets.QWidget()
-        header.setLayout(header_row)
-        self._layout.addWidget(header)
-        if not steps:
-            self._layout.addWidget(_dim_label("(no tool activity yet)"))
-            return
-        for step in steps:
-            row = QtWidgets.QHBoxLayout()
-            row.setSpacing(6)
-            marker = "▶" if step.kind == "tool.started" else "✓"
-            tone = "normal" if step.kind == "tool.started" else "ok"
-            row.addWidget(_tone_label(marker, tone))
-            row.addWidget(_dim_label(step.name), 0)
-            if step.detail:
-                detail = _dim_label(step.detail[:100])
-                row.addWidget(detail, 1)
-            else:
-                row.addStretch(1)
-            line = QtWidgets.QWidget()
-            line.setLayout(row)
-            self._layout.addWidget(line)
-
 
 class InspectorPane(QtWidgets.QWidget):
     """Right pane: structured read-only views of runtime state."""
 
     createWorkspaceRequested = QtCore.Signal()
     inspectWorkspaceRequested = QtCore.Signal()
+    rebuildKnowledgeRequested = QtCore.Signal()
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("InspectorPane")
         self._artifacts: tuple = ()
         self._visions: tuple = ()
+        # Bounded rebuild cost: while the RUN tab is hidden, defer its widget
+        # teardown+rebuild and re-apply on tab switch. During a long run the
+        # user is watching the conversation, so skipping the RUN rebuild keeps
+        # the Houdini main thread free.
+        self._run_dirty = False
+        self._pending_run_view: vm.RunView | None = None
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
         self.tabs = QtWidgets.QTabWidget()
@@ -353,10 +361,22 @@ class InspectorPane(QtWidgets.QWidget):
         self.inspect_workspace_button.setAutoDefault(False)
         self.inspect_workspace_button.clicked.connect(
             self.inspectWorkspaceRequested)
+        self.rebuild_knowledge_button = QtWidgets.QPushButton("Rebuild KB")
+        self.rebuild_knowledge_button.setAutoDefault(False)
+        self.rebuild_knowledge_button.setToolTip(
+            "Rebuild the Houdini knowledge cache. Runs hython to snapshot the "
+            "operator catalog; may take tens of seconds. Required before "
+            "search_houdini_knowledge can return results.")
+        self.rebuild_knowledge_button.clicked.connect(
+            self.rebuildKnowledgeRequested)
         actions.addWidget(self.create_workspace_button)
         actions.addWidget(self.inspect_workspace_button)
+        actions.addWidget(self.rebuild_knowledge_button)
         actions.addStretch(1)
         workspace_layout.addLayout(actions)
+        # Status line for the rebuild result / progress.
+        self.knowledge_status_label = _dim_label("")
+        workspace_layout.addWidget(self.knowledge_status_label)
         self.workspace_table = QtWidgets.QTableWidget(0, 2)
         self.workspace_table.setHorizontalHeaderLabels(["key", "value"])
         self.workspace_table.verticalHeader().setVisible(False)
@@ -381,17 +401,59 @@ class InspectorPane(QtWidgets.QWidget):
             QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
         self.artifacts_table.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         self.tabs.addTab(self.artifacts_table, "ARTIFACTS")
+        # When the user returns to the RUN tab, apply any deferred rebuild.
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+
+    def _on_tab_changed(self, index: int) -> None:
+        if self.tabs.widget(index) is self._run_widget.parent() and self._run_dirty:
+            self._run_dirty = False
+            self._run_widget.update_view(self._pending_run_view)
 
     # -- public API (preserved signatures) ---------------------------------
+
+    def set_knowledge_rebuild_state(self, state: str, detail: str = "") -> None:
+        """Show the knowledge-rebuild status under the WORKSPACE actions.
+
+        state: 'idle' | 'building' | 'ok' | 'error'. ``detail`` is a short
+        bounded message (e.g. entity count, or an error snippet).
+        """
+        if state == "building":
+            self.rebuild_knowledge_button.setEnabled(False)
+            self.rebuild_knowledge_button.setText("Building…")
+            self.knowledge_status_label.setText("Building knowledge cache…")
+            self.knowledge_status_label.setStyleSheet(f"color: {theme.STATUS_WARN};")
+        elif state == "ok":
+            self.rebuild_knowledge_button.setEnabled(True)
+            self.rebuild_knowledge_button.setText("Rebuild KB")
+            self.knowledge_status_label.setText(detail or "Knowledge cache ready.")
+            self.knowledge_status_label.setStyleSheet(f"color: {theme.STATUS_OK};")
+        elif state == "error":
+            self.rebuild_knowledge_button.setEnabled(True)
+            self.rebuild_knowledge_button.setText("Rebuild KB")
+            self.knowledge_status_label.setText(detail or "Rebuild failed.")
+            self.knowledge_status_label.setStyleSheet(f"color: {theme.STATUS_ERROR};")
+        else:  # idle
+            self.rebuild_knowledge_button.setEnabled(True)
+            self.rebuild_knowledge_button.setText("Rebuild KB")
+            self.knowledge_status_label.setText(detail)
+            self.knowledge_status_label.setStyleSheet(f"color: {theme.FG_DIM};")
 
     def set_run_snapshot(self, snapshot, activity=(), *, apply_outcomes=()) -> None:
         """Rebuild the RUN tab from a structured RunView.
 
         Builds via view_models.run_view, which never raises on malformed
-        snapshots; None surfaces the empty-state row.
+        snapshots; None surfaces the empty-state row. If the RUN tab is not
+        currently visible, the rebuild is deferred until the tab is shown.
         """
         run_view = vm.run_view(snapshot, activity, apply_outcomes)
-        self._run_widget.update_view(run_view)
+        # RUN tab is index 0. Skip the expensive teardown+rebuild while it is
+        # hidden; stash the latest view and rebuild on tab switch.
+        if self.tabs.currentIndex() == 0:
+            self._run_dirty = False
+            self._run_widget.update_view(run_view)
+        else:
+            self._pending_run_view = run_view
+            self._run_dirty = True
 
     def set_workspace_facts(self, facts) -> None:
         rows = vm.workspace_rows(facts)

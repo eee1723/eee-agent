@@ -38,6 +38,10 @@ class ContextStatus:
     runtime: str
     bridge: str
     run_state: str
+    # Block C: active model + live token total for the run in flight (or the
+    # last run). Empty/None when no run is selected or no usage was reported.
+    model: str = ""
+    total_tokens: int | None = None
 
 
 def _bounded(value: object, limit: int) -> str:
@@ -209,6 +213,8 @@ def context_status(
     connection: str,
     bridge: str,
     run_state: str,
+    model: str | None = None,
+    total_tokens: int | None = None,
 ) -> ContextStatus:
     return ContextStatus(
         hip=hip or "no hip",
@@ -219,6 +225,8 @@ def context_status(
         runtime=connection,
         bridge=bridge,
         run_state=run_state,
+        model=model or "",
+        total_tokens=total_tokens,
     )
 
 
@@ -333,6 +341,18 @@ class EnvironmentView:
     houdini_build: str
     kb_schema_version: str
     knowledge_status: str
+    llm_provider: str
+    llm_model: str
+    vision_provider: str
+    vision_model: str
+
+
+@dataclass(frozen=True, slots=True)
+class UsageView:
+    """Token usage for one run (input / output / total)."""
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -352,6 +372,9 @@ class RunView:
     # Stage A: bounded failure evidence. Only present for status == "Failed".
     failure: FailureView | None
     todos: tuple["TodoItemView", ...]
+    # Block C: token usage captured from model.usage_updated /
+    # model.completed / message.assistant_final. None when no usage arrived.
+    usage: UsageView | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -454,6 +477,35 @@ def _environment_from_snapshot(model_snapshot: object) -> EnvironmentView | None
         houdini_build=_str_field("houdini_build"),
         kb_schema_version=_str_field("kb_schema_version"),
         knowledge_status=_str_field("knowledge_status"),
+        # Block C: the active LLM / vision model that produced this run, frozen
+        # into model_snapshot_json at start_run time by runtime_version_report.
+        llm_provider=_str_field("llm_provider"),
+        llm_model=_str_field("llm_model"),
+        vision_provider=_str_field("vision_provider"),
+        vision_model=_str_field("vision_model"),
+    )
+
+
+def _usage_view(usage: object) -> UsageView | None:
+    """Normalize a run's usage dict into a bounded UsageView.
+
+    Defensive: any missing or non-int field yields None so the inspector can
+    hide the USAGE block for runs that never reported tokens (e.g. legacy rows
+    from before Block C, or a still-pending run).
+    """
+    if type(usage) is not dict:
+        return None
+    fields: dict[str, int] = {}
+    for field in ("input_tokens", "output_tokens", "total_tokens"):
+        value = usage.get(field)
+        # bool is a subclass of int; reject it explicitly.
+        if type(value) is not int or type(value) is bool:
+            return None
+        fields[field] = value
+    return UsageView(
+        input_tokens=fields["input_tokens"],
+        output_tokens=fields["output_tokens"],
+        total_tokens=fields["total_tokens"],
     )
 
 
@@ -576,6 +628,9 @@ def run_view(
         # state keeps this fresh from both the D-1 todos.updated event and
         # the D-2 persisted RunRecord.todos.
         todos=todo_items(snapshot.get("todos")),
+        # Block C: token usage captured from model.usage_updated /
+        # model.completed / message.assistant_final (panel-side projection).
+        usage=_usage_view(snapshot.get("usage")),
     )
 
 

@@ -946,14 +946,19 @@ def test_server_module_imports_are_clean() -> None:
 
 
 def test_server_only_dispatches_scene_query() -> None:
+    import re
+
     from houdini_side import secure_bridge
 
     source = inspect.getsource(secure_bridge)
     # The server routes through parse_request (the frozen, scene.query-only
-    # parser) and never exposes an arbitrary dispatch surface.
+    # parser) and never exposes an arbitrary dispatch surface. The forbidden
+    # needles are matched as Python call sites (word boundary before the open
+    # paren) so a method named e.g. ``_serve_scratch_exec`` is not a false
+    # positive — only a real ``exec(...)`` / ``eval(...)`` call is rejected.
     assert "parse_request" in source
-    for needle in ("eval(", "exec(", "getattr(adapter", "import subprocess"):
-        assert needle not in source
+    for needle in (r"\beval\(", r"\bexec\(", r"getattr\(adapter", "import subprocess"):
+        assert re.search(needle, source) is None, f"forbidden dispatch surface: {needle}"
 
 
 # ==========================================================================
@@ -1154,6 +1159,7 @@ async def test_success_ack_advertises_sorted_bridge_capabilities(tmp_path: Path)
         assert ack["capabilities"] == [
             "capture.v1",
             "changeset.v1",
+            "scratch.v1",
             "sensitivity.v1",
             "workspace.v1",
         ]  # sorted + unique

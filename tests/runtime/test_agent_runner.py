@@ -666,7 +666,7 @@ def test_factory_uses_read_only_tools_and_same_checkpointer(monkeypatch) -> None
     assert captured["context_schema"].__name__ == "RuntimeToolContext"
 
 
-def test_factory_opt_in_modeling_adds_only_proposal_tool(monkeypatch) -> None:
+def test_factory_opt_in_modeling_adds_modeling_tools(monkeypatch) -> None:
     import eee_agent.runtime.agent_runner as ar_module
 
     captured: dict = {}
@@ -681,7 +681,8 @@ def test_factory_opt_in_modeling_adds_only_proposal_tool(monkeypatch) -> None:
     assert runner._graph is sentinel  # noqa: SLF001
     assert {tool.name for tool in captured["tools"]} == {
         *EXPECTED_READ_ONLY,
-        "propose_modeling",
+        "scratch_build",
+        "scratch_commit",
     }
     assert captured["context_schema"].__name__ == "RuntimeToolContext"
 
@@ -697,7 +698,9 @@ def test_agent_runner_builds_only_secure_tools(monkeypatch) -> None:
     )
     build_agent_runner(object(), modeling=True)
     names = {item.name for item in captured["tools"]}
-    assert names == {*EXPECTED_READ_ONLY, "propose_modeling"}
+    assert names == {*EXPECTED_READ_ONLY, "scratch_build", "scratch_commit"}
+    # The legacy propose_modeling tool is retired (Phase 3.1).
+    assert "propose_modeling" not in names
     assert not names & {"create_node", "set_parms", "scene_reset", "save_hip"}
     assert captured["context_schema"].__name__ == "RuntimeToolContext"
 

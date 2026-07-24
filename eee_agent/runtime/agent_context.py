@@ -58,6 +58,7 @@ class RuntimeToolContext:
     read_only: ReadOnlyProvider
     knowledge: KnowledgeProvider
     modeling: object | None = None
+    scratch: object | None = None
 
     def __post_init__(self) -> None:
         if self.read_only is None or not isinstance(self.read_only, ReadOnlyProvider):

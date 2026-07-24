@@ -66,6 +66,18 @@ from eee_agent.houdini_bridge.capture import (
     CaptureResponse,
     parse_capture_request,
 )
+from eee_agent.houdini_bridge.scratch import (
+    SCRATCH_COMMIT_OPERATION,
+    SCRATCH_DESTROY_OPERATION,
+    SCRATCH_EXEC_OPERATION,
+    SCRATCH_V1,
+    ScratchCommitResponse,
+    ScratchDestroyResponse,
+    ScratchResponse,
+    parse_scratch_commit_request,
+    parse_scratch_destroy_request,
+    parse_scratch_request,
+)
 from eee_agent.houdini_bridge.sensitivity import (
     SAMPLE_OPERATION,
     SENSITIVITY_V1,
@@ -518,7 +530,13 @@ class BridgeServer:
         identity: BridgeIdentity,
         state_dir: Path | str,
         queue: MainThreadReadQueue | None = None,
-        capabilities: tuple[str, ...] = (CAPTURE_V1, CHANGESET_V1, SENSITIVITY_V1, WORKSPACE_V1),
+        capabilities: tuple[str, ...] = (
+            CAPTURE_V1,
+            CHANGESET_V1,
+            SCRATCH_V1,
+            SENSITIVITY_V1,
+            WORKSPACE_V1,
+        ),
     ) -> None:
         if not isinstance(adapter, HoudiniSceneAdapter):
             raise TypeError("adapter must be a HoudiniSceneAdapter")
@@ -824,6 +842,49 @@ class BridgeServer:
                     message_for_user="The bridge does not support artifact capture.",
                 )
             return await self._serve_capture(frame_bytes, reader=reader)
+        if operation == SCRATCH_EXEC_OPERATION:
+            # Admission: a server that does not advertise scratch.v1 must fail
+            # closed BEFORE any HOM access or payload parsing.
+            if SCRATCH_V1 not in self._capabilities:
+                request_id = obj.get("request_id")
+                if type(request_id) is not str:
+                    request_id = _MALFORMED_REQUEST_ID
+                return self._error_envelope(
+                    request_id,
+                    code="bridge.capability_unavailable",
+                    category="capability",
+                    message_for_user="The bridge does not support scratch sandbox operations.",
+                )
+            return await self._serve_scratch_exec(frame_bytes, reader=reader)
+        if operation == SCRATCH_COMMIT_OPERATION:
+            # Same scratch.v1 capability gates commit; a server without it
+            # fails closed BEFORE any HOM access or payload parsing.
+            if SCRATCH_V1 not in self._capabilities:
+                request_id = obj.get("request_id")
+                if type(request_id) is not str:
+                    request_id = _MALFORMED_REQUEST_ID
+                return self._error_envelope(
+                    request_id,
+                    code="bridge.capability_unavailable",
+                    category="capability",
+                    message_for_user="The bridge does not support scratch sandbox operations.",
+                )
+            return await self._serve_scratch_commit(frame_bytes, reader=reader)
+        if operation == SCRATCH_DESTROY_OPERATION:
+            # destroy is gated on scratch.v1 but BYPASSES the write-freeze gate:
+            # cleanup MUST run even after an uncertain recovery, otherwise a
+            # crashed run leaks its sandbox container forever.
+            if SCRATCH_V1 not in self._capabilities:
+                request_id = obj.get("request_id")
+                if type(request_id) is not str:
+                    request_id = _MALFORMED_REQUEST_ID
+                return self._error_envelope(
+                    request_id,
+                    code="bridge.capability_unavailable",
+                    category="capability",
+                    message_for_user="The bridge does not support scratch sandbox operations.",
+                )
+            return await self._serve_scratch_destroy(frame_bytes, reader=reader)
         request_id = obj.get("request_id")
         request_id = obj.get("request_id")
         if type(request_id) is not str:
@@ -1150,6 +1211,151 @@ class BridgeServer:
                 retryable=result.retryable,
             )
         response = CaptureResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
+        return response.to_json().encode("utf-8")
+
+    async def _serve_scratch_exec(
+        self, frame_bytes: bytes, *, reader: object | None = None
+    ) -> bytes:
+        """Parse + queue a ``scratch.exec`` request; return bounded diagnostics.
+
+        Scratch builds nodes inside a reserved ``/obj/eee_scratch_<id>``
+        container (no ownership mirrors), so it IS a scene write and inherits
+        the write-freeze gate (unlike capture, which only touches an owned
+        temp scope that is always cleaned up). A frozen bridge refuses the
+        sandbox op before any HOM access. The executor creates the container
+        if absent, applies the structured ops in one undo group, collects
+        diagnostics (cooked geometry / errors of the output node), and
+        preserves the sandbox on failure so the agent can inspect and retry.
+        """
+        try:
+            request = parse_scratch_request(frame_bytes)
+        except (TypeError, ValueError):
+            return self._error_envelope(
+                _MALFORMED_REQUEST_ID,
+                code="bridge.invalid_request",
+                category="protocol",
+                message_for_user="The scratch request is not valid.",
+            )
+        request_id = request.request_id
+        if self._executor.write_frozen:  # type: ignore[attr-defined]
+            return self._error_envelope(
+                request_id,
+                code="bridge.write_frozen",
+                category="write_frozen",
+                message_for_user=(
+                    "The bridge is frozen for writes after an uncertain recovery."
+                ),
+                retryable=False,
+            )
+        scratch_request = request
+
+        def operation() -> object:
+            return self._executor.scratch_exec(scratch_request)  # type: ignore[union-attr]
+
+        result = await self._run_on_queue(
+            request_id, request.deadline_ms, operation, reader=reader
+        )
+        if isinstance(result, _QueuedError):
+            return self._error_envelope(
+                request_id,
+                code=result.code,
+                category=result.category,
+                message_for_user=result.message_for_user,
+                retryable=result.retryable,
+            )
+        response = ScratchResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
+        return response.to_json().encode("utf-8")
+
+    async def _serve_scratch_commit(
+        self, frame_bytes: bytes, *, reader: object | None = None
+    ) -> bytes:
+        """Parse + queue a ``scratch.commit`` request; return the verdict.
+
+        Commit promotes a verified sandbox into the real scene through the
+        four hard verify gates. Like scratch.exec it IS a scene write, so it
+        inherits the write-freeze gate. The executor runs the gates, and on
+        pass renames the sandbox into the target path inside one undo group
+        (atomic rollback on partial failure). On refusal the sandbox is
+        preserved so the agent can fix and re-commit.
+        """
+        try:
+            request = parse_scratch_commit_request(frame_bytes)
+        except (TypeError, ValueError):
+            return self._error_envelope(
+                _MALFORMED_REQUEST_ID,
+                code="bridge.invalid_request",
+                category="protocol",
+                message_for_user="The scratch commit request is not valid.",
+            )
+        request_id = request.request_id
+        if self._executor.write_frozen:  # type: ignore[attr-defined]
+            return self._error_envelope(
+                request_id,
+                code="bridge.write_frozen",
+                category="write_frozen",
+                message_for_user=(
+                    "The bridge is frozen for writes after an uncertain recovery."
+                ),
+                retryable=False,
+            )
+        commit_request = request
+
+        def operation() -> object:
+            return self._executor.scratch_commit(commit_request)  # type: ignore[union-attr]
+
+        result = await self._run_on_queue(
+            request_id, request.deadline_ms, operation, reader=reader
+        )
+        if isinstance(result, _QueuedError):
+            return self._error_envelope(
+                request_id,
+                code=result.code,
+                category=result.category,
+                message_for_user=result.message_for_user,
+                retryable=result.retryable,
+            )
+        response = ScratchCommitResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
+        return response.to_json().encode("utf-8")
+
+    async def _serve_scratch_destroy(
+        self, frame_bytes: bytes, *, reader: object | None = None
+    ) -> bytes:
+        """Parse + queue a ``scratch.destroy`` request; return the result.
+
+        Best-effort sandbox cleanup. Unlike exec/commit, destroy BYPASSES the
+        write-freeze gate: cleanup must run even after an uncertain recovery,
+        otherwise a crashed run leaks its sandbox container forever. The
+        executor destroys the ``/obj/eee_scratch_<sandbox_id>`` container if it
+        exists and returns ``missing=True`` if it does not.
+        """
+        try:
+            request = parse_scratch_destroy_request(frame_bytes)
+        except (TypeError, ValueError):
+            return self._error_envelope(
+                _MALFORMED_REQUEST_ID,
+                code="bridge.invalid_request",
+                category="protocol",
+                message_for_user="The scratch destroy request is not valid.",
+            )
+        request_id = request.request_id
+        # NOTE: intentionally NO write-frozen gate here.
+        destroy_request = request
+
+        def operation() -> object:
+            return self._executor.scratch_destroy(destroy_request)  # type: ignore[union-attr]
+
+        result = await self._run_on_queue(
+            request_id, request.deadline_ms, operation, reader=reader
+        )
+        if isinstance(result, _QueuedError):
+            return self._error_envelope(
+                request_id,
+                code=result.code,
+                category=result.category,
+                message_for_user=result.message_for_user,
+                retryable=result.retryable,
+            )
+        response = ScratchDestroyResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
         return response.to_json().encode("utf-8")
 
     async def _run_on_queue(

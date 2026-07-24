@@ -19,6 +19,14 @@ from eee_agent.houdini_bridge.capture import (
     CaptureResult,
     CaptureSettings,
 )
+from eee_agent.houdini_bridge.scratch import (
+    ScratchCommitRequest,
+    ScratchCommitResult,
+    ScratchDestroyRequest,
+    ScratchDestroyResult,
+    ScratchRequest,
+    ScratchResult,
+)
 from eee_agent.houdini_bridge.changesets import (
     ApplyRequest,
     PreflightRequest,
@@ -198,6 +206,81 @@ class BridgeChangeSetProvider:
             settings=CaptureSettings(),
         )
         return await self._call("capture", request, may_have_changed=True)
+
+    async def scratch_exec(
+        self,
+        *,
+        sandbox_id: str,
+        operations: tuple,
+        preserve_on_failure: bool = True,
+    ) -> ScratchResult:
+        """Run a scratch sandbox build and return bounded diagnostics.
+
+        The Houdini side creates/reuses the ``/obj/eee_scratch_<sandbox_id>``
+        container and applies the structured ops (no ownership mirrors). The
+        scene epoch is resolved from the current binding. Any uncertainty
+        raises with ``scene_may_have_changed=True`` (the op writes the scene).
+        """
+        binding = await self.current_binding()
+        request = ScratchRequest.build(
+            request_id=self._request_id("scratch"),
+            deadline_ms=self._deadline_ms,
+            scene_epoch=binding.scene_epoch,
+            sandbox_id=sandbox_id,
+            operations=operations,
+            preserve_on_failure=preserve_on_failure,
+        )
+        return await self._call("scratch_exec", request, may_have_changed=True)
+
+    async def scratch_commit(
+        self,
+        *,
+        sandbox_id: str,
+        target_parent_path: str,
+        target_name: str,
+        orientation_checks: tuple[Mapping[str, object], ...] = (),
+        skip_structure_check: bool = False,
+    ) -> ScratchCommitResult:
+        """Commit a verified sandbox into the real scene through hard gates.
+
+        The Houdini side runs the four verify gates (bake/structure/orientation/
+        health) on the sandbox output node; on pass it renames the sandbox
+        container into ``target_parent_path/target_name`` inside one undo group.
+        On refusal the sandbox is preserved. Any uncertainty raises with
+        ``scene_may_have_changed=True`` (the op writes the scene on success).
+        """
+        binding = await self.current_binding()
+        request = ScratchCommitRequest.build(
+            request_id=self._request_id("scratch_commit"),
+            deadline_ms=self._deadline_ms,
+            scene_epoch=binding.scene_epoch,
+            sandbox_id=sandbox_id,
+            target_parent_path=target_parent_path,
+            target_name=target_name,
+            orientation_checks=tuple(orientation_checks),
+            skip_structure_check=skip_structure_check,
+        )
+        return await self._call("scratch_commit", request, may_have_changed=True)
+
+    async def scratch_destroy(
+        self,
+        *,
+        sandbox_id: str,
+    ) -> ScratchDestroyResult:
+        """Best-effort destroy of one run-scoped sandbox container.
+
+        Called by run-end/cancel/restart hooks to avoid leaking scratch
+        containers. Bypasses the write-freeze gate on the server side. A
+        missing container is a normal (non-error) outcome.
+        """
+        binding = await self.current_binding()
+        request = ScratchDestroyRequest.build(
+            request_id=self._request_id("scratch_destroy"),
+            deadline_ms=self._deadline_ms,
+            scene_epoch=binding.scene_epoch,
+            sandbox_id=sandbox_id,
+        )
+        return await self._call("scratch_destroy", request, may_have_changed=True)
 
     async def receipt(self, changeset: ChangeSet) -> ChangeReceipt:
         if type(changeset) is not ChangeSet:

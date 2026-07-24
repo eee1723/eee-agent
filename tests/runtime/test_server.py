@@ -153,6 +153,11 @@ class FakeService:
         self.replay_result: Any = None
         self.replay_side_effect: Any = None
         self.snapshot_side_effect: Any = None
+        self.rebuild_knowledge_result: Any = {
+            "ok": True,
+            "status": {"status": "ready", "available": True},
+            "summary": {"entity_count": 1234, "houdini_build": "21.0.440"},
+        }
         self.approve_result: dict = {
             "change_id": SID,
             "approval_id": f"apr_{'c' * 32}",
@@ -373,6 +378,13 @@ class FakeService:
             return result
         return snap
 
+    async def rebuild_knowledge(self, hfs: str | None = None) -> dict:
+        self._record("rebuild_knowledge", hfs=hfs)
+        result = self.rebuild_knowledge_result
+        if callable(result):
+            return result()
+        return result
+
     def subscribe(self, callback) -> Any:
         self._callbacks.add(callback)
 
@@ -562,6 +574,61 @@ def test_ping_returns_exact_pong(service, identity) -> None:
                     "protocol": PROTOCOL, "kind": "response",
                     "request_id": "r1", "ok": True, "result": {"pong": True},
                 }
+    _run(scenario())
+
+
+def test_knowledge_rebuild_routes_to_service(service, identity) -> None:
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(_uri(s), additional_headers=_headers(identity), compression=None) as ws:
+                resp = await _request(ws, "r1", "knowledge.rebuild", {})
+                assert resp["ok"] is True
+                result = resp["result"]
+                assert result["ok"] is True
+                assert result["status"]["available"] is True
+                assert result["summary"]["entity_count"] == 1234
+                # The service was called once with no hfs override.
+                assert _last(service, "rebuild_knowledge") == {"hfs": None}
+    _run(scenario())
+
+
+def test_knowledge_rebuild_passes_hfs_override(service, identity) -> None:
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(_uri(s), additional_headers=_headers(identity), compression=None) as ws:
+                resp = await _request(ws, "r1", "knowledge.rebuild",
+                                      {"hfs": "C:/Houdini21"})
+                assert resp["ok"] is True
+                assert _last(service, "rebuild_knowledge") == {"hfs": "C:/Houdini21"}
+    _run(scenario())
+
+
+def test_knowledge_rebuild_rejects_unknown_payload_key(service, identity) -> None:
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(_uri(s), additional_headers=_headers(identity), compression=None) as ws:
+                resp = await _request(ws, "r1", "knowledge.rebuild",
+                                      {"unexpected": 1})
+                assert resp["ok"] is False
+                assert resp["error"]["code"] == "protocol.invalid_envelope"
+    _run(scenario())
+
+
+def test_knowledge_rebuild_propagates_build_failure(service, identity) -> None:
+    # A failed build is reported as ok:False in the result (not a server error),
+    # so the UI can surface the message instead of wedging the command channel.
+    service.rebuild_knowledge_result = {
+        "ok": False, "code": "knowledge.build_failed",
+        "message": "HFS not found",
+    }
+    async def scenario():
+        async with _server(service, identity) as s:
+            async with connect(_uri(s), additional_headers=_headers(identity), compression=None) as ws:
+                resp = await _request(ws, "r1", "knowledge.rebuild", {})
+                # The command itself succeeded (ok:True); the build result is ok:False.
+                assert resp["ok"] is True
+                assert resp["result"]["ok"] is False
+                assert resp["result"]["code"] == "knowledge.build_failed"
     _run(scenario())
 
 

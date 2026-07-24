@@ -74,7 +74,16 @@ class ContextBar(QtWidgets.QWidget):
         self.runtime_label = QtWidgets.QLabel()
         self.bridge_label = QtWidgets.QLabel()
         self.run_label = QtWidgets.QLabel()
-        for label in (self.runtime_label, self.bridge_label, self.run_label):
+        # Block C: a model chip + live token total so the user can see which
+        # model is driving the run and how many tokens it has used, without
+        # opening the inspector. Mirrors the Pi project's context-panel model
+        # row.
+        self.model_label = QtWidgets.QLabel()
+        self.model_label.setObjectName("StateLabel")
+        self.tokens_label = QtWidgets.QLabel()
+        self.tokens_label.setObjectName("DimLabel")
+        for label in (self.runtime_label, self.bridge_label, self.run_label,
+                      self.model_label, self.tokens_label):
             label.setObjectName("StateLabel")
             states.addWidget(label)
         states.addStretch(1)
@@ -87,6 +96,17 @@ class ContextBar(QtWidgets.QWidget):
         self._set_state(self.runtime_label, "Runtime", status.runtime)
         self._set_state(self.bridge_label, "Bridge", status.bridge)
         self.run_label.setText(f"Run: {status.run_state}")
+        # Block C: model chip (hidden when no run selected) + token total.
+        if status.model:
+            self.model_label.setText(f"Model: {status.model}")
+            self.model_label.show()
+        else:
+            self.model_label.hide()
+        if status.total_tokens is not None:
+            self.tokens_label.setText(f"Tokens: {status.total_tokens:,}")
+            self.tokens_label.show()
+        else:
+            self.tokens_label.hide()
 
     @staticmethod
     def _set_state(label: QtWidgets.QLabel, name: str, value: str) -> None:

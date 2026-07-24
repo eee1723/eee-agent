@@ -19,6 +19,7 @@ import asyncio
 import inspect
 import logging
 import math
+import re
 import sys
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
@@ -192,6 +193,22 @@ _INTERRUPTED_ERROR = AgentError(
 # modeled as None), but record the cause so silent apply/inspection failures
 # are traceable instead of disappearing.
 _log = logging.getLogger("eee_agent.runtime.service")
+
+
+# Scratch sandbox ids must match scratch.py's _SANDBOX_ID_RE
+# (^[A-Za-z0-9_-]+$) and stay short enough for a Houdini node name. The run id
+# is already a bounded validated identifier; we keep only the safe charset and
+# cap the length so the derived sandbox container name is always well-formed.
+_SANDBOX_ID_MAX_LEN = 64
+_SANDBOX_ID_SAFE = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def _sandbox_id_from_run(run_id: str) -> str:
+    """Derive a run-scoped sandbox id from a validated run id."""
+    cleaned = _SANDBOX_ID_SAFE.sub("_", run_id).strip("_")
+    if not cleaned:
+        cleaned = "run"
+    return cleaned[:_SANDBOX_ID_MAX_LEN]
 
 
 class _UnavailableWorkspaceFactProvider:
@@ -496,6 +513,19 @@ class RuntimeService:
             and isinstance(changeset_bridge_provider, _ModelingValidationProvider)
             else None
         )
+        # Scratch sandbox provider: the same bridge object exposes the
+        # ``scratch_exec`` capability (Phase 1 of the sandbox+verify+commit
+        # pivot). Stashed separately from the changeset service so the scratch
+        # tool path never depends on the changeset lifecycle. May be None when
+        # no bridge is configured (scratch_build then fails closed).
+        from eee_agent.modeling.scratch_coordinator import ScratchProvider
+
+        self._scratch_bridge_provider: ScratchProvider | None = (
+            changeset_bridge_provider
+            if changeset_bridge_provider is not None
+            and isinstance(changeset_bridge_provider, ScratchProvider)
+            else None
+        )
         # Trusted ChangeSet approval service. It shares this service's EventStore
         # so proposal/decision events commit in the same transaction as the
         # changeset/approval mutation, and it is constructed with injected
@@ -547,6 +577,57 @@ class RuntimeService:
     def knowledge_status(self):
         """Current advisory Knowledge cache status for UI/status consumers."""
         return self._knowledge.status
+
+    async def rebuild_knowledge(self, hfs: str | None = None) -> dict[str, object]:
+        """Rebuild the Houdini knowledge cache and refresh the runtime view.
+
+        Runs the (synchronous, hython-invoking) ``build_cache`` off the event
+        loop via ``asyncio.to_thread`` so the runtime stays responsive while a
+        build may take tens of seconds. On success the cache file is swapped
+        atomically and ``KnowledgeRuntime.refresh`` reclassifies it so the next
+        ``search_houdini_knowledge`` call sees real results without a restart.
+
+        Returns a bounded result dict (``ok`` + either a summary or an error).
+        Never raises: a build failure is reported as ``{"ok": False, ...}`` so
+        the UI can surface it instead of wedging the command channel.
+        """
+        import asyncio
+
+        from eee_agent.knowledge.build import BuildError, BuildOptions, build_cache
+
+        output = self._paths.knowledge_cache_path
+        options = BuildOptions(
+            output=output,
+            hfs=Path(hfs) if hfs else None,
+        )
+
+        def _do_build() -> dict[str, object]:
+            manifest = build_cache(options)
+            # Refresh the runtime view so search/get pick up the new cache
+            # immediately (no runtime restart required).
+            status = self._knowledge.refresh()
+            return {
+                "ok": True,
+                "status": status.to_dict(),
+                "summary": {
+                    "kb_schema_version": manifest.kb_schema_version,
+                    "houdini_build": manifest.houdini_build,
+                    "manifest_sha256": manifest.manifest_sha256,
+                    "entity_count": sum(
+                        c for _, c in manifest.entity_count_by_kind
+                    ),
+                },
+            }
+
+        try:
+            return await asyncio.to_thread(_do_build)
+        except BuildError as exc:
+            return {"ok": False, "code": "knowledge.build_failed",
+                    "message": str(exc)[:500]}
+        except Exception as exc:  # noqa: BLE001 — never crash the command channel
+            _log.exception("knowledge rebuild failed")
+            return {"ok": False, "code": "knowledge.build_failed",
+                    "message": repr(exc)[:500]}
 
     # ------------------------------------------------------------------
     # lifecycle
@@ -1626,7 +1707,31 @@ class RuntimeService:
             except Exception:
                 return
             if current.status in _TERMINAL_STATUSES:
+                # Best-effort scratch sandbox cleanup so a crashed/cancelled run
+                # does not leak its /obj/eee_scratch_<run> container. Failure
+                # is logged but never blocks the already-terminal run.
+                await self._cleanup_scratch_sandbox(run_id)
                 self._tasks.pop(run_id, None)
+
+    async def _cleanup_scratch_sandbox(self, run_id: str) -> None:
+        """Best-effort destroy of the run-scoped scratch sandbox container.
+
+        Called on every terminal transition (completed/failed/cancelled). A
+        missing container (already committed or cleaned up) is a normal
+        non-error outcome. Cleanup failure is logged and swallowed so it can
+        never block the terminal transition or mask the run's real outcome.
+        """
+        provider = getattr(self, "_scratch_bridge_provider", None)
+        if provider is None:
+            return
+        sandbox_id = _sandbox_id_from_run(run_id)
+        try:
+            await provider.scratch_destroy(sandbox_id=sandbox_id)
+        except Exception:
+            _log.exception(
+                "scratch sandbox cleanup failed (run=%s sandbox=%s)",
+                run_id, sandbox_id,
+            )
 
     async def _ensure_terminal(
         self, session_id: str, run_id: str
@@ -1727,11 +1832,45 @@ class RuntimeService:
         modeling = None
         if self._modeling_catalog_provider is not None:
             modeling = await self._build_modeling_context(session_id, run_id)
+        scratch = self._build_scratch_context(run_id)
         return RuntimeToolContext(
             read_only=self._read_only_provider,
             knowledge=self._knowledge,
             modeling=modeling,
+            scratch=scratch,
         )
+
+    def _build_scratch_context(self, run_id: str) -> object | None:
+        """Build the trusted scratch sandbox context for an opt-in Run.
+
+        Returns ``None`` (so scratch_build fails closed) when no bridge provider
+        is configured. The sandbox id is derived from the run id so concurrent
+        runs get isolated ``/obj/eee_scratch_<run>`` containers.
+        """
+        # ``getattr`` with a None default keeps this robust to the
+        # ``object.__new__`` construction pattern used by some tests; a real
+        # RuntimeService always sets the attribute in ``__init__``.
+        provider = getattr(self, "_scratch_bridge_provider", None)
+        if provider is None:
+            return None
+        from eee_agent.modeling.scratch_coordinator import (
+            ScratchCoordinator,
+            ScratchSessionContext,
+            ScratchToolContext,
+        )
+
+        # The run id is already a bounded, validated identifier; sanitize to the
+        # sandbox_id charset (alphanumeric/underscore/hyphen) to guarantee the
+        # container name is a valid Houdini node name.
+        sandbox_id = _sandbox_id_from_run(run_id)
+        try:
+            session_ctx = ScratchSessionContext(provider=provider, sandbox_id=sandbox_id)
+        except (TypeError, ValueError):
+            _log.exception(
+                "scratch context build failed (sandbox_id=%s)", sandbox_id
+            )
+            return None
+        return ScratchToolContext(ScratchCoordinator(session_ctx))
 
     async def _run(
         self, session_id: str, run_id: str, user_input: str

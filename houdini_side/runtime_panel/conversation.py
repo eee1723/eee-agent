@@ -27,6 +27,10 @@ _TONE_COLORS = {
 # Blinking streaming-cursor cadence (ms).
 _CURSOR_BLINK_MS = 500
 _CURSOR = "▍"
+# Coalesced autoscroll interval: instead of one zero-delay QTimer per token
+# (which forces a relayout + scrollbar update on every token and piles up
+# during fast streaming), batch scrolls to ~16x/sec.
+_SCROLL_FLUSH_MS = 60
 
 
 class _Card(QtWidgets.QFrame):
@@ -72,11 +76,12 @@ class _Card(QtWidgets.QFrame):
             self.body_label.setFont(QtGui.QFont(theme.mono_font_family()))
         layout.addWidget(self.body_label)
 
-        # Optional collapsible thinking block (assistant streaming only).
+        # The model's reasoning stream is rendered by the dedicated
+        # ThinkingPanel anchored below the timeline, not duplicated as a
+        # collapsible block inside each assistant card. These stay None so any
+        # legacy reference degrades gracefully.
         self._thinking_toggle = None
         self._thinking_label = None
-        if item.thinking:
-            self._build_thinking_block(item.thinking, layout)
 
         # Tone stripe + surface are set per kind via objectName + stylesheet.
         if item.kind not in ("user", "assistant", "assistant_streaming"):
@@ -92,44 +97,17 @@ class _Card(QtWidgets.QFrame):
         else:
             self._cursor_timer = None
 
-    def _build_thinking_block(self, text: str, layout) -> None:
-        block = QtWidgets.QFrame()
-        block.setObjectName("ThinkingBlock")
-        bl = QtWidgets.QVBoxLayout(block)
-        bl.setContentsMargins(8, 6, 8, 6)
-        bl.setSpacing(2)
-        self._thinking_toggle = QtWidgets.QToolButton()
-        self._thinking_toggle.setText("▶ Thinking")
-        self._thinking_toggle.setCheckable(True)
-        self._thinking_toggle.setObjectName("ThinkingToggle")
-        self._thinking_label = QtWidgets.QLabel(text)
-        self._thinking_label.setWordWrap(True)
-        self._thinking_label.setObjectName("DimLabel")
-        self._thinking_label.hide()
-        self._thinking_toggle.toggled.connect(self._toggle_thinking)
-        bl.addWidget(self._thinking_toggle)
-        bl.addWidget(self._thinking_label)
-        layout.addWidget(block)
-
-    def _toggle_thinking(self, on: bool) -> None:
-        if self._thinking_toggle is not None and self._thinking_label is not None:
-            self._thinking_toggle.setText("▼ Thinking" if on else "▶ Thinking")
-            self._thinking_label.setVisible(on)
-
     def update_body(self, text: str, *, thinking: str = "") -> None:
-        """Update an in-flight assistant card in place (streaming)."""
+        """Update an in-flight assistant card in place (streaming).
+
+        ``thinking`` is accepted for signature compatibility but ignored: the
+        reasoning stream is shown in the ThinkingPanel below the timeline, not
+        inside the card.
+        """
         if self._kind not in ("assistant", "assistant_streaming"):
             return
         self.body_label.setText(self._render_body(MessageItem(
             self._kind, "", text, "normal")))
-        if thinking:
-            if self._thinking_label is None:
-                # First thinking chunk arrived after the card was created.
-                layout = self.layout()
-                if layout is not None:
-                    self._build_thinking_block(thinking, layout)
-            else:
-                self._thinking_label.setText(thinking)
 
     def stop_streaming(self) -> None:
         """Freeze the cursor animation once the run reaches a terminal state."""
@@ -174,6 +152,18 @@ class ConversationView(QtWidgets.QWidget):
         self.scroll.setWidget(self.flow_host)
         layout.addWidget(self.scroll, 1)
 
+        # Pi-style folding panels anchored below the timeline: the agent's
+        # intermediate steps (tool calls/results + assistant text segments) and
+        # the reasoning stream live here so the conversation flow stays a clean
+        # user → assistant dialogue. They update incrementally (keyed by step
+        # ref) and never rebuild on token deltas.
+        from houdini_side.runtime_panel.activity_panel import (
+            ActivityPanel, ThinkingPanel)
+        self.activity_panel = ActivityPanel(self)
+        self.thinking_panel = ThinkingPanel(self)
+        layout.addWidget(self.activity_panel)
+        layout.addWidget(self.thinking_panel)
+
         composer = QtWidgets.QHBoxLayout()
         self.input = RunRequestEdit()
         self.send_button = QtWidgets.QPushButton("Send")
@@ -193,6 +183,20 @@ class ConversationView(QtWidgets.QWidget):
         composer.addWidget(self.stop_button)
         layout.addLayout(composer)
         self._cards: list[_Card] = []
+        # Coalesced autoscroll: only one timer is ever pending, so fast token
+        # streams don't queue dozens of relayout-forcing zero-delay timers.
+        self._scroll_timer = QtCore.QTimer(self)
+        self._scroll_timer.setInterval(_SCROLL_FLUSH_MS)
+        self._scroll_timer.setSingleShot(True)
+        self._scroll_timer.timeout.connect(self._flush_scroll)
+
+    def _schedule_scroll(self) -> None:
+        if not self._scroll_timer.isActive():
+            self._scroll_timer.start()
+
+    def _flush_scroll(self) -> None:
+        bar = self.scroll.verticalScrollBar()
+        bar.setValue(bar.maximum())
 
     def append_item(self, item: MessageItem) -> None:
         card = _Card(item)
@@ -207,10 +211,9 @@ class ConversationView(QtWidgets.QWidget):
             old = self._cards.pop(0)
             self.flow.removeWidget(old)
             old.deleteLater()
-        bar = self.scroll.verticalScrollBar()
-        # Layout activation is deferred to the next event-loop pass, so
-        # maximum() is stale here; scroll after it via a zero-delay timer.
-        QtCore.QTimer.singleShot(0, lambda: bar.setValue(bar.maximum()))
+        # Layout activation is deferred to the next event-loop pass; scroll on
+        # the coalesced timer once layout has settled.
+        self._schedule_scroll()
 
     def replace_last_assistant(self, item: MessageItem) -> None:
         """Swap the trailing streaming/assistant card for a final one.
@@ -238,8 +241,7 @@ class ConversationView(QtWidgets.QWidget):
 
         if self._cards and self._cards[-1]._kind == "assistant_streaming":
             self._cards[-1].update_body(text, thinking=thinking)
-            bar = self.scroll.verticalScrollBar()
-            QtCore.QTimer.singleShot(0, lambda: bar.setValue(bar.maximum()))
+            self._schedule_scroll()
             return True
         self.append_item(streaming_assistant(text, thinking=thinking))
         return True

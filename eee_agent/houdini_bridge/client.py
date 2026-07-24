@@ -36,6 +36,18 @@ from eee_agent.houdini_bridge.capture import (
     CaptureResult,
     parse_capture_response,
 )
+from eee_agent.houdini_bridge.scratch import (
+    SCRATCH_V1,
+    ScratchCommitRequest,
+    ScratchCommitResult,
+    ScratchDestroyRequest,
+    ScratchDestroyResult,
+    ScratchRequest,
+    ScratchResult,
+    parse_scratch_commit_response,
+    parse_scratch_destroy_response,
+    parse_scratch_response,
+)
 from eee_agent.houdini_bridge.changesets import (
     CHANGESET_V1,
     ApplyRequest,
@@ -680,6 +692,183 @@ class BridgeClient:
                 "bridge.invalid_request",
                 "protocol",
                 "The bridge capture response is not a valid reference.",
+            )
+        return result
+
+    async def scratch_exec(self, request: ScratchRequest) -> ScratchResult:
+        """Send a ``scratch.exec`` request and return the typed diagnostics.
+
+        Requires the advertised ``scratch.v1`` capability. The Houdini side
+        builds nodes inside a reserved ``/obj/eee_scratch_<id>`` container (no
+        ownership mirrors) and returns bounded diagnostics (cooked geometry /
+        errors of the output node). On a server bridge error the structured
+        fields are re-raised as :class:`BridgeClientError`.
+        """
+        if type(request) is not ScratchRequest:
+            raise TypeError("request must be a ScratchRequest")
+        if SCRATCH_V1 not in self._capabilities:
+            raise _client_error(
+                "bridge.capability_unavailable",
+                "capability",
+                "The bridge does not support scratch sandbox operations.",
+                retryable=False,
+            )
+        if not self._helloed or self._transport is None:
+            raise RuntimeError(
+                "BridgeClient.scratch_exec() requires a successful open()/hello"
+            )
+        response_bytes = await self._exchange(request.to_json(), request.deadline_ms)
+        try:
+            response = parse_scratch_response(response_bytes)
+        except (TypeError, ValueError) as exc:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response is not a valid scratch envelope.",
+            ) from exc
+        if response.request_id != request.request_id:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response does not match the request id.",
+            )
+        if response.error is not None:
+            err = response.error
+            raise BridgeClientError(
+                code=err.code,
+                category=err.category,
+                message_for_user=err.message_for_user,
+                retryable=err.retryable,
+                technical_detail_ref=err.technical_detail_ref,
+            )
+        result = response.result
+        if type(result) is not ScratchResult:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge scratch response is not a valid result.",
+            )
+        return result
+
+    async def scratch_commit(
+        self, request: ScratchCommitRequest
+    ) -> ScratchCommitResult:
+        """Send a ``scratch.commit`` request and return the commit verdict.
+
+        Requires the advertised ``scratch.v1`` capability. The Houdini side
+        runs the four hard verify gates (bake/structure/orientation/health) on
+        the sandbox output; on pass it renames the sandbox into the real scene
+        inside one undo group (atomic rollback on partial failure). On refusal
+        the sandbox is preserved. A server bridge error is re-raised as
+        :class:`BridgeClientError`.
+        """
+        if type(request) is not ScratchCommitRequest:
+            raise TypeError("request must be a ScratchCommitRequest")
+        if SCRATCH_V1 not in self._capabilities:
+            raise _client_error(
+                "bridge.capability_unavailable",
+                "capability",
+                "The bridge does not support scratch sandbox operations.",
+                retryable=False,
+            )
+        if not self._helloed or self._transport is None:
+            raise RuntimeError(
+                "BridgeClient.scratch_commit() requires a successful open()/hello"
+            )
+        response_bytes = await self._exchange(request.to_json(), request.deadline_ms)
+        try:
+            response = parse_scratch_commit_response(response_bytes)
+        except (TypeError, ValueError) as exc:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response is not a valid scratch commit envelope.",
+            ) from exc
+        if response.request_id != request.request_id:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response does not match the request id.",
+            )
+        if response.error is not None:
+            err = response.error
+            raise BridgeClientError(
+                code=err.code,
+                category=err.category,
+                message_for_user=err.message_for_user,
+                retryable=err.retryable,
+                technical_detail_ref=err.technical_detail_ref,
+            )
+        result = response.result
+        if type(result) is not ScratchCommitResult:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge scratch commit response is not a valid result.",
+            )
+        return result
+
+    async def scratch_destroy(
+        self, request: ScratchDestroyRequest
+    ) -> ScratchDestroyResult:
+        """Send a ``scratch.destroy`` request and return the cleanup result.
+
+        Best-effort cleanup of one run-scoped sandbox container. Unlike
+        exec/commit, destroy bypasses the write-freeze gate on the server side
+        (cleanup must run even after an uncertain recovery).
+        """
+        if type(request) is not ScratchDestroyRequest:
+            raise TypeError("request must be a ScratchDestroyRequest")
+        if SCRATCH_V1 not in self._capabilities:
+            raise _client_error(
+                "bridge.capability_unavailable",
+                "capability",
+                "The bridge does not support scratch sandbox operations.",
+                retryable=False,
+            )
+        if not self._helloed or self._transport is None:
+            raise RuntimeError(
+                "BridgeClient.scratch_destroy() requires a successful open()/hello"
+            )
+        response_bytes = await self._exchange(request.to_json(), request.deadline_ms)
+        try:
+            response = parse_scratch_destroy_response(response_bytes)
+        except (TypeError, ValueError) as exc:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response is not a valid scratch destroy envelope.",
+            ) from exc
+        if response.request_id != request.request_id:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response does not match the request id.",
+            )
+        if response.error is not None:
+            err = response.error
+            raise BridgeClientError(
+                code=err.code,
+                category=err.category,
+                message_for_user=err.message_for_user,
+                retryable=err.retryable,
+                technical_detail_ref=err.technical_detail_ref,
+            )
+        result = response.result
+        if type(result) is not ScratchDestroyResult:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge scratch destroy response is not a valid result.",
             )
         return result
 

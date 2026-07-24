@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import math
 import re
 from datetime import datetime, timezone
@@ -222,6 +223,13 @@ _RECEIPT_FIELDS = frozenset(
 _MAX_OUTPUT_CHARS = 32_000
 _MAX_ACTIVITY = 100
 _MAX_RUNS = 100
+# Step list (per-run ordered trace of assistant text segments + tool calls +
+# tool results). Bounded to the same magnitude as activity so a long agent
+# loop cannot grow the run dict without limit.
+_MAX_STEPS = 100
+_MAX_STEP_BODY_CHARS = 4000
+_STEP_KINDS = frozenset({"assistant_text", "tool_call", "tool_result"})
+_USAGE_FIELDS = frozenset({"input_tokens", "output_tokens", "total_tokens"})
 
 
 def _timestamp(value: object) -> str:
@@ -263,8 +271,17 @@ def _validate_run(value: object) -> dict[str, object]:
     if "todos" not in keys:
         keys = keys | {"todos"}
         value = {**value, "todos": []}
+    # 'steps' and 'usage' are panel-only projections: the server wire protocol
+    # never carries them, but _validate_run is invoked twice on the load path
+    # (once inside parse_session_snapshot, once in load_snapshot). Strip any
+    # previously-synthesized copies before the strict _RUN_FIELDS check so the
+    # re-validation is idempotent, then re-synthesize fresh defaults below.
+    if "steps" in keys or "usage" in keys:
+        keys = keys - {"steps", "usage"}
+        value = {k: v for k, v in value.items() if k not in ("steps", "usage")}
     if keys != _RUN_FIELDS:
         raise PanelClientError("Runtime Run snapshot is invalid.")
+    value = {**value, "steps": [], "usage": None}
     run = dict(value)
     _matching(run["run_id"], _RUN_ID_RE)
     _matching(run["session_id"], _SESSION_ID_RE)
@@ -336,6 +353,61 @@ def parse_session_snapshot(payload: object) -> Mapping[str, object]:
             "version_report": dict(payload["version_report"]),
         }
     )
+
+
+# Monotonic counter for synthetic step refs (assistant_text segments and
+# unpaired tool results have no natural id). Module-level so refs stay unique
+# across runs within one panel process.
+_synthetic_ref_counter = itertools.count(1)
+
+
+def _synthetic_ref() -> str:
+    return f"step_{next(_synthetic_ref_counter)}"
+
+
+def _usage_from_payload(value: object) -> dict[str, int] | None:
+    """Validate a token-usage dict as emitted by the runner.
+
+    Accepts {"input_tokens", "output_tokens", "total_tokens"} with exact int
+    values. Returns None for any missing/malformed value (callers treat None
+    as 'no usage'). Never raises — a malformed usage must not wedge the run.
+    """
+    if type(value) is not dict:
+        return None
+    result: dict[str, int] = {}
+    for field in ("input_tokens", "output_tokens", "total_tokens"):
+        token = value.get(field)
+        # bool is a subclass of int; reject it explicitly so True/False
+        # cannot masquerade as a token count.
+        if type(token) is not int or type(token) is bool:
+            return None
+        result[field] = token
+    return result
+
+
+def _accumulate_usage(
+    current: object, payload: Mapping[str, object]
+) -> dict[str, int] | None:
+    """Add an incremental model.usage_updated delta onto the running total.
+
+    current is the run's existing usage (dict or None). The delta payload
+    carries the SAME keys as the full usage (input/output/total tokens). Per
+    the runner, usage_updated fires with the delta for that chunk, so we add
+    it. A malformed delta yields the current value unchanged.
+    """
+    base = current if type(current) is dict else {
+        "input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
+    }
+    result: dict[str, int] = {
+        "input_tokens": int(base.get("input_tokens", 0)),
+        "output_tokens": int(base.get("output_tokens", 0)),
+        "total_tokens": int(base.get("total_tokens", 0)),
+    }
+    for field in ("input_tokens", "output_tokens", "total_tokens"):
+        delta = payload.get(field)
+        if type(delta) is int and type(delta) is not bool:
+            result[field] += delta
+    return result
 
 
 class RuntimePanelState:
@@ -440,6 +512,11 @@ class RuntimePanelState:
                 # D-2: empty until a todos.updated event arrives or a fresh
                 # snapshot repopulates it from RunRecord.todos.
                 "todos": [],
+                # Panel-only ordered trace of the run's steps (assistant text
+                # segments, tool calls, tool results) and the latest token
+                # usage. Populated by apply_event; reset on each new run.
+                "steps": [],
+                "usage": None,
             }
             self._runs[rid] = created_run
             if rid not in self._run_order:
@@ -451,6 +528,7 @@ class RuntimePanelState:
             self._trim_runs()
         elif type(run_id) is str and run_id in self._runs:
             run = self._runs[run_id]
+            steps: list[dict[str, object]] = run["steps"]  # type: ignore[assignment]
             if event_type == "run.state_changed":
                 target = _exact_str(payload.get("to"))
                 if target not in _RUN_STATES:
@@ -469,6 +547,15 @@ class RuntimePanelState:
                     raise PanelClientError("Runtime output event is invalid.")
                 combined = self._output.get(run_id, "") + text
                 self._output[run_id] = combined[-_MAX_OUTPUT_CHARS:]
+                # Step list: accumulate into the trailing assistant_text step,
+                # opening a fresh one if the last step was a tool result or
+                # none exists yet. This preserves each assistant segment
+                # between tool calls instead of fusing them into one string.
+                self._touch_assistant_step(steps)
+                last = steps[-1]
+                last["body"] = str(last.get("body", "")) + text
+                last["body"] = str(last["body"])[-_MAX_STEP_BODY_CHARS:]
+                last["status"] = "streaming"
             elif event_type == "model.reasoning_delta":
                 # Thinking/reasoning stream. Same shape as text_delta, same
                 # bound, separate buffer. OPERATIONAL — never replayed.
@@ -483,6 +570,27 @@ class RuntimePanelState:
                     raise PanelClientError("Runtime output event is invalid.")
                 self._output[run_id] = text[-_MAX_OUTPUT_CHARS:]
                 run["final_response"] = self._output[run_id]
+                # Capture the terminal usage carried alongside the final text.
+                # Previously this was read-and-discarded; persist it so the
+                # inspector and context bar can show token counts. Only
+                # overwrite when a valid usage dict is present, so an
+                # assistant_final without usage preserves a running total
+                # accumulated from model.usage_updated.
+                final_usage = _usage_from_payload(payload.get("usage"))
+                if final_usage is not None:
+                    run["usage"] = final_usage
+                # Settle the trailing assistant_text step to 'done' with the
+                # final text so the activity panel shows the complete reply
+                # rather than the last streamed fragment.
+                self._settle_assistant_step(steps, text)
+            elif event_type == "model.usage_updated":
+                # Incremental token counts during the run. Accumulate into the
+                # run's usage so the context bar can show live totals.
+                run["usage"] = _accumulate_usage(run.get("usage"), payload)
+            elif event_type == "model.completed":
+                # DURABLE terminal usage; authoritative final count (survives
+                # reconnect replay). Overwrites any accumulated running total.
+                run["usage"] = _usage_from_payload(payload.get("usage"))
             elif event_type == "run.failed":
                 error = payload.get("error")
                 if type(error) is not dict:
@@ -514,17 +622,94 @@ class RuntimePanelState:
                 name = payload.get("name")
                 if type(name) is not str:
                     raise PanelClientError("Runtime tool event is invalid.")
+                call_id = payload.get("call_id")
+                call_id_text = call_id if type(call_id) is str else ""
                 detail = ""
+                status = "pending"
                 if event_type == "tool.completed":
                     content = payload.get("content")
                     if type(content) is str:
                         detail = content[:600]
+                    status = "done"
                 self._activity.append(
                     {"type": event_type, "name": name, "detail": detail}
                 )
                 self._activity = self._activity[-_MAX_ACTIVITY:]
+                # Step list: a tool_call opens a new step (closing any open
+                # assistant_text segment); a tool_result pairs onto its
+                # matching tool_call by call_id when present, else appends.
+                if event_type == "tool.started":
+                    steps.append({
+                        "kind": "tool_call",
+                        "ref": call_id_text or _synthetic_ref(),
+                        "title": name,
+                        "body": "",
+                        "status": status,
+                    })
+                else:
+                    paired = False
+                    if call_id_text:
+                        for step in reversed(steps):
+                            if (step.get("kind") == "tool_call"
+                                    and step.get("ref") == call_id_text):
+                                step["status"] = status
+                                step["result"] = detail
+                                paired = True
+                                break
+                    if not paired:
+                        steps.append({
+                            "kind": "tool_result",
+                            "ref": call_id_text or _synthetic_ref(),
+                            "title": name,
+                            "body": detail,
+                            "status": status,
+                        })
+                run["steps"] = steps[-_MAX_STEPS:]
         self._last_seq = seq
         return True
+
+    def _touch_assistant_step(
+        self, steps: list[dict[str, object]]
+    ) -> None:
+        """Ensure the trailing step is an open assistant_text segment.
+
+        Called on each model.text_delta: if the last step is an active
+        assistant_text step, reuse it; otherwise open a new one. This is what
+        separates the assistant's text between tool calls into distinct
+        segments instead of concatenating them into a single blob.
+        """
+        if steps and steps[-1].get("kind") == "assistant_text" \
+                and steps[-1].get("status") == "streaming":
+            return
+        steps.append({
+            "kind": "assistant_text",
+            "ref": _synthetic_ref(),
+            "title": "",
+            "body": "",
+            "status": "streaming",
+        })
+
+    def _settle_assistant_step(
+        self, steps: list[dict[str, object]], final_text: str
+    ) -> None:
+        """Mark the trailing assistant_text step done with the final reply.
+
+        On message.assistant_final the run's authoritative text arrives; bake
+        it into the last assistant_text segment (bounded) so the activity
+        panel shows the complete reply, not the last streamed fragment.
+        """
+        if not steps or steps[-1].get("kind") != "assistant_text":
+            steps.append({
+                "kind": "assistant_text",
+                "ref": _synthetic_ref(),
+                "title": "",
+                "body": final_text[-_MAX_STEP_BODY_CHARS:],
+                "status": "done",
+            })
+            return
+        last = steps[-1]
+        last["body"] = final_text[-_MAX_STEP_BODY_CHARS:]
+        last["status"] = "done"
 
     def _record_apply_outcome(self, payload: Mapping[str, object]) -> None:
         """B-2: stash the latest receipt outcome keyed by change_id.
@@ -595,6 +780,23 @@ class RuntimePanelState:
                 "apply_outcomes": tuple(dict(v) for v in self._apply_outcomes.values()),
             }
         )
+
+    def streaming_delta(self) -> tuple[str | None, str, str]:
+        """Return the selected run's live text + thinking without a full snapshot.
+
+        Used by the panel's lightweight streaming path so token deltas update
+        the trailing conversation card WITHOUT triggering the full-snapshot
+        deep-copy + inspector rebuild. Mirrors the selection logic in
+        ``snapshot()``: the active run if set, else the most recent run.
+        """
+        selected_id = self._active_run_id
+        if selected_id is None and self._run_order:
+            selected_id = self._run_order[-1]
+        if not selected_id:
+            return None, "", ""
+        output = self._output.get(selected_id, "")
+        thinking = self._thinking.get(selected_id, "")
+        return selected_id, output, thinking
 
 
 def parse_changeset_list(result: object) -> tuple[Mapping[str, object], ...]:

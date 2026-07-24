@@ -56,6 +56,7 @@ def test_command_types_match_plan() -> None:
     assert COMMAND_TYPES == frozenset(
         {
             "runtime.ping",
+            "knowledge.rebuild",
             "session.list",
             "session.create",
             "session.rename",

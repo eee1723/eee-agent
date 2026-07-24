@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sys
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -66,6 +67,16 @@ from eee_agent.houdini_bridge.capture import (
     CaptureFramingReport,
     CaptureRequest,
     CaptureResult,
+)
+from eee_agent.houdini_bridge.scratch import (
+    ScratchCommitRequest,
+    ScratchCommitResult,
+    ScratchDestroyRequest,
+    ScratchDestroyResult,
+    ScratchGeometry,
+    ScratchOp,
+    ScratchRequest,
+    ScratchResult,
 )
 from eee_agent.houdini_bridge.changesets import (
     ApplyRequest,
@@ -114,6 +125,59 @@ def _stale(message: str) -> HoudiniAdapterError:
         message_for_user=message,
         retryable=True,
     )
+
+
+def _scratch_failed(message: str) -> HoudiniAdapterError:
+    return HoudiniAdapterError(
+        code="bridge.scratch_failed",
+        category="runtime",
+        message_for_user=message,
+        retryable=True,
+    )
+
+
+def _gate_failure_reason(gate_report: dict) -> str:
+    """Summarize the hard gate failures into one bounded reason string."""
+    failures = gate_report.get("hard_failures", [])
+    if not failures:
+        return ""
+    parts = []
+    for g in failures[:4]:
+        name = g.get("gate", "?")
+        reason = g.get("reason", "") or "failed"
+        parts.append(f"{name}: {reason[:200]}")
+    return "; ".join(parts)[:_MAX_ERROR_CHARS]
+
+
+def _build_commit_receipt(gate_report: dict) -> dict:
+    """Build the tamper-evident verification receipt for a commit verdict.
+
+    The agent's report must reference fields from this receipt rather than
+    re-counting geometry — the receipt is a bounded object returned by the
+    tool, so the agent cannot rewrite its numbers.
+    """
+    gates = gate_report.get("gates", [])
+    health_gate = next((g for g in gates if g.get("gate") == "health"), {})
+    health_detail = health_gate.get("detail", {}) if isinstance(health_gate, dict) else {}
+    orientation_gate = next((g for g in gates if g.get("gate") == "orientation"), {})
+    orientation_detail = orientation_gate.get("detail", {}) if isinstance(orientation_gate, dict) else {}
+    return {
+        "passed": gate_report.get("passed", False),
+        "orientation": {
+            "passed": orientation_detail.get("passed", 0) if isinstance(orientation_detail, dict) else 0,
+            "failed": orientation_detail.get("failed", 0) if isinstance(orientation_detail, dict) else 0,
+            "total": orientation_detail.get("total", 0) if isinstance(orientation_detail, dict) else 0,
+        },
+        "health": {
+            "hard_errors_count": health_detail.get("hard_errors_count", 0) if isinstance(health_detail, dict) else 0,
+            "soft_warnings_count": health_detail.get("soft_warnings_count", 0) if isinstance(health_detail, dict) else 0,
+        },
+    }
+
+
+# Bounds mirrored from the scratch DTO module for error-text truncation.
+_MAX_ERROR_CHARS = 1000
+_MAX_ERRORS = 32
 
 
 def _ambiguous() -> HoudiniAdapterError:
@@ -1949,6 +2013,348 @@ class ChangeSetExecutor:
                 if failure is None:
                     failure = exc
         return failure
+
+    # --------------------------------------------------------------- scratch sandbox
+
+    def scratch_exec(self, request: ScratchRequest) -> ScratchResult:
+        """Build/extend a reserved scratch container and return diagnostics.
+
+        The sandbox lives at ``/obj/eee_scratch_<sandbox_id>`` (a plain geo
+        container, created on first call, reused across calls so the agent can
+        iterate). Structured ops (create_node / set_parm / connect) are applied
+        in one undo group WITHOUT ownership mirrors — scratch nodes never carry
+        ``eee.node_id`` / ``eee.workspace_id``, so they cannot pollute a real
+        workspace's node-id index. On failure the container is preserved by
+        default (``preserve_on_failure``) so the agent can inspect and retry;
+        only when the flag is False is the whole container destroyed.
+
+        Returns bounded diagnostics: the container path, the count of ops
+        applied, the output node (last created node), cook errors, and the
+        cooked geometry stats of the output node.
+        """
+        binding = self.binding()
+        if binding.scene_epoch != request.scene_epoch:
+            raise _stale(
+                "The scene changed before the scratch operation could run."
+            )
+        hou = self._hou
+        container_path = request.container_path
+        obj_network = hou.node("/obj")
+        if obj_network is None:
+            raise _scratch_failed(
+                "The /obj network is unavailable in this Houdini session."
+            )
+
+        container = hou.node(container_path)
+        created_this_call: list[object] = []
+        applied = 0
+        output_node_path = container_path
+        errors: list[str] = []
+        failure: BaseException | None = None
+        node_index: dict[str, object] = {}
+
+        try:
+            with hou.undos.group(_UNDO_LABEL_PREFIX + "scratch.exec"):
+                # Create or reuse the sandbox container.
+                if container is None:
+                    container = obj_network.createNode(
+                        "geo", request.container_name
+                    )
+                    created_this_call.append(container)
+                node_index[""] = container  # parent "" => container root
+
+                for op in request.operations:
+                    if op.kind == "create_node":
+                        parent = node_index.get(op.parent, container)
+                        node = parent.createNode(op.node_type, op.node_name)
+                        created_this_call.append(node)
+                        node_index[op.node_name] = node
+                        output_node_path = node.path()
+                        applied += 1
+                    elif op.kind == "set_parm":
+                        node = node_index.get(op.node_name)
+                        if node is None:
+                            node = hou.node(
+                                f"{container_path}/{op.node_name}"
+                            )
+                        if node is None:
+                            raise _scratch_failed(
+                                f"set_parm target node not found: {op.node_name}"
+                            )
+                        parm = node.parm(op.parm)
+                        if parm is None:
+                            raise _scratch_failed(
+                                f"parm not found on {op.node_name}: {op.parm}"
+                            )
+                        parm.set(op.value)
+                        applied += 1
+                    elif op.kind == "connect":
+                        node = node_index.get(op.node_name)
+                        if node is None:
+                            node = hou.node(
+                                f"{container_path}/{op.node_name}"
+                            )
+                        source = node_index.get(op.source)
+                        if source is None:
+                            source = hou.node(
+                                f"{container_path}/{op.source}"
+                            )
+                        if node is None or source is None:
+                            raise _scratch_failed(
+                                f"connect endpoints not found: "
+                                f"{op.node_name} or {op.source}"
+                            )
+                        node.setInput(op.input_index, source, op.source_output_index)
+                        applied += 1
+        except HoudiniAdapterError:
+            failure = sys.exc_info()[1]  # type: ignore[assignment]
+        except Exception as exc:  # noqa: BLE001 — classify any cook/HOM failure
+            failure = exc
+
+        # Collect diagnostics from the output node (best-effort, never raises).
+        geometry: ScratchGeometry | None = None
+        try:
+            output_node = hou.node(output_node_path)
+            if output_node is not None:
+                output_node.cook(force=True)
+                node_errors = list(output_node.errors() or [])
+                errors = [str(e)[:_MAX_ERROR_CHARS] for e in node_errors[:_MAX_ERRORS]]
+                geometry = self._scratch_geometry(output_node)
+        except Exception:  # noqa: BLE001 — diagnostics are best-effort
+            pass
+
+        # Cleanup: if requested AND this call created the container, destroy
+        # everything created this call (the whole sandbox if we made it, else
+        # just the nodes created this call that followed a failure). When
+        # preserve_on_failure is True (default), leave the sandbox intact so
+        # the agent can inspect and retry. A successful call never destroys.
+        if failure is not None and not request.preserve_on_failure:
+            self._destroy_capture_scope(created_this_call)
+
+        if failure is not None and geometry is None:
+            # No geometry to report and we failed: surface the failure honestly.
+            if isinstance(failure, HoudiniAdapterError):
+                raise failure
+            raise _scratch_failed(
+                f"scratch operation failed: {failure}"[:_MAX_ERROR_CHARS]
+            ) from failure
+
+        return ScratchResult(
+            sandbox_root=container_path,
+            applied_ops=applied,
+            output_node=output_node_path,
+            errors=tuple(errors),
+            geometry=geometry,
+        )
+
+    def scratch_destroy(self, request: ScratchDestroyRequest) -> ScratchDestroyResult:
+        """Best-effort destroy of one run-scoped sandbox container.
+
+        Run-end/cancel/restart hooks call this to avoid leaking
+        ``/obj/eee_scratch_<sandbox_id>`` containers. If the container does not
+        exist (already committed or cleaned up), returns ``missing=True`` — a
+        normal, non-error outcome. Any destroy failure is swallowed and the
+        surviving path is simply not reported as destroyed.
+        """
+        hou = self._hou
+        container_path = request.container_path
+        destroyed: list[str] = []
+        try:
+            container = hou.node(container_path)
+        except Exception:  # noqa: BLE001 — cleanup is best-effort
+            return ScratchDestroyResult(destroyed_paths=(), missing=True)
+        if container is None:
+            return ScratchDestroyResult(destroyed_paths=(), missing=True)
+        try:
+            with hou.undos.group(_UNDO_LABEL_PREFIX + "scratch.destroy"):
+                container.destroy()
+                destroyed.append(container_path)
+        except Exception:  # noqa: BLE001 — cleanup is best-effort
+            # Leave destroyed as-is (empty if the destroy threw before completing).
+            pass
+        return ScratchDestroyResult(
+            destroyed_paths=tuple(destroyed),
+            missing=False,
+        )
+
+    def scratch_commit(self, request: ScratchCommitRequest) -> ScratchCommitResult:
+        """Promote a verified sandbox into the real scene through hard gates.
+
+        The sandbox at ``/obj/eee_scratch_<sandbox_id>`` is cooked, then the
+        four verify gates (bake / structure / orientation / health) run against
+        its output node. On PASS, the sandbox container is renamed into the
+        real scene at ``target_parent_path/target_name`` inside a single
+        ``hou.undos.group`` — so if the rename fails mid-flight the whole
+        promotion rolls back atomically (this is stronger than Pi, which has
+        no undo layer around commit). On REFUSE, the sandbox is preserved
+        untouched so the agent can fix and re-commit.
+
+        Returns a bounded verdict: committed/refused, the final path, the
+        per-gate results, and a tamper-evident verification receipt.
+        """
+        binding = self.binding()
+        if binding.scene_epoch != request.scene_epoch:
+            raise _stale(
+                "The scene changed before the scratch commit could run."
+            )
+        hou = self._hou
+        container_path = request.container_path
+        container = hou.node(container_path)
+        if container is None:
+            raise _scratch_failed(
+                f"The sandbox container does not exist: {container_path}"
+            )
+
+        # Resolve the output node (the display/render node of the container).
+        output_node = self._scratch_output_node(container)
+        final_path = f"{request.target_parent_path}/{request.target_name}"
+
+        # Run the verify gates (hou-free module; reads cooked geometry).
+        gate_report = self._run_scratch_gates(
+            container, output_node, request.orientation_checks,
+            request.skip_structure_check,
+        )
+
+        if not gate_report["passed"]:
+            # Refused: preserve the sandbox. Build a receipt + verdict.
+            receipt = _build_commit_receipt(gate_report)
+            return ScratchCommitResult(
+                committed=False,
+                refused=True,
+                final_path=container_path,
+                reason=_gate_failure_reason(gate_report),
+                gates=tuple(gate_report["gates"]),
+                receipt=receipt,
+            )
+
+        # Gates passed: promote the sandbox into the real scene atomically.
+        # The rename happens inside one undo group so a partial failure rolls
+        # back and leaves the sandbox intact (not half-promoted).
+        promote_failure: BaseException | None = None
+        try:
+            with hou.undos.group(_UNDO_LABEL_PREFIX + "scratch.commit"):
+                target_parent = hou.node(request.target_parent_path)
+                if target_parent is None:
+                    raise _scratch_failed(
+                        f"The target parent does not exist: "
+                        f"{request.target_parent_path}"
+                    )
+                # If a node already exists at the target path, refuse rather
+                # than silently clobber it (the agent must rename or remove it).
+                existing = hou.node(final_path)
+                if existing is not None and existing.path() != container.path():
+                    raise _scratch_failed(
+                        f"A node already exists at the target path: {final_path}"
+                    )
+                container.setName(request.target_name)
+                # setName keeps the node under its current parent (/obj);
+                # move it under the target parent if that differs.
+                if container.parent().path() != request.target_parent_path:
+                    container.move(target_parent)
+        except HoudiniAdapterError:
+            promote_failure = sys.exc_info()[1]  # type: ignore[assignment]
+        except Exception as exc:  # noqa: BLE001 — classify any HOM failure
+            promote_failure = exc
+
+        if promote_failure is not None:
+            # The undo group rolled the rename back; the sandbox is intact.
+            if isinstance(promote_failure, HoudiniAdapterError):
+                raise promote_failure
+            raise _scratch_failed(
+                f"scratch commit promotion failed: {promote_failure}"[:_MAX_ERROR_CHARS]
+            ) from promote_failure
+
+        receipt = _build_commit_receipt(gate_report)
+        return ScratchCommitResult(
+            committed=True,
+            refused=False,
+            final_path=final_path,
+            reason="",
+            gates=tuple(gate_report["gates"]),
+            receipt=receipt,
+        )
+
+    def _scratch_output_node(self, container: object) -> object:
+        """Return the output (display) node of the sandbox container.
+
+        Falls back to the container itself if no display flag is set.
+        """
+        try:
+            children = container.children()  # type: ignore[attr-defined]
+            for child in children:
+                if getattr(child, "isDisplayFlagSet", lambda: False)():
+                    return child
+            # No display flag: use the last child, else the container.
+            return children[-1] if children else container
+        except Exception:
+            return container
+
+    def _run_scratch_gates(
+        self,
+        container: object,
+        output_node: object,
+        orientation_checks: tuple[dict[str, object], ...],
+        skip_structure_check: bool,
+    ) -> dict:
+        """Run the verify gates and return the orchestrator report.
+
+        Imported lazily so the executor module stays importable without the
+        verify module (and its orientation_math transitive import) at module
+        load. The verify module itself imports no ``hou`` at module level.
+        """
+        from houdini_side.scratch_verify import (
+            check_modular_structure,
+            inspect_geometry_health,
+            verify_orientation,
+            verify_world_axes_baked,
+        )
+
+        # Cook the output node so the gates read fresh geometry.
+        try:
+            output_node.cook(force=True)  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001 — cook failure surfaces as gate failure
+            pass
+
+        bake = verify_world_axes_baked(output_node)
+        if skip_structure_check:
+            structure = {
+                "gate": "structure", "passed": True, "hard": True,
+                "reason": "", "detail": {"skipped": "skip_structure_check"},
+            }
+        else:
+            structure = check_modular_structure(container)
+        orientation = verify_orientation(
+            output_node, [dict(c) for c in orientation_checks]
+        )
+        health = inspect_geometry_health(output_node)
+
+        gates = [bake, structure, orientation, health]
+        hard_failures = [g for g in gates if g["hard"] and not g["passed"]]
+        return {
+            "passed": len(hard_failures) == 0,
+            "gates": gates,
+            "hard_failures": hard_failures,
+        }
+
+    def _scratch_geometry(self, node: object) -> ScratchGeometry | None:
+        """Read cooked geometry stats of a sandbox node (best-effort)."""
+        try:
+            geometry = node.geometry()  # type: ignore[attr-defined]
+            points = int(geometry.pointCount())
+            prims = int(geometry.primCount())
+            vertices = int(geometry.intrinsicValue("vertexcount"))
+            bbox = geometry.boundingBox()
+            mn = bbox.minvec()
+            mx = bbox.maxvec()
+        except Exception:  # noqa: BLE001 — node has no cookable geometry
+            return None
+        return ScratchGeometry(
+            point_count=points,
+            prim_count=prims,
+            vertex_count=vertices,
+            bbox_min=(mn.x(), mn.y(), mn.z()),
+            bbox_max=(mx.x(), mx.y(), mx.z()),
+        )
 
     # --------------------------------------------------------------- writes
 
