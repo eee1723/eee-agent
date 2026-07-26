@@ -70,15 +70,22 @@ from eee_agent.houdini_bridge.capture import (
 )
 from eee_agent.houdini_bridge.scratch import (
     SCRATCH_COMMIT_OPERATION,
+    SCRATCH_DELETE_OPERATION,
     SCRATCH_DESTROY_OPERATION,
     SCRATCH_EXEC_OPERATION,
+    SCRATCH_TOPOLOGY_OPERATION,
     SCRATCH_V1,
+    SCRATCH_V2,
     ScratchCommitResponse,
+    ScratchDeleteResponse,
     ScratchDestroyResponse,
     ScratchResponse,
+    ScratchTopologyResponse,
     parse_scratch_commit_request,
+    parse_scratch_delete_request,
     parse_scratch_destroy_request,
     parse_scratch_request,
+    parse_scratch_topology_request,
 )
 from eee_agent.houdini_bridge.sensitivity import (
     SAMPLE_OPERATION,
@@ -539,6 +546,7 @@ class BridgeServer:
             CAPTURE_V1,
             CHANGESET_V1,
             SCRATCH_V1,
+            SCRATCH_V2,
             SENSITIVITY_V1,
             WORKSPACE_V1,
         ),
@@ -891,6 +899,30 @@ class BridgeServer:
                     message_for_user="The bridge does not support scratch sandbox operations.",
                 )
             return await self._serve_scratch_destroy(frame_bytes, reader=reader)
+        if operation == SCRATCH_DELETE_OPERATION:
+            if SCRATCH_V2 not in self._capabilities:
+                request_id = obj.get("request_id")
+                if type(request_id) is not str:
+                    request_id = _MALFORMED_REQUEST_ID
+                return self._error_envelope(
+                    request_id,
+                    code="bridge.capability_unavailable",
+                    category="capability",
+                    message_for_user="The bridge does not support scratch node deletion.",
+                )
+            return await self._serve_scratch_delete(frame_bytes, reader=reader)
+        if operation == SCRATCH_TOPOLOGY_OPERATION:
+            if SCRATCH_V2 not in self._capabilities:
+                request_id = obj.get("request_id")
+                if type(request_id) is not str:
+                    request_id = _MALFORMED_REQUEST_ID
+                return self._error_envelope(
+                    request_id,
+                    code="bridge.capability_unavailable",
+                    category="capability",
+                    message_for_user="The bridge does not support scratch topology queries.",
+                )
+            return await self._serve_scratch_topology(frame_bytes, reader=reader)
         request_id = obj.get("request_id")
         if type(request_id) is not str:
             request_id = _MALFORMED_REQUEST_ID
@@ -1249,6 +1281,15 @@ class BridgeServer:
                 message_for_user="The scratch request is not valid.",
             )
         request_id = request.request_id
+        if any(op.kind == "delete_node" for op in request.operations) and (
+            SCRATCH_V2 not in self._capabilities
+        ):
+            return self._error_envelope(
+                request_id,
+                code="bridge.capability_unavailable",
+                category="capability",
+                message_for_user="The bridge does not support scratch node deletion.",
+            )
         if self._executor.write_frozen:  # type: ignore[attr-defined]
             return self._error_envelope(
                 request_id,
@@ -1371,6 +1412,88 @@ class BridgeServer:
                 technical_detail_ref=result.technical_detail_ref,
             )
         response = ScratchDestroyResponse(request_id=request_id, result=result, error=None)  # type: ignore[arg-type]
+        return response.to_json().encode("utf-8")
+
+    async def _serve_scratch_delete(
+        self, frame_bytes: bytes, *, reader: object | None = None
+    ) -> bytes:
+        """Queue one allowlisted committed-node deletion request."""
+        try:
+            request = parse_scratch_delete_request(frame_bytes)
+        except (TypeError, ValueError):
+            return self._error_envelope(
+                _MALFORMED_REQUEST_ID,
+                code="bridge.invalid_request",
+                category="protocol",
+                message_for_user="The scratch delete request is not valid.",
+            )
+        request_id = request.request_id
+        if self._executor.write_frozen:  # type: ignore[attr-defined]
+            return self._error_envelope(
+                request_id,
+                code="bridge.write_frozen",
+                category="write_frozen",
+                message_for_user=(
+                    "The bridge is frozen for writes after an uncertain recovery."
+                ),
+                retryable=False,
+            )
+        delete_request = request
+
+        def operation() -> object:
+            return self._executor.delete_nodes(delete_request)  # type: ignore[union-attr]
+
+        result = await self._run_on_queue(
+            request_id, request.deadline_ms, operation, reader=reader
+        )
+        if isinstance(result, _QueuedError):
+            return self._error_envelope(
+                request_id,
+                code=result.code,
+                category=result.category,
+                message_for_user=result.message_for_user,
+                retryable=result.retryable,
+                technical_detail_ref=result.technical_detail_ref,
+            )
+        response = ScratchDeleteResponse(
+            request_id=request_id, result=result, error=None  # type: ignore[arg-type]
+        )
+        return response.to_json().encode("utf-8")
+
+    async def _serve_scratch_topology(
+        self, frame_bytes: bytes, *, reader: object | None = None
+    ) -> bytes:
+        """Queue one read-only committed-node topology request."""
+        try:
+            request = parse_scratch_topology_request(frame_bytes)
+        except (TypeError, ValueError):
+            return self._error_envelope(
+                _MALFORMED_REQUEST_ID,
+                code="bridge.invalid_request",
+                category="protocol",
+                message_for_user="The scratch topology request is not valid.",
+            )
+        request_id = request.request_id
+        topology_request = request
+
+        def operation() -> object:
+            return self._executor.scratch_topology(topology_request)  # type: ignore[union-attr]
+
+        result = await self._run_on_queue(
+            request_id, request.deadline_ms, operation, reader=reader
+        )
+        if isinstance(result, _QueuedError):
+            return self._error_envelope(
+                request_id,
+                code=result.code,
+                category=result.category,
+                message_for_user=result.message_for_user,
+                retryable=result.retryable,
+                technical_detail_ref=result.technical_detail_ref,
+            )
+        response = ScratchTopologyResponse(
+            request_id=request_id, result=result, error=None  # type: ignore[arg-type]
+        )
         return response.to_json().encode("utf-8")
 
     async def _run_on_queue(

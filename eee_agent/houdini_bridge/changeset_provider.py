@@ -23,10 +23,14 @@ from eee_agent.houdini_bridge.capture import (
 from eee_agent.houdini_bridge.scratch import (
     ScratchCommitRequest,
     ScratchCommitResult,
+    ScratchDeleteRequest,
+    ScratchDeleteResult,
     ScratchDestroyRequest,
     ScratchDestroyResult,
     ScratchRequest,
     ScratchResult,
+    ScratchTopologyRequest,
+    ScratchTopologyResult,
 )
 from eee_agent.houdini_bridge.changesets import (
     ApplyRequest,
@@ -289,6 +293,40 @@ class BridgeChangeSetProvider:
             sandbox_id=sandbox_id,
         )
         return await self._call("scratch_destroy", request, may_have_changed=True)
+
+    async def delete_nodes(
+        self,
+        *,
+        paths: tuple[str, ...],
+        allowed_paths: tuple[str, ...],
+    ) -> ScratchDeleteResult:
+        """Delete committed nodes only from the Runtime-supplied allowlist."""
+        binding = await self.current_binding()
+        request = ScratchDeleteRequest.build(
+            request_id=self._request_id("scratch_delete"),
+            deadline_ms=self._deadline_ms,
+            scene_epoch=binding.scene_epoch,
+            allowed_paths=allowed_paths,
+            paths=paths,
+        )
+        return await self._call(
+            "scratch_delete_nodes", request, may_have_changed=True
+        )
+
+    async def scene_topology(
+        self,
+        *,
+        paths: tuple[str, ...],
+    ) -> ScratchTopologyResult:
+        """Read-only per-path wiring facts for cleanup decisions."""
+        binding = await self.current_binding()
+        request = ScratchTopologyRequest.build(
+            request_id=self._request_id("scratch_topology"),
+            deadline_ms=self._deadline_ms,
+            scene_epoch=binding.scene_epoch,
+            paths=paths,
+        )
+        return await self._call("scratch_topology", request, may_have_changed=False)
 
     async def receipt(self, changeset: ChangeSet) -> ChangeReceipt:
         if type(changeset) is not ChangeSet:

@@ -59,9 +59,12 @@ from eee_agent.runtime.models import canonical_json_dumps
 # --------------------------------------------------------------------------
 
 SCRATCH_V1 = "scratch.v1"
+SCRATCH_V2 = "scratch.v2"
 SCRATCH_EXEC_OPERATION = "scratch.exec"
 SCRATCH_COMMIT_OPERATION = "scratch.commit"
 SCRATCH_DESTROY_OPERATION = "scratch.destroy"
+SCRATCH_DELETE_OPERATION = "scratch.delete"
+SCRATCH_TOPOLOGY_OPERATION = "scratch.topology"
 
 # Bounded operation counts: a single scratch.exec call may carry a small
 # batch of ops (create a few nodes + set their parms + wire them), but never
@@ -1125,6 +1128,419 @@ class ScratchDestroyResponse:
 
 
 # --------------------------------------------------------------------------
+# delete + topology DTOs (scratch.v2 node cleanup surfaces)
+# --------------------------------------------------------------------------
+
+_DELETE_PAYLOAD_FIELDS = frozenset({"allowed_paths", "paths"})
+_DELETE_RESULT_FIELDS = frozenset({"deleted_paths", "skipped"})
+_SKIPPED_FIELDS = frozenset({"path", "reason"})
+_TOPOLOGY_PAYLOAD_FIELDS = frozenset({"paths"})
+_TOPOLOGY_RESULT_FIELDS = frozenset({"nodes"})
+_TOPOLOGY_NODE_FIELDS = frozenset(
+    {"path", "exists", "inputs", "outputs", "display_flag"}
+)
+_MAX_DELETE_PATHS = 64
+_MAX_TOPOLOGY_PATHS = 64
+_MAX_TOPOLOGY_EDGES = 64
+_MAX_ALLOWED_DELETE_PATHS = 256
+
+
+def _require_node_path_list(
+    value: object, label: str, max_count: int
+) -> tuple[str, ...]:
+    if type(value) is not list and type(value) is not tuple:
+        raise TypeError(f"{label} must be a list")
+    paths = tuple(value)
+    if not paths or len(paths) > max_count:
+        raise ValueError(f"{label} must contain 1..{max_count} paths")
+    if len(set(paths)) != len(paths):
+        raise ValueError(f"{label} must not contain duplicate paths")
+    for path in paths:
+        _require_node_path(path, label)
+    return paths
+
+
+def _require_skipped_entry(value: object) -> dict[str, object]:
+    d = _require_exact_dict(value, "ScratchDeleteResult.skipped entry")
+    _require_exact_keys(d, _SKIPPED_FIELDS, "ScratchDeleteResult.skipped entry")
+    _require_node_path(d["path"], "ScratchDeleteResult.skipped path")
+    _require_error_text(d["reason"], "ScratchDeleteResult.skipped reason")
+    return {"path": d["path"], "reason": d["reason"]}
+
+
+def _require_topology_entry(value: object) -> dict[str, object]:
+    d = _require_exact_dict(value, "ScratchTopologyResult entry")
+    _require_exact_keys(d, _TOPOLOGY_NODE_FIELDS, "ScratchTopologyResult entry")
+    _require_node_path(d["path"], "ScratchTopologyResult path")
+    _require_exact_bool(d["exists"], "ScratchTopologyResult exists")
+    _require_exact_bool(d["display_flag"], "ScratchTopologyResult display_flag")
+    for field in ("inputs", "outputs"):
+        edges = d[field]
+        if type(edges) is not list or len(edges) > _MAX_TOPOLOGY_EDGES:
+            raise ValueError(f"ScratchTopologyResult {field} must be a bounded list")
+        if len(set(edges)) != len(edges):
+            raise ValueError(f"ScratchTopologyResult {field} must not contain duplicates")
+        for edge in edges:
+            _require_node_path(edge, f"ScratchTopologyResult {field}")
+    return {
+        "path": d["path"],
+        "exists": d["exists"],
+        "inputs": list(d["inputs"]),
+        "outputs": list(d["outputs"]),
+        "display_flag": d["display_flag"],
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class ScratchDeleteRequest:
+    """Validated ``scratch.delete`` request with a Runtime-owned allowlist."""
+
+    request_id: str
+    deadline_ms: int
+    scene_epoch: int
+    allowed_paths: tuple[str, ...]
+    paths: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _require_request_id(self.request_id, "ScratchDeleteRequest.request_id")
+        _require_exact_int(self.deadline_ms, "ScratchDeleteRequest.deadline_ms")
+        if self.deadline_ms < _MIN_DEADLINE_MS or self.deadline_ms > _MAX_DEADLINE_MS:
+            raise ValueError("ScratchDeleteRequest.deadline_ms must be in 1..30000")
+        _require_exact_int(self.scene_epoch, "ScratchDeleteRequest.scene_epoch")
+        if self.scene_epoch < 1:
+            raise ValueError("ScratchDeleteRequest.scene_epoch must be >= 1")
+        allowed = _require_node_path_list(
+            self.allowed_paths,
+            "ScratchDeleteRequest.allowed_paths",
+            _MAX_ALLOWED_DELETE_PATHS,
+        )
+        paths = _require_node_path_list(
+            self.paths, "ScratchDeleteRequest.paths", _MAX_DELETE_PATHS
+        )
+        if not set(paths) <= set(allowed):
+            raise ValueError("ScratchDeleteRequest.paths must be a subset of allowed_paths")
+        object.__setattr__(self, "allowed_paths", allowed)
+        object.__setattr__(self, "paths", paths)
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        request_id: str,
+        deadline_ms: int,
+        scene_epoch: int,
+        allowed_paths: Sequence[str],
+        paths: Sequence[str],
+    ) -> "ScratchDeleteRequest":
+        return cls(
+            request_id=request_id,
+            deadline_ms=deadline_ms,
+            scene_epoch=scene_epoch,
+            allowed_paths=tuple(allowed_paths),
+            paths=tuple(paths),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "protocol": PROTOCOL,
+            "kind": "request",
+            "request_id": self.request_id,
+            "operation": SCRATCH_DELETE_OPERATION,
+            "deadline_ms": self.deadline_ms,
+            "scene_epoch": self.scene_epoch,
+            "payload": {
+                "allowed_paths": list(self.allowed_paths),
+                "paths": list(self.paths),
+            },
+        }
+
+    def to_json(self) -> str:
+        return canonical_json_dumps(self.to_dict())
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "ScratchDeleteRequest":
+        envelope = _require_exact_dict(data, "ScratchDeleteRequest envelope")
+        _require_exact_keys(envelope, _REQUEST_FIELDS, "ScratchDeleteRequest envelope")
+        if envelope["protocol"] != PROTOCOL:
+            raise ValueError("ScratchDeleteRequest protocol must be eee.bridge/1")
+        if envelope["kind"] != "request":
+            raise ValueError("ScratchDeleteRequest kind must be request")
+        if envelope["operation"] != SCRATCH_DELETE_OPERATION:
+            raise ValueError("ScratchDeleteRequest operation must be scratch.delete")
+        payload = _require_exact_dict(envelope["payload"], "ScratchDeleteRequest payload")
+        _require_exact_keys(payload, _DELETE_PAYLOAD_FIELDS, "ScratchDeleteRequest payload")
+        return cls(
+            request_id=envelope["request_id"],  # type: ignore[arg-type]
+            deadline_ms=envelope["deadline_ms"],  # type: ignore[arg-type]
+            scene_epoch=envelope["scene_epoch"],  # type: ignore[arg-type]
+            allowed_paths=tuple(payload["allowed_paths"]),  # type: ignore[arg-type]
+            paths=tuple(payload["paths"]),  # type: ignore[arg-type]
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ScratchDeleteResult:
+    """Bounded per-path outcome for ``scratch.delete``."""
+
+    deleted_paths: tuple[str, ...]
+    skipped: tuple[dict[str, object], ...]
+
+    def __post_init__(self) -> None:
+        paths = tuple(self.deleted_paths)
+        if len(paths) > _MAX_DELETE_PATHS or len(set(paths)) != len(paths):
+            raise ValueError("ScratchDeleteResult.deleted_paths is invalid")
+        for path in paths:
+            _require_node_path(path, "ScratchDeleteResult.deleted_paths")
+        skipped = tuple(self.skipped)
+        if len(skipped) > _MAX_DELETE_PATHS:
+            raise ValueError("ScratchDeleteResult.skipped exceeds the maximum count")
+        object.__setattr__(self, "deleted_paths", paths)
+        object.__setattr__(
+            self, "skipped", tuple(_require_skipped_entry(item) for item in skipped)
+        )
+        if len(canonical_json_dumps(self.to_dict())) > _MAX_RESULT_BYTES:
+            raise ValueError("ScratchDeleteResult exceeds the maximum result size")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "ScratchDeleteResult":
+        d = _require_exact_dict(data, "ScratchDeleteResult")
+        _require_exact_keys(d, _DELETE_RESULT_FIELDS, "ScratchDeleteResult")
+        if type(d["deleted_paths"]) is not list or type(d["skipped"]) is not list:
+            raise TypeError("ScratchDeleteResult fields must be lists")
+        return cls(
+            deleted_paths=tuple(d["deleted_paths"]),  # type: ignore[arg-type]
+            skipped=tuple(dict(item) for item in d["skipped"]),  # type: ignore[arg-type]
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "deleted_paths": list(self.deleted_paths),
+            "skipped": [dict(item) for item in self.skipped],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ScratchDeleteResponse:
+    request_id: str
+    result: ScratchDeleteResult | None
+    error: BridgeError | None
+
+    def __post_init__(self) -> None:
+        _require_request_id(self.request_id, "ScratchDeleteResponse.request_id")
+        if (self.result is None) == (self.error is None):
+            raise ValueError("ScratchDeleteResponse must carry exactly one of result/error")
+        if self.error is not None and type(self.error) is not BridgeError:
+            raise TypeError("ScratchDeleteResponse.error must be an exact BridgeError")
+
+    def to_dict(self) -> dict[str, object]:
+        data: dict[str, object] = {
+            "protocol": PROTOCOL,
+            "kind": "response",
+            "request_id": self.request_id,
+            "ok": self.result is not None,
+        }
+        if self.result is not None:
+            data["result"] = self.result.to_dict()
+        else:
+            data["error"] = self.error.to_dict()  # type: ignore[union-attr]
+        return data
+
+    def to_json(self) -> str:
+        return canonical_json_dumps(self.to_dict())
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "ScratchDeleteResponse":
+        return cls._from_envelope(data)
+
+    @classmethod
+    def _from_envelope(cls, data: Mapping[str, object]) -> "ScratchDeleteResponse":
+        envelope = _require_exact_dict(data, "ScratchDeleteResponse envelope")
+        if not _RESPONSE_REQUIRED_FIELDS.issubset(envelope):
+            raise ValueError("ScratchDeleteResponse envelope is missing required fields")
+        if set(envelope) - _RESPONSE_REQUIRED_FIELDS - {"result", "error"}:
+            raise ValueError("ScratchDeleteResponse envelope has unknown fields")
+        if envelope["protocol"] != PROTOCOL or envelope["kind"] != "response":
+            raise ValueError("ScratchDeleteResponse envelope is invalid")
+        _require_exact_bool(envelope["ok"], "ScratchDeleteResponse.ok")
+        if envelope["ok"] is True:
+            if envelope.get("result") is None or envelope.get("error") is not None:
+                raise ValueError("ScratchDeleteResponse ok=true requires result only")
+            return cls(
+                request_id=envelope["request_id"],  # type: ignore[arg-type]
+                result=ScratchDeleteResult.from_dict(envelope["result"]),  # type: ignore[arg-type]
+                error=None,
+            )
+        if envelope.get("error") is None or envelope.get("result") is not None:
+            raise ValueError("ScratchDeleteResponse ok=false requires error only")
+        return cls(
+            request_id=envelope["request_id"],  # type: ignore[arg-type]
+            result=None,
+            error=BridgeError.from_dict(envelope["error"]),  # type: ignore[arg-type]
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ScratchTopologyRequest:
+    request_id: str
+    deadline_ms: int
+    scene_epoch: int
+    paths: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _require_request_id(self.request_id, "ScratchTopologyRequest.request_id")
+        _require_exact_int(self.deadline_ms, "ScratchTopologyRequest.deadline_ms")
+        if self.deadline_ms < _MIN_DEADLINE_MS or self.deadline_ms > _MAX_DEADLINE_MS:
+            raise ValueError("ScratchTopologyRequest.deadline_ms must be in 1..30000")
+        _require_exact_int(self.scene_epoch, "ScratchTopologyRequest.scene_epoch")
+        if self.scene_epoch < 1:
+            raise ValueError("ScratchTopologyRequest.scene_epoch must be >= 1")
+        object.__setattr__(
+            self,
+            "paths",
+            _require_node_path_list(
+                self.paths, "ScratchTopologyRequest.paths", _MAX_TOPOLOGY_PATHS
+            ),
+        )
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        request_id: str,
+        deadline_ms: int,
+        scene_epoch: int,
+        paths: Sequence[str],
+    ) -> "ScratchTopologyRequest":
+        return cls(
+            request_id=request_id,
+            deadline_ms=deadline_ms,
+            scene_epoch=scene_epoch,
+            paths=tuple(paths),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "protocol": PROTOCOL,
+            "kind": "request",
+            "request_id": self.request_id,
+            "operation": SCRATCH_TOPOLOGY_OPERATION,
+            "deadline_ms": self.deadline_ms,
+            "scene_epoch": self.scene_epoch,
+            "payload": {"paths": list(self.paths)},
+        }
+
+    def to_json(self) -> str:
+        return canonical_json_dumps(self.to_dict())
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "ScratchTopologyRequest":
+        envelope = _require_exact_dict(data, "ScratchTopologyRequest envelope")
+        _require_exact_keys(envelope, _REQUEST_FIELDS, "ScratchTopologyRequest envelope")
+        if envelope["protocol"] != PROTOCOL:
+            raise ValueError("ScratchTopologyRequest protocol must be eee.bridge/1")
+        if envelope["kind"] != "request":
+            raise ValueError("ScratchTopologyRequest kind must be request")
+        if envelope["operation"] != SCRATCH_TOPOLOGY_OPERATION:
+            raise ValueError("ScratchTopologyRequest operation must be scratch.topology")
+        payload = _require_exact_dict(
+            envelope["payload"], "ScratchTopologyRequest payload"
+        )
+        _require_exact_keys(
+            payload, _TOPOLOGY_PAYLOAD_FIELDS, "ScratchTopologyRequest payload"
+        )
+        return cls(
+            request_id=envelope["request_id"],  # type: ignore[arg-type]
+            deadline_ms=envelope["deadline_ms"],  # type: ignore[arg-type]
+            scene_epoch=envelope["scene_epoch"],  # type: ignore[arg-type]
+            paths=tuple(payload["paths"]),  # type: ignore[arg-type]
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ScratchTopologyResult:
+    nodes: tuple[dict[str, object], ...]
+
+    def __post_init__(self) -> None:
+        nodes = tuple(self.nodes)
+        if len(nodes) > _MAX_TOPOLOGY_PATHS:
+            raise ValueError("ScratchTopologyResult.nodes exceeds the maximum count")
+        object.__setattr__(
+            self, "nodes", tuple(_require_topology_entry(node) for node in nodes)
+        )
+        if len(canonical_json_dumps(self.to_dict())) > _MAX_RESULT_BYTES:
+            raise ValueError("ScratchTopologyResult exceeds the maximum result size")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "ScratchTopologyResult":
+        d = _require_exact_dict(data, "ScratchTopologyResult")
+        _require_exact_keys(d, _TOPOLOGY_RESULT_FIELDS, "ScratchTopologyResult")
+        if type(d["nodes"]) is not list:
+            raise TypeError("ScratchTopologyResult.nodes must be a list")
+        return cls(nodes=tuple(dict(node) for node in d["nodes"]))  # type: ignore[arg-type]
+
+    def to_dict(self) -> dict[str, object]:
+        return {"nodes": [dict(node) for node in self.nodes]}
+
+
+@dataclass(frozen=True, slots=True)
+class ScratchTopologyResponse:
+    request_id: str
+    result: ScratchTopologyResult | None
+    error: BridgeError | None
+
+    def __post_init__(self) -> None:
+        _require_request_id(self.request_id, "ScratchTopologyResponse.request_id")
+        if (self.result is None) == (self.error is None):
+            raise ValueError(
+                "ScratchTopologyResponse must carry exactly one of result/error"
+            )
+        if self.error is not None and type(self.error) is not BridgeError:
+            raise TypeError("ScratchTopologyResponse.error must be an exact BridgeError")
+
+    def to_dict(self) -> dict[str, object]:
+        data: dict[str, object] = {
+            "protocol": PROTOCOL,
+            "kind": "response",
+            "request_id": self.request_id,
+            "ok": self.result is not None,
+        }
+        if self.result is not None:
+            data["result"] = self.result.to_dict()
+        else:
+            data["error"] = self.error.to_dict()  # type: ignore[union-attr]
+        return data
+
+    def to_json(self) -> str:
+        return canonical_json_dumps(self.to_dict())
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "ScratchTopologyResponse":
+        envelope = _require_exact_dict(data, "ScratchTopologyResponse envelope")
+        if not _RESPONSE_REQUIRED_FIELDS.issubset(envelope):
+            raise ValueError("ScratchTopologyResponse envelope is missing required fields")
+        if set(envelope) - _RESPONSE_REQUIRED_FIELDS - {"result", "error"}:
+            raise ValueError("ScratchTopologyResponse envelope has unknown fields")
+        if envelope["protocol"] != PROTOCOL or envelope["kind"] != "response":
+            raise ValueError("ScratchTopologyResponse envelope is invalid")
+        _require_exact_bool(envelope["ok"], "ScratchTopologyResponse.ok")
+        if envelope["ok"] is True:
+            if envelope.get("result") is None or envelope.get("error") is not None:
+                raise ValueError("ScratchTopologyResponse ok=true requires result only")
+            return cls(
+                request_id=envelope["request_id"],  # type: ignore[arg-type]
+                result=ScratchTopologyResult.from_dict(envelope["result"]),  # type: ignore[arg-type]
+                error=None,
+            )
+        if envelope.get("error") is None or envelope.get("result") is not None:
+            raise ValueError("ScratchTopologyResponse ok=false requires error only")
+        return cls(
+            request_id=envelope["request_id"],  # type: ignore[arg-type]
+            result=None,
+            error=BridgeError.from_dict(envelope["error"]),  # type: ignore[arg-type]
+        )
+
+
+# --------------------------------------------------------------------------
 # entrypoints
 # --------------------------------------------------------------------------
 
@@ -1151,3 +1567,23 @@ def parse_scratch_destroy_request(raw: str | bytes) -> ScratchDestroyRequest:
 
 def parse_scratch_destroy_response(raw: str | bytes) -> ScratchDestroyResponse:
     return ScratchDestroyResponse.from_dict(_load_strict_dict(raw, "Scratch destroy response"))
+
+
+def parse_scratch_delete_request(raw: str | bytes) -> ScratchDeleteRequest:
+    return ScratchDeleteRequest.from_dict(_load_strict_dict(raw, "Scratch delete request"))
+
+
+def parse_scratch_delete_response(raw: str | bytes) -> ScratchDeleteResponse:
+    return ScratchDeleteResponse.from_dict(_load_strict_dict(raw, "Scratch delete response"))
+
+
+def parse_scratch_topology_request(raw: str | bytes) -> ScratchTopologyRequest:
+    return ScratchTopologyRequest.from_dict(
+        _load_strict_dict(raw, "Scratch topology request")
+    )
+
+
+def parse_scratch_topology_response(raw: str | bytes) -> ScratchTopologyResponse:
+    return ScratchTopologyResponse.from_dict(
+        _load_strict_dict(raw, "Scratch topology response")
+    )

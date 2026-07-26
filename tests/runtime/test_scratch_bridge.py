@@ -35,14 +35,19 @@ from eee_agent.houdini_bridge.scratch import (
     SCRATCH_DESTROY_OPERATION,
     SCRATCH_EXEC_OPERATION,
     SCRATCH_V1,
+    SCRATCH_V2,
     ScratchCommitRequest,
     ScratchCommitResult,
+    ScratchDeleteRequest,
+    ScratchDeleteResult,
     ScratchDestroyRequest,
     ScratchDestroyResult,
     ScratchGeometry,
     ScratchOp,
     ScratchRequest,
     ScratchResult,
+    ScratchTopologyRequest,
+    ScratchTopologyResult,
     parse_scratch_commit_request,
     parse_scratch_commit_response,
     parse_scratch_destroy_request,
@@ -1901,3 +1906,170 @@ class TestServiceScratchCleanup:
         sid = _sandbox_id_from_run("run with spaces!")
         assert " " not in sid
         assert all(c.isalnum() or c in "_-" for c in sid)
+
+
+class TestScratchDeleteTopologyDtos:
+    def test_delete_request_round_trip(self) -> None:
+        req = ScratchDeleteRequest.build(
+            request_id="req_d1",
+            deadline_ms=5000,
+            scene_epoch=1,
+            allowed_paths=("/obj/table1/box1", "/obj/table1/draft1"),
+            paths=("/obj/table1/draft1",),
+        )
+        parsed = ScratchDeleteRequest.from_dict(req.to_dict())
+        assert parsed.paths == ("/obj/table1/draft1",)
+        assert parsed.allowed_paths == (
+            "/obj/table1/box1",
+            "/obj/table1/draft1",
+        )
+
+    def test_delete_request_paths_must_be_allowlisted(self) -> None:
+        with pytest.raises(ValueError):
+            ScratchDeleteRequest.build(
+                request_id="req_d2",
+                deadline_ms=5000,
+                scene_epoch=1,
+                allowed_paths=("/obj/table1/box1",),
+                paths=("/obj/other/nope",),
+            )
+
+    def test_delete_request_rejects_duplicates(self) -> None:
+        with pytest.raises(ValueError):
+            ScratchDeleteRequest.build(
+                request_id="req_d3",
+                deadline_ms=5000,
+                scene_epoch=1,
+                allowed_paths=("/obj/table1/draft1",),
+                paths=("/obj/table1/draft1", "/obj/table1/draft1"),
+            )
+
+    def test_delete_result_round_trip(self) -> None:
+        result = ScratchDeleteResult(
+            deleted_paths=("/obj/table1/draft1",),
+            skipped=(
+                {
+                    "path": "/obj/table1/box1",
+                    "reason": "still referenced by /obj/table1/out",
+                },
+            ),
+        )
+        parsed = ScratchDeleteResult.from_dict(result.to_dict())
+        assert parsed.deleted_paths == ("/obj/table1/draft1",)
+        assert parsed.skipped[0]["path"] == "/obj/table1/box1"
+
+    def test_topology_request_round_trip(self) -> None:
+        req = ScratchTopologyRequest.build(
+            request_id="req_t1",
+            deadline_ms=5000,
+            scene_epoch=1,
+            paths=("/obj/table1/box1",),
+        )
+        parsed = ScratchTopologyRequest.from_dict(req.to_dict())
+        assert parsed.paths == ("/obj/table1/box1",)
+
+    def test_topology_result_round_trip(self) -> None:
+        result = ScratchTopologyResult(
+            nodes=(
+                {
+                    "path": "/obj/table1/box1",
+                    "exists": True,
+                    "inputs": [],
+                    "outputs": ["/obj/table1/xform1"],
+                    "display_flag": False,
+                },
+                {
+                    "path": "/obj/table1/gone",
+                    "exists": False,
+                    "inputs": [],
+                    "outputs": [],
+                    "display_flag": False,
+                },
+            ),
+        )
+        parsed = ScratchTopologyResult.from_dict(result.to_dict())
+        assert parsed.nodes[0]["outputs"] == ["/obj/table1/xform1"]
+        assert parsed.nodes[1]["exists"] is False
+
+
+def _delete_request() -> ScratchDeleteRequest:
+    return ScratchDeleteRequest.build(
+        request_id="req_del_001",
+        deadline_ms=5000,
+        scene_epoch=42,
+        allowed_paths=("/obj/table1/draft1",),
+        paths=("/obj/table1/draft1",),
+    )
+
+
+def _topology_request() -> ScratchTopologyRequest:
+    return ScratchTopologyRequest.build(
+        request_id="req_topo_001",
+        deadline_ms=5000,
+        scene_epoch=42,
+        paths=("/obj/table1/draft1",),
+    )
+
+
+@async_test
+async def test_scratch_delete_without_v2_capability_sends_no_frame() -> None:
+    fake = FakeTransport(inbox=_ack_frame(ok=True, caps=[SCRATCH_V1]))
+    client = _client(fake)
+    await client.open()
+    with pytest.raises(BridgeClientError) as exc:
+        await client.scratch_delete_nodes(_delete_request())
+    assert exc.value.code == "bridge.capability_unavailable"
+    assert len(_parse_frames(bytes(fake.outbox))) == 1
+
+
+@async_test
+async def test_scratch_topology_without_v2_capability_sends_no_frame() -> None:
+    fake = FakeTransport(inbox=_ack_frame(ok=True, caps=[SCRATCH_V1]))
+    client = _client(fake)
+    await client.open()
+    with pytest.raises(BridgeClientError) as exc:
+        await client.scratch_topology(_topology_request())
+    assert exc.value.code == "bridge.capability_unavailable"
+    assert len(_parse_frames(bytes(fake.outbox))) == 1
+
+
+@async_test
+async def test_scratch_exec_delete_op_requires_v2_capability() -> None:
+    fake = FakeTransport(inbox=_ack_frame(ok=True, caps=[SCRATCH_V1]))
+    client = _client(fake)
+    await client.open()
+    request = ScratchRequest(
+        request_id="req_scratch_del",
+        deadline_ms=5000,
+        scene_epoch=42,
+        sandbox_id="run1",
+        operations=(ScratchOp(kind="delete_node", node_name="draft1"),),
+        purpose="cleanup draft",
+    )
+    with pytest.raises(BridgeClientError) as exc:
+        await client.scratch_exec(request)
+    assert exc.value.code == "bridge.capability_unavailable"
+    assert len(_parse_frames(bytes(fake.outbox))) == 1
+
+
+@async_test
+async def test_scratch_delete_happy_path() -> None:
+    response = {
+        "protocol": _PROTO,
+        "kind": "response",
+        "request_id": "req_del_001",
+        "ok": True,
+        "result": {
+            "deleted_paths": ["/obj/table1/draft1"],
+            "skipped": [],
+        },
+    }
+    fake = FakeTransport(
+        inbox=_ack_frame(ok=True, caps=[SCRATCH_V1, SCRATCH_V2])
+        + _frame(_dumps(response))
+    )
+    client = _client(fake)
+    await client.open()
+    result = await client.scratch_delete_nodes(_delete_request())
+    assert result.deleted_paths == ("/obj/table1/draft1",)
+    assert result.skipped == ()
