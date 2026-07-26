@@ -41,6 +41,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+from collections.abc import Mapping, Sequence
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -79,11 +80,15 @@ from eee_agent.houdini_bridge.capture import (
 from eee_agent.houdini_bridge.scratch import (
     ScratchCommitRequest,
     ScratchCommitResult,
+    ScratchDeleteRequest,
+    ScratchDeleteResult,
     ScratchDestroyRequest,
     ScratchDestroyResult,
     ScratchGeometry,
     ScratchRequest,
     ScratchResult,
+    ScratchTopologyRequest,
+    ScratchTopologyResult,
 )
 from eee_agent.houdini_bridge.changesets import (
     ApplyRequest,
@@ -820,6 +825,50 @@ def _wire_equal(actual: WireRef | None, expected: WireRef | None) -> bool:
 
 _RECEIPT_CACHE_MAX = 256
 _UNDO_LABEL_PREFIX = "EEE Agent - "
+
+_LAYOUT_COLUMN_WIDTH = 3.0
+_LAYOUT_ROW_HEIGHT = 2.0
+
+
+def _layered_layout(
+    node_paths: Sequence[str],
+    edges: Mapping[str, Sequence[str]],
+    *,
+    anchor: tuple[float, float],
+) -> dict[str, tuple[float, float]]:
+    """Return a deterministic layered layout for a bounded node set.
+
+    The input order is the stable tie-break. Edges outside the set are ignored
+    and cycles are broken at depth zero, so malformed topology can never make
+    finalization recurse forever.
+    """
+    members = set(node_paths)
+    depths: dict[str, int] = {}
+    visiting: set[str] = set()
+
+    def depth(path: str) -> int:
+        if path in depths:
+            return depths[path]
+        if path in visiting:
+            return 0
+        visiting.add(path)
+        upstream = [u for u in edges.get(path, ()) if u in members]
+        value = 0 if not upstream else 1 + max(depth(u) for u in upstream)
+        visiting.discard(path)
+        depths[path] = value
+        return value
+
+    columns: dict[int, list[str]] = {}
+    for path in node_paths:
+        columns.setdefault(depth(path), []).append(path)
+    positions: dict[str, tuple[float, float]] = {}
+    for column, paths in columns.items():
+        for row, path in enumerate(paths):
+            positions[path] = (
+                anchor[0] + column * _LAYOUT_COLUMN_WIDTH,
+                anchor[1] - row * _LAYOUT_ROW_HEIGHT,
+            )
+    return positions
 
 
 def _frozen() -> HoudiniAdapterError:
@@ -2118,6 +2167,19 @@ class ChangeSetExecutor:
                             )
                         node.setInput(op.input_index, source, op.source_output_index)
                         applied += 1
+                    elif op.kind == "delete_node":
+                        node = node_index.get(op.node_name)
+                        if node is None:
+                            node = hou.node(f"{container_path}/{op.node_name}")
+                        if node is None:
+                            raise _scratch_failed(
+                                f"delete_node target node not found: {op.node_name}"
+                            )
+                        node.destroy()
+                        node_index.pop(op.node_name, None)
+                        if output_node_path == node.path():
+                            output_node_path = container_path
+                        applied += 1
         except HoudiniAdapterError:
             failure = sys.exc_info()[1]  # type: ignore[assignment]
         except Exception as exc:  # noqa: BLE001 — classify any cook/HOM failure
@@ -2201,6 +2263,96 @@ class ChangeSetExecutor:
             missing=False,
         )
 
+    def delete_nodes(self, request: ScratchDeleteRequest) -> ScratchDeleteResult:
+        """Delete allowlisted nodes, refusing nodes with external consumers."""
+        binding = self.binding()
+        if binding.scene_epoch != request.scene_epoch:
+            raise _stale("The scene changed before the delete operation could run.")
+        hou = self._hou
+        allowed = set(request.allowed_paths)
+        delete_set = set(request.paths)
+        deleted: list[str] = []
+        skipped: list[dict[str, object]] = []
+        with hou.undos.group(_UNDO_LABEL_PREFIX + "cleanup"):
+            for path in request.paths:
+                if path not in allowed:
+                    skipped.append({"path": path, "reason": "not in the allowlist"})
+                    continue
+                node = hou.node(path)
+                if node is None:
+                    skipped.append({"path": path, "reason": "node does not exist"})
+                    continue
+                try:
+                    consumers = [output.path() for output in (node.outputs() or [])]
+                except Exception as exc:  # noqa: BLE001
+                    skipped.append(
+                        {
+                            "path": path,
+                            "reason": f"topology read failed: {exc}"[:_MAX_ERROR_CHARS],
+                        }
+                    )
+                    continue
+                external = [consumer for consumer in consumers if consumer not in delete_set]
+                if external:
+                    skipped.append(
+                        {
+                            "path": path,
+                            "reason": f"still referenced by {external[0]}",
+                        }
+                    )
+                    continue
+                try:
+                    node.destroy()
+                    deleted.append(path)
+                except Exception as exc:  # noqa: BLE001
+                    skipped.append(
+                        {
+                            "path": path,
+                            "reason": f"destroy failed: {exc}"[:_MAX_ERROR_CHARS],
+                        }
+                    )
+        return ScratchDeleteResult(
+            deleted_paths=tuple(deleted), skipped=tuple(skipped)
+        )
+
+    def scratch_topology(
+        self, request: ScratchTopologyRequest
+    ) -> ScratchTopologyResult:
+        """Read-only bounded wiring facts for cleanup analysis."""
+        binding = self.binding()
+        if binding.scene_epoch != request.scene_epoch:
+            raise _stale("The scene changed before the topology query could run.")
+        hou = self._hou
+        nodes: list[dict[str, object]] = []
+        for path in request.paths:
+            node = hou.node(path)
+            if node is None:
+                nodes.append(
+                    {
+                        "path": path,
+                        "exists": False,
+                        "inputs": [],
+                        "outputs": [],
+                        "display_flag": False,
+                    }
+                )
+                continue
+            inputs = [
+                conn.outputNode().path()
+                for conn in (node.inputConnections() or [])
+            ][:_MAX_ERRORS]
+            outputs = [output.path() for output in (node.outputs() or [])][:_MAX_ERRORS]
+            nodes.append(
+                {
+                    "path": path,
+                    "exists": True,
+                    "inputs": inputs,
+                    "outputs": outputs,
+                    "display_flag": bool(node.isDisplayFlagSet()),
+                }
+            )
+        return ScratchTopologyResult(nodes=tuple(nodes))
+
     def scratch_commit(self, request: ScratchCommitRequest) -> ScratchCommitResult:
         """Promote a verified sandbox into the real scene through hard gates.
 
@@ -2262,6 +2414,7 @@ class ChangeSetExecutor:
         # left half-promoted (renamed but not moved).
         original_name = container.name()
         moved = False
+        finalize_warnings: list[str] = []
         promote_failure: BaseException | None = None
         try:
             with hou.undos.group(_UNDO_LABEL_PREFIX + "scratch.commit"):
@@ -2284,6 +2437,9 @@ class ChangeSetExecutor:
                 if container.parent().path() != request.target_parent_path:
                     container.move(target_parent)
                     moved = True
+                finalize_warnings = self._finalize_commit(
+                    container, output_node, final_path, request.annotations
+                )
         except HoudiniAdapterError:
             promote_failure = sys.exc_info()[1]  # type: ignore[assignment]
         except Exception as exc:  # noqa: BLE001 — classify any HOM failure
@@ -2325,6 +2481,7 @@ class ChangeSetExecutor:
             reason="",
             gates=tuple(gate_report["gates"]),
             receipt=receipt,
+            warnings=tuple(finalize_warnings),
         )
 
     def _scratch_output_node(self, container: object) -> object:
@@ -2341,6 +2498,77 @@ class ChangeSetExecutor:
             return children[-1] if children else container
         except Exception:
             return container
+
+    def _finalize_commit(
+        self,
+        container: object,
+        output_node: object,
+        final_path: str,
+        annotations: tuple[tuple[str, str], ...],
+    ) -> list[str]:
+        """Best-effort cosmetic finalization inside the commit undo group."""
+        del final_path  # reserved for future diagnostic context
+        warnings: list[str] = []
+        hou = self._hou
+        try:
+            children = list(container.children())  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001
+            children = []
+            warnings.append(f"layout skipped: cannot list committed nodes: {exc}")
+        if children:
+            try:
+                edges: dict[str, tuple[str, ...]] = {}
+                xs: list[float] = []
+                ys: list[float] = []
+                for child in children:
+                    upstream: list[str] = []
+                    for conn in child.inputConnections() or []:
+                        up = conn.outputNode()
+                        if up is not None:
+                            upstream.append(up.path())
+                    edges[child.path()] = tuple(upstream)
+                    pos = child.position()
+                    xs.append(float(pos[0]))
+                    ys.append(float(pos[1]))
+                positions = _layered_layout(
+                    [child.path() for child in children],
+                    edges,
+                    anchor=(min(xs), max(ys)),
+                )
+                for child in children:
+                    target = positions.get(child.path())
+                    if target is not None:
+                        child.setPosition(target)
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"layout failed: {exc}")
+
+        try:
+            output_node.setDisplayFlag(True)  # type: ignore[attr-defined]
+            try:
+                category = output_node.type().category().name()  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                category = ""
+            if category == "Sop":
+                output_node.setRenderFlag(True)  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"display flag failed: {exc}")
+
+        if annotations:
+            try:
+                by_name = {child.name(): child for child in children}
+            except Exception:  # noqa: BLE001
+                by_name = {}
+            for name, comment in annotations:
+                node = by_name.get(name)
+                if node is None:
+                    warnings.append(f"comment skipped: no committed node named {name}")
+                    continue
+                try:
+                    node.setComment(comment)
+                    node.setGenericFlag(hou.nodeFlag.DisplayComment, True)  # type: ignore[attr-defined]
+                except Exception as exc:  # noqa: BLE001
+                    warnings.append(f"comment failed on {name}: {exc}")
+        return [warning[:_MAX_ERROR_CHARS] for warning in warnings[:_MAX_ERRORS]]
 
     def _run_scratch_gates(
         self,
