@@ -191,6 +191,7 @@ async def _journey(state_dir: Path, token: str) -> dict[str, object]:
         ScratchSessionContext(provider=provider, sandbox_id=sandbox_id)
     )
     build = await coordinator.build(
+        purpose="build a deterministic tabletop box",
         operations=[
             {"kind": "create_node", "node_name": "box1", "node_type": "box"},
             {"kind": "set_parm", "node_name": "box1", "parm": "sizex", "value": 2.0},
@@ -254,6 +255,7 @@ async def _journey(state_dir: Path, token: str) -> dict[str, object]:
         ScratchSessionContext(provider=provider, sandbox_id=refused_id)
     )
     refused_build = await refused_coord.build(
+        purpose="build orientation refusal fixture",
         operations=[{"kind": "create_node", "node_name": "box1", "node_type": "box"}]
     )
     _expect(refused_build.get("ok") is True, f"orientation fixture build failed: {refused_build}")

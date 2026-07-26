@@ -92,8 +92,9 @@ _REQUIRED_TOOLS = frozenset({"scratch_build", "verify_geometry", "scratch_commit
 # Bounded modeling brief. It is persisted in runtime events (normal runtime
 # behavior) but never copied into stdout/stderr or the evidence record.
 _BRIEF = (
-    "Use scratch_build to create exactly one box node named tabletop in the "
-    "run sandbox. Set sizex=2.0, sizey=0.25, and sizez=1.2 in the same build "
+    "Use scratch_build with purpose='build the approved tabletop test asset' "
+    "to create exactly one box node named tabletop in the run sandbox. Set "
+    "sizex=2.0, sizey=0.25, and sizez=1.2 in the same build "
     "call. Inspect the cooked geometry returned by scratch_build. Then call "
     "verify_geometry on the returned output_node with min_verts=8, max_verts=8, "
     "min_faces=6, and max_faces=6. Only if verification succeeds, call "

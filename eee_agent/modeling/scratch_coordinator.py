@@ -70,6 +70,7 @@ class ScratchProvider(Protocol):
         *,
         sandbox_id: str,
         operations: tuple[ScratchOp, ...],
+        purpose: str,
         preserve_on_failure: bool = True,
     ) -> ScratchResult: ...
 
@@ -81,6 +82,7 @@ class ScratchProvider(Protocol):
         target_name: str,
         orientation_checks: tuple = (),
         skip_structure_check: bool = False,
+        annotations: tuple[tuple[str, str], ...] = (),
     ) -> ScratchCommitResult: ...
 
     async def scratch_destroy(
@@ -128,10 +130,21 @@ class ScratchCoordinator:
     async def build(
         self,
         *,
+        purpose: str,
         operations: list[Mapping[str, object]],
         preserve_on_failure: bool = True,
     ) -> dict[str, object]:
         sandbox_id = self._context.sandbox_id
+        if (
+            type(purpose) is not str
+            or not purpose.strip()
+            or len(purpose) > 200
+        ):
+            return {
+                "ok": False,
+                "code": "scratch.input_invalid",
+                "message": "purpose must be 1..200 characters.",
+            }
         try:
             typed_ops = self._parse_operations(operations)
         except ScratchError as exc:
@@ -140,6 +153,7 @@ class ScratchCoordinator:
             result = await self._context.provider.scratch_exec(
                 sandbox_id=sandbox_id,
                 operations=typed_ops,
+                purpose=purpose,
                 preserve_on_failure=preserve_on_failure,
             )
         except Exception as exc:  # noqa: BLE001 - bounded at this seam
@@ -187,6 +201,7 @@ class ScratchCoordinator:
                 target_name=target_name,
                 orientation_checks=checks,
                 skip_structure_check=skip_structure_check,
+                annotations=(),
             )
         except Exception as exc:  # noqa: BLE001 - bounded at this seam
             return _bridge_or_op_failure(exc, default="scratch.op_failed")
@@ -234,6 +249,7 @@ class ScratchCoordinator:
             # Runtime's bounded tool.completed preview can persist auditable
             # commit evidence even when the full result is truncated.
             "receipt": dict(result.receipt),
+            "warnings": list(result.warnings),
             "gates": [dict(g) for g in result.gates],
         }
 
@@ -337,6 +353,7 @@ class ScratchToolContext:
 
 @tool
 async def scratch_build(
+    purpose: str,
     operations: list[dict[str, object]],
     runtime: ToolRuntime,
     preserve_on_failure: bool = True,
@@ -361,6 +378,9 @@ async def scratch_build(
     once. Avoid the opposite extreme too — don't dump an entire complex asset's
     whole node tree in one call, since a single bad parm then fails the whole
     batch and is harder to localize.
+
+    purpose: one sentence (1..200 chars) saying what this functional unit
+      builds and why. It is recorded in the run task graph.
 
     operations — a non-empty list (<=64) of operation objects. Each has:
       kind: "create_node" | "set_parm" | "connect"
@@ -434,7 +454,14 @@ async def scratch_build(
             "code": "scratch.input_invalid",
             "message": "preserve_on_failure must be a boolean.",
         }
+    if type(purpose) is not str or not purpose.strip() or len(purpose) > 200:
+        return {
+            "ok": False,
+            "code": "scratch.input_invalid",
+            "message": "purpose must be 1..200 characters.",
+        }
     return await scratch_context.coordinator.build(
+        purpose=purpose,
         operations=operations,
         preserve_on_failure=preserve_on_failure,
     )

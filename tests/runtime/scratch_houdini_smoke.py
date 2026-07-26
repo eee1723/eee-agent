@@ -96,6 +96,7 @@ def main() -> int:
             scene_epoch=scene_epoch(),
             sandbox_id=sid,
             operations=operations,
+            purpose="real Houdini scratch smoke functional unit",
             preserve_on_failure=preserve_on_failure,
         )
 

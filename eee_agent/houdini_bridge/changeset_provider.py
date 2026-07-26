@@ -216,6 +216,7 @@ class BridgeChangeSetProvider:
         *,
         sandbox_id: str,
         operations: tuple,
+        purpose: str,
         preserve_on_failure: bool = True,
     ) -> ScratchResult:
         """Run a scratch sandbox build and return bounded diagnostics.
@@ -232,6 +233,7 @@ class BridgeChangeSetProvider:
             scene_epoch=binding.scene_epoch,
             sandbox_id=sandbox_id,
             operations=operations,
+            purpose=purpose,
             preserve_on_failure=preserve_on_failure,
         )
         return await self._call("scratch_exec", request, may_have_changed=True)
@@ -244,6 +246,7 @@ class BridgeChangeSetProvider:
         target_name: str,
         orientation_checks: tuple[Mapping[str, object], ...] = (),
         skip_structure_check: bool = False,
+        annotations: Mapping[str, str] | None = None,
     ) -> ScratchCommitResult:
         """Commit a verified sandbox into the real scene through hard gates.
 
@@ -263,6 +266,7 @@ class BridgeChangeSetProvider:
             target_name=target_name,
             orientation_checks=tuple(orientation_checks),
             skip_structure_check=skip_structure_check,
+            annotations=annotations,
         )
         return await self._call("scratch_commit", request, may_have_changed=True)
 

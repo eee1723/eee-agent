@@ -206,7 +206,7 @@ class TestScratchOp:
 
     def test_unknown_kind_rejected(self) -> None:
         with pytest.raises(ValueError):
-            ScratchOp(kind="delete_node", node_name="x")
+            ScratchOp(kind="move_node", node_name="x")
 
     def test_bad_node_name_rejected(self) -> None:
         with pytest.raises(ValueError):
@@ -232,6 +232,94 @@ class TestScratchOp:
         op = ScratchOp(kind="create_node", node_name="x", node_type="box")
         with pytest.raises(dataclasses.FrozenInstanceError):
             op.node_name = "y"  # type: ignore[misc]
+
+
+class TestScratchV2DtoExtensions:
+    def test_delete_node_round_trip(self) -> None:
+        op = ScratchOp(kind="delete_node", node_name="draft1")
+        assert ScratchOp.from_dict(op.to_dict()) == op
+        assert op.to_dict() == {"kind": "delete_node", "node_name": "draft1"}
+
+    def test_create_note_is_bounded_and_kind_specific(self) -> None:
+        op = ScratchOp(
+            kind="create_node",
+            node_name="box1",
+            node_type="box",
+            note="桌面粗模",
+        )
+        assert ScratchOp.from_dict(op.to_dict()).note == "桌面粗模"
+        with pytest.raises(ValueError):
+            ScratchOp(kind="delete_node", node_name="x", note="nope")
+        with pytest.raises(ValueError):
+            ScratchOp(
+                kind="create_node",
+                node_name="box1",
+                node_type="box",
+                note="x" * 201,
+            )
+
+    def test_purpose_is_required_and_bounded(self) -> None:
+        base = {
+            "request_id": "req_purpose",
+            "deadline_ms": 5000,
+            "scene_epoch": 1,
+            "sandbox_id": "run1",
+            "operations": (
+                ScratchOp(kind="create_node", node_name="b", node_type="box"),
+            ),
+        }
+        with pytest.raises(ValueError):
+            ScratchRequest(**base, purpose="")  # type: ignore[arg-type]
+        with pytest.raises(ValueError):
+            ScratchRequest(**base, purpose="x" * 201)  # type: ignore[arg-type]
+        request = ScratchRequest(**base, purpose="创建桌腿")  # type: ignore[arg-type]
+        assert ScratchRequest.from_dict(request.to_dict()).purpose == "创建桌腿"
+
+    def test_annotations_and_warnings_round_trip(self) -> None:
+        request = ScratchCommitRequest.build(
+            request_id="req_annotations",
+            deadline_ms=5000,
+            scene_epoch=1,
+            sandbox_id="run1",
+            target_parent_path="/obj",
+            target_name="table1",
+            annotations={"box1": "桌面", "blast1": "最终输出"},
+        )
+        parsed = ScratchCommitRequest.from_dict(request.to_dict())
+        assert dict(parsed.annotations) == {
+            "blast1": "最终输出",
+            "box1": "桌面",
+        }
+        result = ScratchCommitResult(
+            committed=True,
+            refused=False,
+            final_path="/obj/table1",
+            reason="",
+            gates=(),
+            receipt={"passed": True},
+            warnings=("layout skipped: unavailable",),
+        )
+        assert ScratchCommitResult.from_dict(result.to_dict()).warnings == (
+            "layout skipped: unavailable",
+        )
+
+    def test_annotations_reject_bad_key_and_value(self) -> None:
+        common = {
+            "request_id": "req_annotations_bad",
+            "deadline_ms": 5000,
+            "scene_epoch": 1,
+            "sandbox_id": "run1",
+            "target_parent_path": "/obj",
+            "target_name": "table1",
+        }
+        with pytest.raises(ValueError):
+            ScratchCommitRequest.build(
+                **common, annotations={"not a name!": "x"}  # type: ignore[arg-type]
+            )
+        with pytest.raises(ValueError):
+            ScratchCommitRequest.build(
+                **common, annotations={"box1": "x" * 501}  # type: ignore[arg-type]
+            )
 
 
 # ==========================================================================
@@ -275,6 +363,7 @@ class TestScratchRequest:
             "scene_epoch": 42,
             "sandbox_id": "run1",
             "operations": (ScratchOp(kind="create_node", node_name="box1", node_type="box"),),
+            "purpose": "build the tabletop",
             "preserve_on_failure": True,
         }
         kwargs.update(overrides)
@@ -530,6 +619,7 @@ def _scratch_request() -> ScratchRequest:
         scene_epoch=42,
         sandbox_id="run1",
         operations=(ScratchOp(kind="create_node", node_name="box1", node_type="box"),),
+        purpose="build the tabletop",
     )
 
 
@@ -662,12 +752,14 @@ class _FakeScratchProvider:
         *,
         sandbox_id: str,
         operations: tuple[ScratchOp, ...],
+        purpose: str,
         preserve_on_failure: bool = True,
     ) -> ScratchResult:
         self.calls.append(
             {
                 "sandbox_id": sandbox_id,
                 "operations": operations,
+                "purpose": purpose,
                 "preserve_on_failure": preserve_on_failure,
             }
         )
@@ -691,6 +783,7 @@ class _FakeScratchProvider:
         target_name: str,
         orientation_checks: tuple = (),
         skip_structure_check: bool = False,
+        annotations: tuple[tuple[str, str], ...] = (),
     ) -> ScratchCommitResult:
         # Minimal stub so the provider satisfies the ScratchProvider Protocol.
         # Commit-specific behavior is tested via the dedicated commit tests.
@@ -728,6 +821,7 @@ class TestScratchCoordinator:
 
         async def run() -> dict[str, object]:
             return await coord.build(
+                purpose="build test geometry",
                 operations=[
                     {"kind": "create_node", "node_name": "box1", "node_type": "box"},
                     {"kind": "set_parm", "node_name": "box1", "parm": "sizex", "value": 2.0},
@@ -753,7 +847,11 @@ class TestScratchCoordinator:
         coord = _coordinator(provider)
 
         async def run() -> None:
-            await coord.build(operations=[_op_create()], preserve_on_failure=False)
+            await coord.build(
+                purpose="test failure cleanup",
+                operations=[_op_create()],
+                preserve_on_failure=False,
+            )
 
         asyncio.run(run())
         assert provider.calls[0]["preserve_on_failure"] is False
@@ -763,7 +861,7 @@ class TestScratchCoordinator:
         coord = _coordinator(provider)
 
         async def run() -> dict[str, object]:
-            return await coord.build(operations=[])
+            return await coord.build(purpose="test empty", operations=[])
 
         result = asyncio.run(run())
         assert result["ok"] is False
@@ -775,7 +873,9 @@ class TestScratchCoordinator:
         coord = _coordinator(provider)
 
         async def run() -> dict[str, object]:
-            return await coord.build(operations="not a list")  # type: ignore[arg-type]
+            return await coord.build(  # type: ignore[arg-type]
+                purpose="test invalid", operations="not a list"
+            )
 
         result = asyncio.run(run())
         assert result["ok"] is False
@@ -787,7 +887,7 @@ class TestScratchCoordinator:
         ops = [_op_create(node_name=f"n{i}") for i in range(65)]
 
         async def run() -> dict[str, object]:
-            return await coord.build(operations=ops)
+            return await coord.build(purpose="test bound", operations=ops)
 
         result = asyncio.run(run())
         assert result["ok"] is False
@@ -800,6 +900,7 @@ class TestScratchCoordinator:
 
         async def run() -> dict[str, object]:
             return await coord.build(
+                purpose="test malformed op",
                 operations=[{"kind": "create_node", "node_name": "bad name", "node_type": "box"}]
             )
 
@@ -814,7 +915,9 @@ class TestScratchCoordinator:
         coord = _coordinator(provider)
 
         async def run() -> dict[str, object]:
-            return await coord.build(operations=[_op_create()])
+            return await coord.build(
+                purpose="test bridge failure", operations=[_op_create()]
+            )
 
         result = asyncio.run(run())
         assert result["ok"] is False
@@ -827,7 +930,9 @@ class TestScratchCoordinator:
         coord = _coordinator(provider)
 
         async def run() -> dict[str, object]:
-            return await coord.build(operations=[_op_create()])
+            return await coord.build(
+                purpose="test operation failure", operations=[_op_create()]
+            )
 
         result = asyncio.run(run())
         assert result["ok"] is False
@@ -847,7 +952,9 @@ class TestScratchCoordinator:
         coord = _coordinator(provider)
 
         async def run() -> dict[str, object]:
-            return await coord.build(operations=[_op_create()])
+            return await coord.build(
+                purpose="test missing geometry", operations=[_op_create()]
+            )
 
         result = asyncio.run(run())
         # M2: a result with per-op errors reports ok=False (partial failure is
@@ -906,6 +1013,7 @@ class TestScratchBuildTool:
     def test_no_context_fails_closed(self) -> None:
         async def run() -> dict[str, object]:
             return await scratch_build.coroutine(
+                purpose="test missing context",
                 operations=[_op_create()],
                 runtime=_runtime_with_context(None),
             )
@@ -917,6 +1025,7 @@ class TestScratchBuildTool:
     def test_wrong_context_type_fails_closed(self) -> None:
         async def run() -> dict[str, object]:
             return await scratch_build.coroutine(
+                purpose="test wrong context",
                 operations=[_op_create()],
                 runtime=_runtime_with_context("not a context"),
             )
@@ -932,6 +1041,7 @@ class TestScratchBuildTool:
 
         async def run() -> dict[str, object]:
             return await scratch_build.coroutine(
+                purpose="test missing scratch",
                 operations=[_op_create()],
                 runtime=_runtime_with_context(ctx),
             )
@@ -945,6 +1055,7 @@ class TestScratchBuildTool:
 
         async def run() -> dict[str, object]:
             return await scratch_build.coroutine(
+                purpose="test bad preserve",
                 operations=[_op_create()],
                 runtime=_runtime_with_context(self._ctx(provider)),
                 preserve_on_failure="yes",  # type: ignore[arg-type]
@@ -967,6 +1078,7 @@ class TestScratchBuildTool:
 
         async def run() -> dict[str, object]:
             return await scratch_build.coroutine(
+                purpose="build one box",
                 operations=[_op_create()],
                 runtime=_runtime_with_context(self._ctx(provider)),
             )
@@ -1029,6 +1141,7 @@ def _commit_result_dict(
             "orientation": {"passed": 1, "failed": 0, "total": 1},
             "health": {"hard_errors_count": 0, "soft_warnings_count": 0},
         },
+        "warnings": [],
     }
 
 
@@ -1356,6 +1469,7 @@ class _CommitFakeProvider:
         target_name: str,
         orientation_checks: tuple = (),
         skip_structure_check: bool = False,
+        annotations: tuple[tuple[str, str], ...] = (),
     ) -> ScratchCommitResult:
         self.commit_calls.append({
             "sandbox_id": sandbox_id,
@@ -1363,6 +1477,7 @@ class _CommitFakeProvider:
             "target_name": target_name,
             "orientation_checks": orientation_checks,
             "skip_structure_check": skip_structure_check,
+            "annotations": annotations,
         })
         if self._raise is not None:
             raise self._raise

@@ -72,20 +72,23 @@ _MAX_NODE_TYPE_LEN = 64
 _MAX_PARM_NAME_LEN = 64
 _MAX_OP_ARGUMENT_CHARS = 4000
 _MAX_SANDBOX_NAME_LEN = 128
+_MAX_PURPOSE_CHARS = 200
+_MAX_NOTE_CHARS = 200
+_MAX_ANNOTATION_CHARS = 500
 _MAX_ERRORS = 32
 _MAX_ERROR_CHARS = 1000
 
 # exact field sets for envelope + payload validation
 _PAYLOAD_FIELDS = frozenset(
-    {"sandbox_id", "operations", "preserve_on_failure"}
+    {"sandbox_id", "operations", "purpose", "preserve_on_failure"}
 )
-_OP_FIELDS = frozenset({"kind", "node_name", "node_type", "parent", "parm", "value", "input_index", "source", "source_output_index"})
+_OP_FIELDS = frozenset({"kind", "node_name", "node_type", "parent", "parm", "value", "input_index", "source", "source_output_index", "note"})
 _RESULT_FIELDS = frozenset(
     {"sandbox_root", "applied_ops", "output_node", "errors", "geometry"}
 )
 _GEOMETRY_FIELDS = frozenset({"point_count", "prim_count", "vertex_count", "bbox_min", "bbox_max"})
 
-_OP_KINDS = frozenset({"create_node", "set_parm", "connect"})
+_OP_KINDS = frozenset({"create_node", "set_parm", "connect", "delete_node"})
 _NODE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _NODE_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_:]*$")
 _PARM_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -163,6 +166,13 @@ def _require_error_text(value: object, label: str) -> None:
         raise ValueError(f"{label} exceeds the maximum length")
 
 
+def _require_bounded_text(value: object, label: str, max_len: int) -> None:
+    if type(value) is not str:
+        raise TypeError(f"{label} must be a string")
+    if not value or len(value) > max_len:
+        raise ValueError(f"{label} must be 1..{max_len} characters")
+
+
 # --------------------------------------------------------------------------
 # operation DTOs
 # --------------------------------------------------------------------------
@@ -189,10 +199,13 @@ class ScratchOp:
     input_index: int = 0
     source: str = ""
     source_output_index: int = 0
+    note: str = ""
 
     def __post_init__(self) -> None:
         if self.kind not in _OP_KINDS:
-            raise ValueError("ScratchOp.kind must be create_node|set_parm|connect")
+            raise ValueError(
+                "ScratchOp.kind must be create_node|set_parm|connect|delete_node"
+            )
         _require_node_name(self.node_name, "ScratchOp.node_name")
         if self.kind == "create_node":
             _require_node_type(self.node_type, "ScratchOp.node_type")
@@ -210,6 +223,10 @@ class ScratchOp:
             _require_exact_int(self.source_output_index, "ScratchOp.source_output_index")
             if self.source_output_index < 0:
                 raise ValueError("ScratchOp.source_output_index must be >= 0")
+        if self.note:
+            if self.kind != "create_node":
+                raise ValueError("ScratchOp.note is only valid for create_node")
+            _require_bounded_text(self.note, "ScratchOp.note", _MAX_NOTE_CHARS)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> "ScratchOp":
@@ -232,6 +249,7 @@ class ScratchOp:
             input_index=d.get("input_index", 0),  # type: ignore[arg-type]
             source=d.get("source", ""),  # type: ignore[arg-type]
             source_output_index=d.get("source_output_index", 0),  # type: ignore[arg-type]
+            note=d.get("note", ""),  # type: ignore[arg-type]
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -240,6 +258,8 @@ class ScratchOp:
             d["node_type"] = self.node_type
             if self.parent:
                 d["parent"] = self.parent
+            if self.note:
+                d["note"] = self.note
         elif self.kind == "set_parm":
             d["parm"] = self.parm
             d["value"] = self.value
@@ -324,6 +344,7 @@ class ScratchRequest:
     scene_epoch: int
     sandbox_id: str
     operations: tuple[ScratchOp, ...]
+    purpose: str
     preserve_on_failure: bool = True
 
     def __post_init__(self) -> None:
@@ -342,6 +363,9 @@ class ScratchRequest:
             if type(op) is not ScratchOp:
                 raise TypeError("ScratchRequest.operations must be ScratchOp instances")
         object.__setattr__(self, "operations", ops)
+        _require_bounded_text(
+            self.purpose, "ScratchRequest.purpose", _MAX_PURPOSE_CHARS
+        )
         _require_exact_bool(self.preserve_on_failure, "ScratchRequest.preserve_on_failure")
 
     @property
@@ -362,6 +386,7 @@ class ScratchRequest:
         scene_epoch: int,
         sandbox_id: str,
         operations: Sequence[ScratchOp],
+        purpose: str,
         preserve_on_failure: bool = True,
     ) -> "ScratchRequest":
         return cls(
@@ -370,6 +395,7 @@ class ScratchRequest:
             scene_epoch=scene_epoch,
             sandbox_id=sandbox_id,
             operations=tuple(operations),
+            purpose=purpose,
             preserve_on_failure=preserve_on_failure,
         )
 
@@ -384,6 +410,7 @@ class ScratchRequest:
             "payload": {
                 "sandbox_id": self.sandbox_id,
                 "operations": [op.to_dict() for op in self.operations],
+                "purpose": self.purpose,
                 "preserve_on_failure": self.preserve_on_failure,
             },
         }
@@ -413,6 +440,7 @@ class ScratchRequest:
             scene_epoch=envelope["scene_epoch"],  # type: ignore[arg-type]
             sandbox_id=payload["sandbox_id"],  # type: ignore[arg-type]
             operations=ops,
+            purpose=payload["purpose"],  # type: ignore[arg-type]
             preserve_on_failure=payload["preserve_on_failure"],  # type: ignore[arg-type]
         )
 
@@ -561,10 +589,10 @@ class ScratchResponse:
 
 _COMMIT_PAYLOAD_FIELDS = frozenset(
     {"sandbox_id", "target_parent_path", "target_name",
-     "orientation_checks", "skip_structure_check"}
+     "orientation_checks", "skip_structure_check", "annotations"}
 )
 _COMMIT_RESULT_FIELDS = frozenset(
-    {"committed", "refused", "final_path", "reason", "gates", "receipt"}
+    {"committed", "refused", "final_path", "reason", "gates", "receipt", "warnings"}
 )
 
 
@@ -625,6 +653,7 @@ class ScratchCommitRequest:
     target_name: str
     orientation_checks: tuple[dict[str, object], ...]
     skip_structure_check: bool = False
+    annotations: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         _require_request_id(self.request_id, "ScratchCommitRequest.request_id")
@@ -642,6 +671,28 @@ class ScratchCommitRequest:
         )
         object.__setattr__(self, "orientation_checks", ops)
         _require_exact_bool(self.skip_structure_check, "ScratchCommitRequest.skip_structure_check")
+        annotations = tuple(self.annotations)
+        if len(annotations) > _MAX_OPS:
+            raise ValueError(
+                "ScratchCommitRequest.annotations exceeds the maximum count"
+            )
+        names: set[str] = set()
+        for item in annotations:
+            if type(item) is not tuple or len(item) != 2:
+                raise TypeError(
+                    "ScratchCommitRequest.annotations items must be pairs"
+                )
+            name, comment = item
+            _require_node_name(name, "ScratchCommitRequest.annotations key")
+            _require_bounded_text(
+                comment,
+                "ScratchCommitRequest.annotations value",
+                _MAX_ANNOTATION_CHARS,
+            )
+            if name in names:
+                raise ValueError("ScratchCommitRequest.annotations has duplicate keys")
+            names.add(name)
+        object.__setattr__(self, "annotations", tuple(sorted(annotations)))
 
     @property
     def container_path(self) -> str:
@@ -659,6 +710,7 @@ class ScratchCommitRequest:
         target_name: str,
         orientation_checks: Sequence[Mapping[str, object]] | None = None,
         skip_structure_check: bool = False,
+        annotations: Mapping[str, str] | None = None,
     ) -> "ScratchCommitRequest":
         checks = [dict(c) for c in (orientation_checks or [])]
         return cls(
@@ -670,6 +722,7 @@ class ScratchCommitRequest:
             target_name=target_name,
             orientation_checks=checks,  # type: ignore[arg-type]
             skip_structure_check=skip_structure_check,
+            annotations=tuple((annotations or {}).items()),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -686,6 +739,7 @@ class ScratchCommitRequest:
                 "target_name": self.target_name,
                 "orientation_checks": [dict(c) for c in self.orientation_checks],
                 "skip_structure_check": self.skip_structure_check,
+                "annotations": dict(self.annotations),
             },
         }
 
@@ -704,6 +758,9 @@ class ScratchCommitRequest:
             raise ValueError("ScratchCommitRequest operation must be scratch.commit")
         payload = _require_exact_dict(envelope["payload"], "ScratchCommitRequest payload")
         _require_exact_keys(payload, _COMMIT_PAYLOAD_FIELDS, "ScratchCommitRequest payload")
+        annotations = _require_exact_dict(
+            payload["annotations"], "ScratchCommitRequest.annotations"
+        )
         return cls(
             request_id=envelope["request_id"],  # type: ignore[arg-type]
             deadline_ms=envelope["deadline_ms"],  # type: ignore[arg-type]
@@ -715,6 +772,7 @@ class ScratchCommitRequest:
                 payload["orientation_checks"], "ScratchCommitRequest.orientation_checks"
             ),
             skip_structure_check=payload["skip_structure_check"],  # type: ignore[arg-type]
+            annotations=tuple(annotations.items()),  # type: ignore[arg-type]
         )
 
 
@@ -735,6 +793,7 @@ class ScratchCommitResult:
     reason: str
     gates: tuple[dict[str, object], ...]
     receipt: dict[str, object]
+    warnings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _require_exact_bool(self.committed, "ScratchCommitResult.committed")
@@ -752,6 +811,12 @@ class ScratchCommitResult:
         if not isinstance(self.receipt, Mapping):
             raise TypeError("ScratchCommitResult.receipt must be a mapping")
         object.__setattr__(self, "receipt", dict(self.receipt))
+        warnings = tuple(self.warnings)
+        if len(warnings) > _MAX_ERRORS:
+            raise ValueError("ScratchCommitResult.warnings exceeds the maximum count")
+        for warning in warnings:
+            _require_error_text(warning, "ScratchCommitResult.warnings")
+        object.__setattr__(self, "warnings", warnings)
         if len(canonical_json_dumps(self.to_dict())) > _MAX_RESULT_BYTES:
             raise ValueError("ScratchCommitResult exceeds the maximum result size")
 
@@ -765,6 +830,9 @@ class ScratchCommitResult:
         receipt_raw = d["receipt"]
         if not isinstance(receipt_raw, Mapping):
             raise TypeError("ScratchCommitResult receipt must be a mapping")
+        warnings_raw = d["warnings"]
+        if type(warnings_raw) is not list:
+            raise TypeError("ScratchCommitResult warnings must be a list")
         return cls(
             committed=d["committed"],  # type: ignore[arg-type]
             refused=d["refused"],  # type: ignore[arg-type]
@@ -772,6 +840,7 @@ class ScratchCommitResult:
             reason=d["reason"],  # type: ignore[arg-type]
             gates=tuple(dict(g) for g in gates_raw),  # type: ignore[arg-type]
             receipt=dict(receipt_raw),  # type: ignore[arg-type]
+            warnings=tuple(warnings_raw),  # type: ignore[arg-type]
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -782,6 +851,7 @@ class ScratchCommitResult:
             "reason": self.reason,
             "gates": [dict(g) for g in self.gates],
             "receipt": dict(self.receipt),
+            "warnings": list(self.warnings),
         }
 
 
