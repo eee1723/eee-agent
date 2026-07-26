@@ -13,7 +13,7 @@
 
 ## Verification
 
-- Full offline gate before the final documentation pass: 3542 passed, 12
+- Full offline gate after the final security pass: 3546 passed, 12
   skipped; the three expected stale-contract assertions were updated for the
   new tool/command surface.
 - Targeted lifecycle/protocol tests: 2558 Runtime/Panel tests passed before
