@@ -287,6 +287,16 @@ propose_modeling。
   evidence。
 - [ ] A7. 用已批准的真实 Provider 连跑 L3 三次并记录有界证据。
 
+Wave A 当前进度：
+
+- [x] A1. HTML→Houdini WIP 已收口并提交（`e108db6`）。
+- [x] A2. Houdini 21.0.440 catalog probe 通过。
+- [x] A3. bake/orientation 缺属性时 fail-closed（`9bcf5c7`）。
+- [x] A4. L1 `scratch_houdini_smoke.py` 通过。
+- [ ] A5. L2 deterministic Bridge journey。
+- [ ] A6. scratch-native provider evidence/harness。
+- [ ] A7. 真实 Provider 连跑三次。
+
 Wave A 出口：
 
 - 离线、hython、Bridge、真实 Agent 四层全部通过；
