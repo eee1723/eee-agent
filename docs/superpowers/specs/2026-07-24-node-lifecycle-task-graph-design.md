@@ -155,3 +155,21 @@ Current output: /obj/geo1/tabletop/blast1
 - 更新 `CLAUDE.md`：新工具、新 capability、迁移版本、inspector 白名单适用范围澄清。
 - 完成后写 handoff 文档（`docs/handoffs/`）。
 - 若实现中模块名/函数名与本设计稿有出入，以代码为准并在本文档补"实现注记"。
+## 7. Implementation notes
+
+1. Cleanup uses a dedicated `scratch.v2` capability with `scratch.delete` and
+   `scratch.topology`; topology remains read-only and deletion is allowlisted by
+   the Runtime task graph.
+2. `purpose` is required on the scratch wire DTO; annotations are bounded
+   sorted pairs and commit results include bounded `warnings`.
+3. Commit finalization uses deterministic layered layout anchored to the
+   pre-finalization block and is best-effort.
+4. Cleanup first suggests leaf/missing candidates and executes only an explicit
+   second call after fresh topology validation.
+5. Task-store writes degrade for the current run on the first persistence
+   failure; modeling remains available.
+6. Task summaries are injected through async middleware and omitted when no
+   graph exists or the store is unavailable.
+7. The panel task graph is intentionally a plain read-only text block.
+8. Hython acceptance found deferred SOP display/render flag observation after
+   commit return; this remains an open follow-up rather than an assumed pass.

@@ -40,6 +40,7 @@ from eee_agent.houdini_bridge.scratch import (
 )
 from eee_agent.runtime.agent_context import RuntimeToolContext
 from eee_agent.runtime.task_graph import TaskGraphStore
+from eee_agent.runtime.task_graph import TaskGraphToolContext
 
 _log = logging.getLogger(__name__)
 
@@ -795,6 +796,33 @@ async def cleanup_nodes(
     return await scratch_context.coordinator.cleanup(paths=paths)
 
 
+@tool
+async def task_graph_status(runtime: ToolRuntime) -> dict[str, object]:
+    """Return this run's recorded build steps without mutating the scene."""
+    context = getattr(runtime, "context", None)
+    if type(context) is not RuntimeToolContext:
+        return {"ok": False, "code": "task_graph.context_invalid",
+                "message": "A trusted task graph context is unavailable."}
+    task_graph = getattr(context, "task_graph", None)
+    if type(task_graph) is not TaskGraphToolContext:
+        return {"ok": False, "code": "task_graph.unavailable",
+                "message": "The task graph is unavailable for this run."}
+    try:
+        steps = await task_graph.store.list_run_steps(task_graph.run_id)
+    except Exception:  # noqa: BLE001
+        return {"ok": False, "code": "task_graph.unavailable",
+                "message": "The task graph could not be read."}
+    return {
+        "ok": True,
+        "run_id": task_graph.run_id,
+        "steps": [
+            {"seq": step.seq, "tool": step.tool, "purpose": step.purpose,
+             "status": step.status, "node_count": len(step.nodes)}
+            for step in steps[-50:]
+        ],
+    }
+
+
 __all__ = [
     "ScratchCoordinator",
     "ScratchError",
@@ -804,4 +832,5 @@ __all__ = [
     "scratch_build",
     "scratch_commit",
     "cleanup_nodes",
+    "task_graph_status",
 ]

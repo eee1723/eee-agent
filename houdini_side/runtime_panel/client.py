@@ -34,7 +34,8 @@ from eee_agent.panel.runtime_state import (  # noqa: E402
     artifact_refresh_required,
     changeset_refresh_required,
     parse_artifact_event,
-    parse_changeset_list,
+      parse_changeset_list,
+      parse_task_graph_list,
     parse_vision_event,
     vision_refresh_required,
 )
@@ -442,6 +443,7 @@ class RuntimeObserverClient(QtCore.QObject):
     # through runtimeSnapshotChanged.
     streamingDelta = QtCore.Signal(str, str, str)
     changesetsChanged = QtCore.Signal(object)
+    taskGraphChanged = QtCore.Signal(object)
     commandSucceeded = QtCore.Signal(str, object)
     commandFailed = QtCore.Signal(str, str, str, bool, bool)
     artifactObserved = QtCore.Signal(object)
@@ -648,6 +650,13 @@ class RuntimeObserverClient(QtCore.QObject):
             {"session_id": session_id, "limit": 50},
             "changeset.list",
         )
+
+    def refresh_task_graph(self) -> None:
+        run_id, _output, _thinking = self._runtime_state.streaming_delta()
+        if run_id is None:
+            self.taskGraphChanged.emit(())
+            return
+        self._send("task_graph.list", {"run_id": run_id}, "task_graph.list")
 
     def create_workspace(self, expected_scene_epoch: int | None = None) -> None:
         session_id = self._current_session_id
@@ -920,6 +929,14 @@ class RuntimeObserverClient(QtCore.QObject):
                 return
             self.changesetsChanged.emit(items)
             return
+        if purpose == "task_graph.list":
+            try:
+                items = parse_task_graph_list(result)
+            except PanelClientError as exc:
+                self.connectionChanged.emit("error", str(exc))
+                return
+            self.taskGraphChanged.emit(items)
+            return
         if purpose in (
             "run.start",
             "run.stop",
@@ -1054,6 +1071,7 @@ class RuntimeObserverClient(QtCore.QObject):
         )
 
     def _schedule_changeset_refresh(self) -> None:
+        self.refresh_task_graph()
         if not self._changeset_timer.isActive():
             self._changeset_timer.start(80)
 

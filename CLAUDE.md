@@ -8,7 +8,7 @@ Runtime Control panel.
 ## Current development handoff
 
 The source of truth is
-`docs/handoffs/2026-07-24-sandbox-verify-commit-handoff.md`. The sandbox +
+`docs/handoffs/2026-07-26-node-lifecycle-task-graph-handoff.md`. The sandbox +
 verify + commit (Pi model) workflow is merged to `main` (originally
 `feature/sandbox-verify-commit`, merged 2026-07-24):
 the agent now builds iteratively in an isolated `/obj/eee_scratch_<run>`
@@ -150,3 +150,18 @@ events, protocol, auth, checkpoints, agent runner, service, server) ·
 
 Foundation and Runtime handoffs live under `docs/handoffs/`; approved designs
 and execution plans live under `docs/superpowers/`.
+
+## Node lifecycle wave (2026-07-26)
+
+Runtime schema v8 persists per-run task steps and node lifecycle. Modeling runs
+expose `scratch_build` (required purpose), `scratch_commit`, `cleanup_nodes`
+(suggest-then-execute, fail-closed), and `task_graph_status`. The authenticated
+Bridge advertises `scratch.v2` for read-only topology and Runtime-allowlisted
+deletion. Commit finalization applies deterministic layout, comments, and
+display/render flags as best-effort warnings. The model receives a bounded task
+summary before async calls, and the panel has a read-only task block.
+
+The Houdini headless smoke currently confirms build, promotion, layout, topology,
+and allowlisted deletion. A remaining adversarial item is deferred persistence of
+SOP display/render flags after `scratch_commit` returns; do not treat that as
+closed until a fresh Houdini-side probe confirms it without an external re-set.

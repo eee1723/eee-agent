@@ -578,6 +578,12 @@ class RuntimeWebSocketServer:
             )
             return
 
+        if ct == "task_graph.list":
+            _validate(payload, {"run_id": _is_str})
+            result = await self._service.list_task_steps(payload["run_id"])
+            self._put(ctx, success_response(req, {"steps": result}))
+            return
+
         if ct == "changeset.approve":
             _validate(
                 payload,

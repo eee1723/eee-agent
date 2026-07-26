@@ -2473,6 +2473,39 @@ class ChangeSetExecutor:
                 f"{promote_failure}; rollback: {rollback_error}"[:_MAX_ERROR_CHARS]
             ) from promote_failure
 
+        # Houdini can recompute network flags when a container is renamed or
+        # moved. Re-assert cosmetic state after the promotion group closes;
+        # this remains best-effort and never changes the hard-gate verdict.
+        # Resolve fresh HOM handles after rename/move; retained handles can be
+        # stale for network-flag writes in Houdini even though their path reads.
+        fresh_container = hou.node(final_path) or container
+        output_name = output_node.name()
+        fresh_output = hou.node(f"{final_path}/{output_name}") or output_node
+        finalize_warnings.extend(
+            self._finalize_commit(
+                fresh_container, fresh_output, final_path, request.annotations
+            )
+        )
+        # Explicit final assertion for HOM implementations that defer network
+        # flag updates from a helper call until the node is touched directly.
+        try:
+            with hou.undos.disabler():
+                fresh_output.setDisplayFlag(True)
+                if fresh_output.type().category().name() == "Sop":
+                    fresh_output.setRenderFlag(True)
+                # A second fresh lookup flushes Houdini's network-item cache
+                # after a parent rename/move.
+                refreshed_output = hou.node(f"{final_path}/{output_name}")
+                if refreshed_output is not None:
+                    refreshed_output.setDisplayFlag(True)
+                    if refreshed_output.type().category().name() == "Sop":
+                        refreshed_output.setRenderFlag(True)
+            if not fresh_output.isDisplayFlagSet():  # type: ignore[attr-defined]
+                finalize_warnings.append("display flag did not persist")
+            elif fresh_output.type().category().name() == "Sop" and not fresh_output.isRenderFlagSet():  # type: ignore[attr-defined]
+                finalize_warnings.append("render flag did not persist")
+        except Exception as exc:  # noqa: BLE001
+            finalize_warnings.append(f"display flag failed: {exc}"[:_MAX_ERROR_CHARS])
         receipt = _build_commit_receipt(gate_report)
         return ScratchCommitResult(
             committed=True,
@@ -2507,9 +2540,16 @@ class ChangeSetExecutor:
         annotations: tuple[tuple[str, str], ...],
     ) -> list[str]:
         """Best-effort cosmetic finalization inside the commit undo group."""
-        del final_path  # reserved for future diagnostic context
         warnings: list[str] = []
         hou = self._hou
+        # Prefer a fresh path lookup: a HOM handle captured before a network
+        # rename/move can silently ignore flag writes after promotion.
+        try:
+            resolved = hou.node(f"{final_path}/{output_node.name()}")
+            if resolved is not None:
+                output_node = resolved
+        except Exception:  # noqa: BLE001
+            pass
         try:
             children = list(container.children())  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001

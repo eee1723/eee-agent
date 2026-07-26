@@ -1549,6 +1549,26 @@ class RuntimeService:
         )
         return tuple(summary.to_dict() for summary in summaries)
 
+    async def list_task_steps(self, run_id: str) -> list[dict[str, object]]:
+        """Return at most the newest 50 task-graph steps for the panel."""
+        store = getattr(self, "_task_store", None)
+        if store is None or type(run_id) is not str or not run_id:
+            return []
+        try:
+            steps = await store.list_run_steps(run_id)
+        except Exception:
+            return []
+        return [
+            {
+                "seq": step.seq,
+                "tool": step.tool,
+                "purpose": step.purpose,
+                "status": step.status,
+                "node_count": len(step.nodes),
+            }
+            for step in steps[-50:]
+        ]
+
     async def reject_changeset(
         self, change_id: str, changeset_digest: str
     ) -> dict[str, object]:

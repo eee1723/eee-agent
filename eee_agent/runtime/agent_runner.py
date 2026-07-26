@@ -351,6 +351,7 @@ def build_agent_runner(
             cleanup_nodes,
             scratch_build,
             scratch_commit,
+            task_graph_status,
         )
         from eee_agent.runtime.sketch_tools import (
             render_sketch,
@@ -360,6 +361,7 @@ def build_agent_runner(
         tools.append(scratch_build)
         tools.append(scratch_commit)
         tools.append(cleanup_nodes)
+        tools.append(task_graph_status)
         tools.append(render_sketch)
         tools.append(verify_geometry)
     graph = build_agent(
