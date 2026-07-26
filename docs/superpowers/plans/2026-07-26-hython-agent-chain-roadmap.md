@@ -433,6 +433,19 @@ docs/superpowers/plans/2026-07-24-node-lifecycle-task-graph.md
 4. 执行的 smoke 名称和退出码；
 5. bounded JSON evidence；
 6. 创建/清理的测试节点数量；
+
+## 7. Execution status — 2026-07-26
+
+- Wave A: A1–A6 verified; A7 (three real Provider runs) remains `pending`
+  because no local LLM credential is configured.
+- Wave B: B1 Chrome quality gate is verified. B2–B6 (multi-session HTML cases,
+  stability, fault injection, and feedback reports) remain `pending`.
+- Wave C: C1–C7 (typed expressions, components, parameter scans, case library,
+  and eval metrics) remain `pending`; this wave was not silently marked done.
+- Wave D: task graph schema/recording, `scratch.v2`, commit finalization,
+  cleanup, summary middleware, panel read-only view, and lifecycle smoke are
+  implemented. The headless Houdini display/render flag persistence observation
+  remains `pending` until independently reproduced and fixed.
 7. 失败时的 step/code，不记录密钥或完整 Provider 输出；
 8. 对应 handoff 中明确区分：
    - offline passed；
