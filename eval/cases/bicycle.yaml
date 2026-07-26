@@ -1,0 +1,15 @@
+# Bicycle regression case for the html-to-houdini pipeline.
+# Buildable with the extended catalog (torus/sphere/copyxform + sweep2
+# tube-mode parms, merged 2026-07-24 — see docs/handoffs/p0-channel-decision.md).
+# Reference build: output/bicycle.hip (8193 pts / 7346 prims, top y=1.073).
+# Run: python -m eval.run_eval --dry
+
+- name: parametric bicycle (html-to-houdini reference)
+  prompt: "Build a bicycle: two 0.34m-radius wheels 1.1m apart, red tubular frame (down/top/seat/head tubes plus stays and fork), handlebar, saddle, cranks with pedals, chain. Export to output/bicycle_eval.obj"
+  export_path: output/bicycle_eval.obj
+  expect:
+    min_verts: 1000        # tubular frame + spoked wheels is not a box
+    max_verts: 200000
+    min_faces: 800
+    bbox_min: [-1.2, -0.05, -0.6]   # wheels span x ±0.89; must rest on ground (y>=0)
+    bbox_max: [1.2, 1.3, 0.6]       # handlebar top ~1.07; grips z ±0.25

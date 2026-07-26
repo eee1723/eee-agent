@@ -51,6 +51,21 @@ class KnowledgeProvider(Protocol):
     def get(self, entity_id: str, *, max_body_bytes: int = 8_000) -> dict[str, object]: ...
 
 
+@runtime_checkable
+class SketchRenderProvider(Protocol):
+    """Render a bounded HTML sketch to a PNG via a local headless browser.
+
+    Implementations are local (no Houdini, no bridge) and must return a
+    bounded plain result: ``{"ok": True, "image_path": ..., ...}`` on success
+    or ``{"ok": False, "code": ..., "message": ...}`` on failure
+    (browser missing / timeout / render failure).
+    """
+
+    async def render_sketch(
+        self, *, html_content: str, sketch_name: str
+    ) -> Mapping[str, PlainData]: ...
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeToolContext:
     """Per-run trusted context consumed by secure Runtime tools."""
@@ -59,12 +74,15 @@ class RuntimeToolContext:
     knowledge: KnowledgeProvider
     modeling: object | None = None
     scratch: object | None = None
+    sketch: object | None = None
 
     def __post_init__(self) -> None:
         if self.read_only is None or not isinstance(self.read_only, ReadOnlyProvider):
             raise TypeError("RuntimeToolContext.read_only must implement ReadOnlyProvider")
         if self.knowledge is None or not isinstance(self.knowledge, KnowledgeProvider):
             raise TypeError("RuntimeToolContext.knowledge must implement KnowledgeProvider")
+        if self.sketch is not None and not isinstance(self.sketch, SketchRenderProvider):
+            raise TypeError("RuntimeToolContext.sketch must implement SketchRenderProvider")
 
 
 __all__ = [
@@ -73,4 +91,5 @@ __all__ = [
     "KnowledgeProvider",
     "ReadOnlyProvider",
     "RuntimeToolContext",
+    "SketchRenderProvider",
 ]

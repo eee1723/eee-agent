@@ -551,6 +551,12 @@ class RuntimeService:
             and isinstance(changeset_bridge_provider, ScratchProvider)
             else None
         )
+        # Sketch rendering is local (headless browser, no bridge), so it is
+        # always constructed; a missing browser fails closed at call time
+        # with sketch.browser_missing rather than disabling the tool.
+        from eee_agent.sketch import ChromeSketchRenderer
+
+        self._sketch_renderer = ChromeSketchRenderer(paths.artifacts_dir / "sketches")
         # Trusted ChangeSet approval service. It shares this service's EventStore
         # so proposal/decision events commit in the same transaction as the
         # changeset/approval mutation, and it is constructed with injected
@@ -1890,6 +1896,7 @@ class RuntimeService:
             knowledge=self._knowledge,
             modeling=modeling,
             scratch=scratch,
+            sketch=getattr(self, "_sketch_renderer", None),
         )
 
     def _build_scratch_context(self, run_id: str) -> object | None:

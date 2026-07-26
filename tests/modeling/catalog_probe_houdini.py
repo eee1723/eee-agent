@@ -13,9 +13,13 @@ _CANDIDATES = {
     "subdivide": ("algorithm", "iterations", "creaseweight", "bias"),
     "line": ("originx", "originy", "originz", "dirx", "diry", "dirz", "dist", "points"),
     "resample": ("length", "segs", "dosegs", "treatpolysas", "evenlastseg"),
-    "sweep": ("surfacetype", "skinend", "scale", "roll", "twist"),
+    "sweep": ("surfacetype", "skinend", "scale", "roll", "twist",
+              "surfaceshape", "radius", "cols", "endcaptype"),
     "copytopoints": ("transform", "pack", "pivot", "targetgroup"),
     "boolean": ("booleanop", "treatas", "subtractchoices", "seamoperation"),
+    "torus": ("radx", "rady", "tx", "ty", "tz", "orient", "rows", "cols"),
+    "sphere": ("radx", "rady", "radz", "tx", "ty", "tz", "rows", "cols"),
+    "copyxform": ("ncy", "rx", "ry", "rz", "px", "py", "pz"),
 }
 
 

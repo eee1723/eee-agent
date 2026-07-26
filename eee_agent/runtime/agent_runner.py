@@ -351,9 +351,15 @@ def build_agent_runner(
             scratch_build,
             scratch_commit,
         )
+        from eee_agent.runtime.sketch_tools import (
+            render_sketch,
+            verify_geometry,
+        )
 
         tools.append(scratch_build)
         tools.append(scratch_commit)
+        tools.append(render_sketch)
+        tools.append(verify_geometry)
     graph = build_agent(
         tools=tools,
         checkpointer=checkpointer,

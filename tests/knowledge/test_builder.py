@@ -49,8 +49,10 @@ def _make_zip(entries) -> bytes:
 
 
 REQUIRED_SKILL_NAMES = (
+    "html-to-houdini",
     "parametric-building",
     "procedural-components",
+    "procedural-modeling",
     "sop-cookbook",
     "vex-patterns",
 )
@@ -84,18 +86,20 @@ def test_load_archive_entries_rejects_unsafe(bad: str) -> None:
         load_archive_entries(_make_zip([(bad, b"x")]))
 
 
-def test_load_skill_sources_requires_exactly_four_skills(tmp_path: Path) -> None:
+def test_load_skill_sources_requires_exactly_six_skills(tmp_path: Path) -> None:
     skills = _make_skills(tmp_path)
     fps, entries = load_skill_sources(skills, tmp_path)
     logicals = {fp.logical_name for fp in fps}
     assert logicals == {
+        "skills/html-to-houdini/SKILL.md",
         "skills/parametric-building/SKILL.md",
         "skills/procedural-components/SKILL.md",
+        "skills/procedural-modeling/SKILL.md",
         "skills/sop-cookbook/SKILL.md",
         "skills/vex-patterns/SKILL.md",
     }
     assert {logical for logical, _ in entries} == logicals
-    assert len(fps) == 4
+    assert len(fps) == 6
 
 
 def test_load_skill_sources_missing_skill_fails(tmp_path: Path) -> None:
