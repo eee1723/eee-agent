@@ -293,7 +293,7 @@ Wave A 当前进度：
 - [x] A2. Houdini 21.0.440 catalog probe 通过。
 - [x] A3. bake/orientation 缺属性时 fail-closed（`9bcf5c7`）。
 - [x] A4. L1 `scratch_houdini_smoke.py` 通过。
-- [ ] A5. L2 deterministic Bridge journey。
+- [x] A5. L2 deterministic Bridge journey。
 - [ ] A6. scratch-native provider evidence/harness。
 - [ ] A7. 真实 Provider 连跑三次。
 
