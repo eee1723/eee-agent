@@ -75,6 +75,7 @@ class RuntimeToolContext:
     modeling: object | None = None
     scratch: object | None = None
     sketch: object | None = None
+    task_graph: object | None = None
 
     def __post_init__(self) -> None:
         if self.read_only is None or not isinstance(self.read_only, ReadOnlyProvider):

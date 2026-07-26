@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+import logging
 from typing import Protocol, runtime_checkable
 
 from langchain.tools import ToolRuntime, tool
@@ -38,6 +39,9 @@ from eee_agent.houdini_bridge.scratch import (
     ScratchResult,
 )
 from eee_agent.runtime.agent_context import RuntimeToolContext
+from eee_agent.runtime.task_graph import TaskGraphStore
+
+_log = logging.getLogger(__name__)
 
 # Bounded input limit enforced at the tool seam before the bridge wire.
 # Per-field length bounds (node name/type/parm name, sandbox id) are enforced
@@ -103,6 +107,8 @@ class ScratchSessionContext:
 
     provider: ScratchProvider
     sandbox_id: str
+    run_id: str = "run_1"
+    task_store: TaskGraphStore | None = None
 
     def __post_init__(self) -> None:
         if self.provider is None or not isinstance(self.provider, ScratchProvider):
@@ -111,12 +117,18 @@ class ScratchSessionContext:
             )
         if type(self.sandbox_id) is not str or not self.sandbox_id:
             raise TypeError("ScratchSessionContext.sandbox_id must be a non-empty string")
+        if type(self.run_id) is not str or not self.run_id:
+            raise TypeError("ScratchSessionContext.run_id must be a non-empty string")
+        if self.task_store is not None and type(self.task_store) is not TaskGraphStore:
+            raise TypeError("ScratchSessionContext.task_store must be a TaskGraphStore")
 
 
 class ScratchCoordinator:
     """Validate tool input, call the provider, return a bounded plain result.
 
-    Owns no state. Translates the agent's plain-dict operation list into typed
+    Records successful steps/nodes into the optional task graph store. A store
+    failure degrades recording for the rest of the run; modeling is never
+    blocked. Translates the agent's plain-dict operation list into typed
     :class:`ScratchOp` instances, delegates to the injected provider, and maps
     every failure into a bounded ``{"ok": False, ...}`` dict so the tool never
     raises into the graph.
@@ -126,6 +138,7 @@ class ScratchCoordinator:
         if type(context) is not ScratchSessionContext:
             raise TypeError("context must be an exact ScratchSessionContext")
         self._context = context
+        self._store_failed = False
 
     async def build(
         self,
@@ -158,6 +171,7 @@ class ScratchCoordinator:
             )
         except Exception as exc:  # noqa: BLE001 - bounded at this seam
             return _bridge_or_op_failure(exc, default="scratch.op_failed")
+        await self._record_build(purpose, typed_ops, result)
         return self._summarize(result)
 
     async def commit(
@@ -194,6 +208,7 @@ class ScratchCoordinator:
             checks = self._parse_orientation_checks(orientation_checks)
         except ScratchError as exc:
             return {"ok": False, "code": exc.code, "message": str(exc)}
+        annotations = await self._commit_annotations()
         try:
             result = await self._context.provider.scratch_commit(
                 sandbox_id=sandbox_id,
@@ -201,11 +216,221 @@ class ScratchCoordinator:
                 target_name=target_name,
                 orientation_checks=checks,
                 skip_structure_check=skip_structure_check,
-                annotations=(),
+                annotations=annotations,
             )
         except Exception as exc:  # noqa: BLE001 - bounded at this seam
             return _bridge_or_op_failure(exc, default="scratch.op_failed")
+        if result.committed:
+            await self._record_commit(result)
         return self._summarize_commit(result)
+
+    async def _record_build(
+        self,
+        purpose: str,
+        typed_ops: tuple[ScratchOp, ...],
+        result: ScratchResult,
+    ) -> None:
+        store = self._context.task_store
+        if store is None or self._store_failed:
+            return
+        try:
+            step = await store.record_step(
+                run_id=self._context.run_id, tool="scratch_build", purpose=purpose
+            )
+            created = tuple(
+                (
+                    f"{result.sandbox_root}/{op.node_name}",
+                    op.node_type,
+                    op.note or None,
+                )
+                for op in typed_ops
+                if op.kind == "create_node"
+            )
+            if created:
+                await store.record_nodes(step_id=step.step_id, nodes=created)
+        except Exception:  # noqa: BLE001
+            self._store_failed = True
+            _log.exception(
+                "task graph recording failed; degrading for run=%s",
+                self._context.run_id,
+            )
+
+    async def _commit_annotations(self) -> tuple[tuple[str, str], ...]:
+        store = self._context.task_store
+        if store is None or self._store_failed:
+            return ()
+        try:
+            steps = await store.list_run_steps(self._context.run_id)
+        except Exception:  # noqa: BLE001
+            self._store_failed = True
+            _log.exception(
+                "task graph read failed; committing without annotations (run=%s)",
+                self._context.run_id,
+            )
+            return ()
+        annotations: dict[str, str] = {}
+        for step in steps:
+            for node in step.nodes:
+                if node.status != "sandbox":
+                    continue
+                name = node.node_path.rsplit("/", 1)[-1]
+                annotations[name] = (node.note or step.purpose)[:500]
+        return tuple(sorted(annotations.items()))
+
+    async def _record_commit(self, result: ScratchCommitResult) -> None:
+        store = self._context.task_store
+        if store is None or self._store_failed:
+            return
+        try:
+            await store.mark_committed(
+                run_id=self._context.run_id,
+                sandbox_root=f"/obj/eee_scratch_{self._context.sandbox_id}",
+                final_path=result.final_path,
+            )
+        except Exception:  # noqa: BLE001
+            self._store_failed = True
+            _log.exception(
+                "task graph commit recording failed; degrading for run=%s",
+                self._context.run_id,
+            )
+
+    async def cleanup(self, *, paths: list[str] | None = None) -> dict[str, object]:
+        """Suggest safe abandoned nodes, or execute an explicit deletion set."""
+        store = self._context.task_store
+        if store is None or self._store_failed:
+            return {
+                "ok": False,
+                "code": "cleanup.store_unavailable",
+                "message": "The task graph is unavailable for this run.",
+            }
+        try:
+            steps = await store.list_run_steps(self._context.run_id)
+        except Exception as exc:  # noqa: BLE001
+            return _bridge_or_op_failure(exc, default="cleanup.store_unavailable")
+        live = [
+            (step, node)
+            for step in steps
+            for node in step.nodes
+            if node.status != "deleted"
+        ]
+        if paths is None:
+            return await self._cleanup_suggest(live)
+        return await self._cleanup_execute(store, live, paths)
+
+    async def _cleanup_suggest(self, live) -> dict[str, object]:
+        if not live:
+            return {"ok": True, "phase": "suggest", "candidates": []}
+        scene_paths = tuple(node.committed_path or node.node_path for _, node in live)
+        try:
+            topo = await self._context.provider.scene_topology(paths=scene_paths)
+        except Exception as exc:  # noqa: BLE001
+            return _bridge_or_op_failure(exc, default="cleanup.topology_failed")
+        info = {entry["path"]: entry for entry in topo.nodes}
+        candidates: list[dict[str, object]] = []
+        for _step, node in live:
+            path = node.committed_path or node.node_path
+            entry = info.get(path)
+            if entry is None or not entry["exists"]:
+                candidates.append({"path": path, "reason": "no longer exists in the scene"})
+            elif not entry["outputs"]:
+                candidates.append(
+                    {"path": path, "reason": "nothing is wired downstream of it"}
+                )
+        return {"ok": True, "phase": "suggest", "candidates": candidates}
+
+    async def _cleanup_execute(self, store, live, paths: list[str]) -> dict[str, object]:
+        if type(paths) is not list or len(paths) > 64:
+            return {
+                "ok": False,
+                "code": "cleanup.input_invalid",
+                "message": "paths must be a list of at most 64 absolute node paths.",
+            }
+        requested: list[str] = []
+        for path in paths:
+            if (
+                type(path) is not str
+                or not path.startswith("/")
+                or "\\" in path
+                or ".." in path.split("/")
+            ):
+                return {
+                    "ok": False,
+                    "code": "cleanup.input_invalid",
+                    "message": "paths must contain safe absolute node paths.",
+                }
+            requested.append(path)
+        by_path = {
+            (node.committed_path or node.node_path): node for _, node in live
+        }
+        skipped: list[dict[str, object]] = []
+        sandbox_targets: list[str] = []
+        committed_targets: list[str] = []
+        for path in requested:
+            node = by_path.get(path)
+            if node is None:
+                skipped.append({"path": path, "reason": "not a node recorded for this run"})
+            elif node.status == "sandbox":
+                sandbox_targets.append(path)
+            else:
+                committed_targets.append(path)
+        targets = sandbox_targets + committed_targets
+        safe: set[str] = set()
+        if targets:
+            try:
+                topo = await self._context.provider.scene_topology(paths=tuple(targets))
+            except Exception as exc:  # noqa: BLE001
+                return _bridge_or_op_failure(exc, default="cleanup.topology_failed")
+            delete_set = set(targets)
+            for entry in topo.nodes:
+                if not entry["exists"]:
+                    skipped.append({"path": entry["path"], "reason": "no longer exists in the scene"})
+                else:
+                    external = [out for out in entry["outputs"] if out not in delete_set]
+                    if external:
+                        skipped.append(
+                            {"path": entry["path"], "reason": f"still referenced by {external[0]}"}
+                        )
+                    else:
+                        safe.add(entry["path"])
+        sandbox_targets = [path for path in sandbox_targets if path in safe]
+        committed_targets = [path for path in committed_targets if path in safe]
+        deleted: list[str] = []
+        if sandbox_targets:
+            ops = tuple(
+                ScratchOp(kind="delete_node", node_name=path.rsplit("/", 1)[-1])
+                for path in sandbox_targets
+            )
+            try:
+                await self._context.provider.scratch_exec(
+                    sandbox_id=self._context.sandbox_id,
+                    operations=ops,
+                    purpose="cleanup: delete abandoned sandbox nodes",
+                    preserve_on_failure=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _bridge_or_op_failure(exc, default="cleanup.delete_failed")
+            deleted.extend(sandbox_targets)
+        if committed_targets:
+            allowed = tuple(
+                node.committed_path
+                for _, node in live
+                if node.status == "committed" and node.committed_path
+            )
+            try:
+                result = await self._context.provider.delete_nodes(
+                    paths=tuple(committed_targets), allowed_paths=allowed
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _bridge_or_op_failure(exc, default="cleanup.delete_failed")
+            deleted.extend(result.deleted_paths)
+            skipped.extend(dict(item) for item in result.skipped)
+        if deleted:
+            try:
+                await store.mark_deleted(run_id=self._context.run_id, node_paths=deleted)
+            except Exception:  # noqa: BLE001
+                self._store_failed = True
+                _log.exception("task graph delete recording failed")
+        return {"ok": True, "phase": "execute", "deleted": deleted, "skipped": skipped}
 
     def _parse_orientation_checks(
         self, checks: object
@@ -547,6 +772,29 @@ async def scratch_commit(
     )
 
 
+@tool
+async def cleanup_nodes(
+    runtime: ToolRuntime,
+    paths: list[str] | None = None,
+) -> dict[str, object]:
+    """Suggest first, then execute fail-closed cleanup of this run's nodes."""
+    context = getattr(runtime, "context", None)
+    if type(context) is not RuntimeToolContext:
+        return {
+            "ok": False,
+            "code": "cleanup.context_invalid",
+            "message": "A trusted scratch context is unavailable.",
+        }
+    scratch_context = getattr(context, "scratch", None)
+    if type(scratch_context) is not ScratchToolContext:
+        return {
+            "ok": False,
+            "code": "cleanup.context_invalid",
+            "message": "A trusted scratch context is unavailable.",
+        }
+    return await scratch_context.coordinator.cleanup(paths=paths)
+
+
 __all__ = [
     "ScratchCoordinator",
     "ScratchError",
@@ -555,4 +803,5 @@ __all__ = [
     "ScratchToolContext",
     "scratch_build",
     "scratch_commit",
+    "cleanup_nodes",
 ]

@@ -348,6 +348,7 @@ def build_agent_runner(
     tools = build_read_only_tools()
     if modeling:
         from eee_agent.modeling.scratch_coordinator import (
+            cleanup_nodes,
             scratch_build,
             scratch_commit,
         )
@@ -358,6 +359,7 @@ def build_agent_runner(
 
         tools.append(scratch_build)
         tools.append(scratch_commit)
+        tools.append(cleanup_nodes)
         tools.append(render_sketch)
         tools.append(verify_geometry)
     graph = build_agent(

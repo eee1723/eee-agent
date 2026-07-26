@@ -506,6 +506,9 @@ class RuntimeService:
         self._sessions = SessionRepository(database)
         self._runs = RunRepository(database)
         self._events = EventStore(database)
+        from eee_agent.runtime.task_graph import TaskGraphStore
+
+        self._task_store = TaskGraphStore(database)
         self._artifacts = ArtifactStore(database, paths.artifacts_dir)
         self._callbacks: set[EventCallback] = set()
         self._tasks: dict[str, asyncio.Task[None]] = {}
@@ -1891,12 +1894,19 @@ class RuntimeService:
         if self._modeling_catalog_provider is not None:
             modeling = await self._build_modeling_context(session_id, run_id)
         scratch = self._build_scratch_context(run_id)
+        task_graph = None
+        task_store = getattr(self, "_task_store", None)
+        if task_store is not None:
+            from eee_agent.runtime.task_graph import TaskGraphToolContext
+
+            task_graph = TaskGraphToolContext(store=task_store, run_id=run_id)
         return RuntimeToolContext(
             read_only=self._read_only_provider,
             knowledge=self._knowledge,
             modeling=modeling,
             scratch=scratch,
             sketch=getattr(self, "_sketch_renderer", None),
+            task_graph=task_graph,
         )
 
     def _build_scratch_context(self, run_id: str) -> object | None:
@@ -1923,7 +1933,12 @@ class RuntimeService:
         # container name is a valid Houdini node name.
         sandbox_id = _sandbox_id_from_run(run_id)
         try:
-            session_ctx = ScratchSessionContext(provider=provider, sandbox_id=sandbox_id)
+            session_ctx = ScratchSessionContext(
+                provider=provider,
+                sandbox_id=sandbox_id,
+                run_id=run_id,
+                task_store=getattr(self, "_task_store", None),
+            )
         except (TypeError, ValueError):
             _log.exception(
                 "scratch context build failed (sandbox_id=%s)", sandbox_id

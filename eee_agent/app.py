@@ -72,6 +72,13 @@ def build_agent(
     except Exception as e:  # noqa: BLE001
         _log.warning("read-back trimming disabled: %s", e, exc_info=True)
     try:
+        from eee_agent import task_summary
+        if task_summary.is_enabled():
+            middleware.append(task_summary.TaskSummaryMiddleware())
+            _log.info("task summary injection middleware enabled")
+    except Exception as e:  # noqa: BLE001
+        _log.warning("task summary injection disabled: %s", e, exc_info=True)
+    try:
         from eee_agent import loop_guard
         if loop_guard.is_enabled():
             middleware.append(loop_guard.LoopGuardMiddleware())
