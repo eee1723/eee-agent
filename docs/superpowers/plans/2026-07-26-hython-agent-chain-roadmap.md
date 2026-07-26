@@ -62,9 +62,9 @@ C:\Program Files\Side Effects Software\Houdini 21.0.440\bin\hython.exe
 - HTML→Houdini 工作区已包含 `render_sketch`、`verify_geometry`、两个新 skill、
   catalog 扩展和自行车 eval 案例。
 
-### 2.2 必须先解决的验收漂移
+### 2.2 已解决的验收漂移
 
-`tests/runtime/provider_journey.py` 的 `_BRIEF` 已要求模型调用
+核查时 `tests/runtime/provider_journey.py` 的 `_BRIEF` 已要求模型调用
 `scratch_build`/`scratch_commit`，但 `_run_journey()` 仍按旧主链路查找：
 
 ```text
@@ -73,15 +73,15 @@ AwaitingApproval → approve_changeset → approval.approved
 ```
 
 新 scratch 主链路会直接通过 `scratch_commit` 提升节点，并不保证产生旧式
-`AwaitingApproval` ChangeSet。因此当前 provider journey 不能作为新主链路的
-有效验收证据。必须先改为 scratch-native 证据模型。
+`AwaitingApproval` ChangeSet。A6 已将验收迁移为 scratch-native 证据模型；
+旧字段不再是新主链路通过条件。
 
-### 2.3 当前验证门缺口
+### 2.3 已解决的验证门缺口
 
-catalog 构建目前不能可靠创建 `component_id` 和 `edini_world_axis` primitive
-属性；`scratch_verify.py` 在属性不存在时会跳过部分检查。因此 bake 和
-orientation 可能“空通过”。在修复前，不能把“四道硬 gate 通过”当作完整的
-方向验证证据。
+catalog 构建目前仍不能可靠创建 `component_id` 和 `edini_world_axis`
+primitive 属性，但 A3 已改为 fail-closed：只要调用者提供 orientation checks
+而属性缺失，bake/orientation 就会拒绝提交，不再“空通过”。L1 与 L2 均有
+真实 Houdini 反例证据。
 
 ## 3. 验收层级
 
@@ -273,17 +273,17 @@ propose_modeling。
 
 ## Wave A — 建立可信主链路基线（P0，预计 4–7 个开发日）
 
-- [ ] A1. 整理并提交当前 HTML→Houdini 未提交工作区，保持 L0 全绿。
-- [ ] A2. 用现有 `catalog_probe_houdini.py` 重新探测新增 node/parms。
-- [ ] A3. 修复 bake/orientation 空通过：
+- [x] A1. 整理并提交当前 HTML→Houdini 未提交工作区，保持 L0 全绿。
+- [x] A2. 用现有 `catalog_probe_houdini.py` 重新探测新增 node/parms。
+- [x] A3. 修复 bake/orientation 空通过：
   - 先用 hython 探测 Houdini 21 的原生 Attribute Create 路径；
   - 优先加入受限、catalog-gated 的属性写入节点；
   - 若暂不能支持，则当调用者提供 orientation checks 而属性缺失时必须
     fail-closed，不能 reported passed；
   - 添加正例和反例。
-- [ ] A4. 新建 L1 `scratch_houdini_smoke.py` 并通过。
-- [ ] A5. 新建 L2 deterministic Bridge journey 并通过。
-- [ ] A6. 将 provider journey 从旧 ChangeSet evidence 迁移到 scratch-native
+- [x] A4. 新建 L1 `scratch_houdini_smoke.py` 并通过。
+- [x] A5. 新建 L2 deterministic Bridge journey 并通过。
+- [x] A6. 将 provider journey 从旧 ChangeSet evidence 迁移到 scratch-native
   evidence。
 - [ ] A7. 用已批准的真实 Provider 连跑 L3 三次并记录有界证据。
 
@@ -294,7 +294,8 @@ Wave A 当前进度：
 - [x] A3. bake/orientation 缺属性时 fail-closed（`9bcf5c7`）。
 - [x] A4. L1 `scratch_houdini_smoke.py` 通过。
 - [x] A5. L2 deterministic Bridge journey。
-- [ ] A6. scratch-native provider evidence/harness。
+- [x] A6. scratch-native provider evidence/harness；另修复真实 Bridge
+  `geometry_stats` envelope/`primitives` 与 `verify_geometry` 的形状漂移。
 - [ ] A7. 真实 Provider 连跑三次。
 
 Wave A 出口：
@@ -388,10 +389,10 @@ docs/superpowers/plans/2026-07-24-node-lifecycle-task-graph.md
 
 ### 发布阻塞
 
-- [ ] 当前 HTML→Houdini 改动尚未提交。
-- [ ] scratch 新主链路没有专用真实 hython smoke。
-- [ ] bake/orientation gate 存在空通过风险。
-- [ ] provider journey 与新 scratch 主链路证据不一致。
+- [x] 当前 HTML→Houdini 改动已提交。
+- [x] scratch 新主链路已有专用真实 hython smoke。
+- [x] bake/orientation gate 缺属性时已 fail-closed。
+- [x] provider journey 已迁移到 scratch-native 证据。
 - [ ] 新主链路尚未完成真实 Provider + Runtime + Houdini 三连跑。
 - [ ] 12 个环境相关 skip 尚未在本机形成一份统一的真机验收记录。
 

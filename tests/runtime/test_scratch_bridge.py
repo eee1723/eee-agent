@@ -1391,6 +1391,7 @@ class TestScratchCoordinatorCommit:
         assert result["committed"] is True
         assert result["refused"] is False
         assert result["final_path"] == "/obj/my_asset"
+        assert list(result).index("receipt") < list(result).index("gates")
         assert len(provider.commit_calls) == 1
         assert provider.commit_calls[0]["target_name"] == "my_asset"
 

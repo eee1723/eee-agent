@@ -25,6 +25,7 @@ import tempfile
 import time
 from collections.abc import Mapping
 from pathlib import Path
+from types import SimpleNamespace
 
 
 _ROOT = Path(__file__).resolve().parents[2]
@@ -39,6 +40,16 @@ _DISCOVERY = "bridge.discovery.json"
 _STOP = "scratch_bridge.stop"
 _CLEANUP = "scratch_bridge.cleanup.json"
 _MAX_EVIDENCE_BYTES = 16 * 1024
+
+
+class _NoopKnowledge:
+    def search(self, query: str, *, limit: int = 5) -> dict[str, object]:
+        return {"ok": True, "results": []}
+
+    def get(
+        self, entity_id: str, *, max_body_bytes: int = 8_000
+    ) -> dict[str, object]:
+        return {"ok": True, "entity_id": entity_id}
 
 
 def _die(message: str) -> None:
@@ -193,6 +204,28 @@ async def _journey(state_dir: Path, token: str) -> dict[str, object]:
         isinstance(geometry, dict) and geometry.get("point_count", 0) > 0,
         "Bridge build returned empty geometry",
     )
+    from eee_agent.runtime.agent_context import RuntimeToolContext
+    from eee_agent.runtime.sketch_tools import verify_geometry
+
+    verified = await verify_geometry.coroutine(
+        str(build["output_node"]),
+        {
+            "min_verts": 8,
+            "max_verts": 8,
+            "min_faces": 6,
+            "max_faces": 6,
+        },
+        SimpleNamespace(
+            context=RuntimeToolContext(
+                read_only=read_only,
+                knowledge=_NoopKnowledge(),
+            )
+        ),
+    )
+    _expect(
+        verified.get("ok") is True,
+        f"production verify_geometry rejected Bridge stats: {verified}",
+    )
 
     final_name = f"eee_bridge_asset_{token}"
     commit = await coordinator.commit(
@@ -247,6 +280,7 @@ async def _journey(state_dir: Path, token: str) -> dict[str, object]:
         "capability": "scratch.v1",
         "build_ok": True,
         "geometry_ok": True,
+        "verify_geometry_ok": True,
         "commit_ok": True,
         "final_query_ok": True,
         "orientation_refusal_ok": True,

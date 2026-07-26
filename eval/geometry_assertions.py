@@ -57,7 +57,13 @@ def from_bridge_stats(s: Dict[str, Any]) -> Dict[str, Any]:
         mn, mx = bb.get("min"), bb.get("max")
         bbox = {"min": list(mn), "max": list(mx),
                 "size": [mx[i] - mn[i] for i in range(3)]}
-    return {"verts": s.get("points", 0), "faces": s.get("prims", 0), "bbox": bbox}
+    return {
+        "verts": s.get("points", 0),
+        # The production Secure Bridge uses ``primitives``. Keep ``prims`` as
+        # a compatibility fallback for older eval fixtures and adapters.
+        "faces": s.get("primitives", s.get("prims", 0)),
+        "bbox": bbox,
+    }
 
 
 def evaluate(stats: Optional[Dict[str, Any]], expected: Dict[str, Any]) -> Dict[str, Any]:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import MappingProxyType
 from types import SimpleNamespace
 
 import pytest
@@ -168,6 +169,67 @@ def test_verify_geometry_ok_path() -> None:
     assert result["issues"] == []
     assert result["stats"]["verts"] == 8193
     assert result["stats"]["faces"] == 7346
+
+
+def test_verify_geometry_accepts_production_bridge_envelope() -> None:
+    read_only = _ReadOnly(
+        {
+            "ok": True,
+            "path": "/obj/eee_scratch_1/tabletop",
+            "node_type": "box",
+            "is_locked": False,
+            "geometry_stats": MappingProxyType(
+                {
+                    "points": 8,
+                    "primitives": 6,
+                    "bbox": MappingProxyType(
+                        {
+                            "min": (-1.0, -0.125, -0.6),
+                            "max": (1.0, 0.125, 0.6),
+                        }
+                    ),
+                }
+            ),
+        }
+    )
+    result = _run(
+        verify_geometry.coroutine(
+            "/obj/eee_scratch_1/tabletop",
+            {
+                "min_verts": 8,
+                "max_verts": 8,
+                "min_faces": 6,
+                "max_faces": 6,
+            },
+            _runtime(read_only=read_only),
+        )
+    )
+    assert result == {
+        "ok": True,
+        "issues": [],
+        "stats": {"verts": 8, "faces": 6, "bbox_size": [2.0, 0.25, 1.2]},
+    }
+
+
+def test_verify_geometry_rejects_empty_production_bridge_envelope() -> None:
+    read_only = _ReadOnly(
+        {
+            "ok": True,
+            "path": "/obj/missing",
+            "node_type": None,
+            "is_locked": None,
+            "geometry_stats": None,
+        }
+    )
+    result = _run(
+        verify_geometry.coroutine(
+            "/obj/missing",
+            {"min_verts": 1},
+            _runtime(read_only=read_only),
+        )
+    )
+    assert result["ok"] is False
+    assert result["code"] == "bridge.unavailable"
 
 
 def test_verify_geometry_reports_issues() -> None:

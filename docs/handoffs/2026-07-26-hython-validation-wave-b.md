@@ -39,6 +39,7 @@ bounded evidence：
   "geometry_ok": true,
   "orientation_refusal_ok": true,
   "refused_sandbox_destroyed": true,
+  "verify_geometry_ok": true,
   "worker_cleanup_ok": true,
   "worker_removed_count": 1
 }
@@ -50,6 +51,8 @@ bounded evidence：
 - `scratch.v1` capability 被真实 worker 宣告；
 - 生产 `BridgeChangeSetProvider` 可调用 `scratch.exec`；
 - 几何统计经 Secure Bridge 回读；
+- 生产 `verify_geometry` 可解析真实 Bridge 的
+  `geometry_stats` envelope 和 `primitives` 面数键；
 - `scratch.commit` 可从 sandbox 提升到真实 `/obj` 容器；
 - final container 和其输出子节点均可查询；
 - orientation checks 在缺少 `component_id` 时经 Bridge fail-closed；

@@ -230,8 +230,11 @@ class ScratchCoordinator:
             "refused": result.refused,
             "final_path": result.final_path,
             "reason": result.reason,
-            "gates": [dict(g) for g in result.gates],
+            # Keep the compact receipt before variable-size gate detail so the
+            # Runtime's bounded tool.completed preview can persist auditable
+            # commit evidence even when the full result is truncated.
             "receipt": dict(result.receipt),
+            "gates": [dict(g) for g in result.gates],
         }
 
     def _parse_operations(

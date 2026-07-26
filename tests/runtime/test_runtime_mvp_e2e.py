@@ -13,7 +13,7 @@ import json
 import os
 import subprocess
 import sys
-from types import MappingProxyType
+from types import SimpleNamespace
 from datetime import timedelta
 from pathlib import Path
 
@@ -45,7 +45,11 @@ from tests.runtime.test_changeset_recovery import (
     _policy,
 )
 from tests.runtime.runtime_mvp_provider_e2e import _validate_evidence
-from tests.runtime.provider_journey import _extract_vision_evidence
+from tests.runtime.provider_journey import (
+    _commit_preview_is_success,
+    _tool_events,
+    _tool_result,
+)
 
 
 async def _open_changeset_service(
@@ -297,16 +301,17 @@ def test_mvp_provider_runner_reports_not_run_without_opt_in() -> None:
 def test_mvp_provider_evidence_is_strict_and_cannot_be_a_noop(tmp_path: Path) -> None:
     path = tmp_path / "evidence.json"
     evidence = {
-        "proposal_digest": "a" * 64,
-        "approval_event": "approved",
-        "receipt_status": "applied",
-        "validation_status": "passed",
-        "artifact_status": "available",
-        "vision_status": "completed",
-        "vision_accepted": True,
-        "vision_reason_code": "vision.completed",
-        "vision_artifact_digest_match": True,
-        "replay_last_seq": 7,
+        "run_status": "completed",
+        "scratch_build_seen": True,
+        "scratch_build_ok": True,
+        "geometry_verified": True,
+        "scratch_commit_seen": True,
+        "commit_status": "committed",
+        "commit_receipt_present": True,
+        "final_path": "/obj/eee_provider_scratch_table",
+        "final_geometry_ok": True,
+        "sandbox_absent": True,
+        "restart_replay_last_seq": 7,
         "scene_cleanup": "completed",
     }
     path.write_text(json.dumps(evidence), encoding="utf-8")
@@ -314,7 +319,7 @@ def test_mvp_provider_evidence_is_strict_and_cannot_be_a_noop(tmp_path: Path) ->
     path.write_text(json.dumps({**evidence, "provider_output": "unbounded"}), encoding="utf-8")
     assert not _validate_evidence(path)
     path.write_text(
-        json.dumps({**evidence, "vision_artifact_digest_match": "yes"}),
+        json.dumps({**evidence, "commit_receipt_present": "yes"}),
         encoding="utf-8",
     )
     assert not _validate_evidence(path)
@@ -322,24 +327,60 @@ def test_mvp_provider_evidence_is_strict_and_cannot_be_a_noop(tmp_path: Path) ->
     assert not _validate_evidence(path)
 
 
-def test_provider_journey_accepts_readonly_runtime_vision_payload() -> None:
-    payload = MappingProxyType(
-        {
-            "vision_status": "completed",
-            "final_decision": MappingProxyType({"accepted": True}),
-            "artifact_refs": (
-                MappingProxyType(
-                    {
-                        "artifact_id": "art_" + "a" * 32,
-                        "sha256": "b" * 64,
-                    }
-                ),
+def test_scratch_provider_journey_reads_bounded_tool_evidence() -> None:
+    build = SimpleNamespace(
+        event_type="tool.completed",
+        payload={
+            "name": "scratch_build",
+            "content": json.dumps(
+                {
+                    "ok": True,
+                    "output_node": "/obj/eee_scratch_run/tabletop",
+                    "geometry": {"point_count": 8, "prim_count": 6},
+                }
             ),
-            "vision_reason_code": "vision.completed",
-        }
+            "truncated": False,
+        },
     )
-    assert _extract_vision_evidence(
-        payload,
-        artifact_id="art_" + "a" * 32,
-        artifact_digest="b" * 64,
-    ) == ("completed", True, "vision.completed", True)
+    assert _tool_result(build)["ok"] is True
+
+    truncated = SimpleNamespace(
+        event_type="tool.completed",
+        payload={
+            "name": "scratch_build",
+            "content": '{"ok": true',
+            "truncated": True,
+        },
+    )
+    assert _tool_result(truncated) is None
+
+    started = SimpleNamespace(
+        event_type="tool.started",
+        payload={"name": "scratch_build"},
+    )
+    assert _tool_events([started, build], "scratch_build") == ([started], [build])
+
+
+def test_scratch_provider_journey_accepts_only_committed_target_preview() -> None:
+    event = SimpleNamespace(
+        event_type="tool.completed",
+        payload={
+            "name": "scratch_commit",
+            "content": json.dumps(
+                {
+                    "ok": True,
+                    "committed": True,
+                    "refused": False,
+                    "final_path": "/obj/eee_provider_scratch_table",
+                    "receipt": {"passed": True},
+                    "gates": [{"detail": "x" * 800}],
+                }
+            )[:600],
+            "truncated": True,
+        },
+    )
+    assert _commit_preview_is_success(event)
+    event.payload["content"] = event.payload["content"].replace(
+        '"committed": true', '"committed": false'
+    )
+    assert not _commit_preview_is_success(event)

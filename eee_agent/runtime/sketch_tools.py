@@ -7,6 +7,7 @@ bounded plain-dict results that never raise into the graph.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from typing import Any
 
 from langchain.tools import ToolRuntime, tool
@@ -146,6 +147,20 @@ async def verify_geometry(
             "bridge.unavailable",
             "The read-only provider returned malformed geometry stats.",
         )
+    if raw.get("ok") is False:
+        return _error(
+            "bridge.unavailable",
+            "The read-only provider could not read geometry stats.",
+        )
+    # BridgeReadOnlyProvider returns a bounded envelope with the actual
+    # Houdini counters under ``geometry_stats``. Retain the historical flat
+    # shape for compatibility with lightweight providers and older fixtures.
+    bridge_stats = raw.get("geometry_stats", raw)
+    if not isinstance(bridge_stats, Mapping):
+        return _error(
+            "bridge.unavailable",
+            "The read-only provider returned malformed geometry stats.",
+        )
 
     try:
         from eval.geometry_assertions import evaluate, from_bridge_stats
@@ -156,7 +171,7 @@ async def verify_geometry(
             "from this runtime environment.",
         )
 
-    stats = from_bridge_stats(raw)
+    stats = from_bridge_stats(dict(bridge_stats))
     verdict = evaluate(stats, cleaned_expect)
     issues = [str(issue)[:256] for issue in verdict.get("issues", [])][:_MAX_ISSUES]
     return {
