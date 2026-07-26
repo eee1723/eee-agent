@@ -371,7 +371,17 @@ class ScratchCoordinator:
             if node is None:
                 skipped.append({"path": path, "reason": "not a node recorded for this run"})
             elif node.status == "sandbox":
-                sandbox_targets.append(path)
+                sandbox_root = f"/obj/eee_scratch_{self._context.sandbox_id}"
+                relative = path[len(sandbox_root) + 1:] if path.startswith(sandbox_root + "/") else ""
+                # The current delete_node DTO names one direct child only.
+                # Nested paths are skipped rather than risking a same-name
+                # deletion in a different sandbox branch.
+                if not relative or "/" in relative:
+                    skipped.append(
+                        {"path": path, "reason": "nested sandbox deletion is unsupported"}
+                    )
+                else:
+                    sandbox_targets.append(path)
             else:
                 committed_targets.append(path)
         targets = sandbox_targets + committed_targets

@@ -628,7 +628,11 @@ def _require_orientation_checks(value: object, label: str) -> tuple[dict[str, ob
 def _require_node_path(value: object, label: str) -> None:
     if type(value) is not str:
         raise TypeError(f"{label} must be a string")
-    if not value.startswith("/"):
+    if (
+        not value.startswith("/")
+        or "\\" in value
+        or any(segment in ("", ".", "..") for segment in value.split("/")[1:])
+    ):
         raise ValueError(f"{label} must be an absolute node path")
     if len(value) > _MAX_OP_ARGUMENT_CHARS:
         raise ValueError(f"{label} exceeds the maximum length")

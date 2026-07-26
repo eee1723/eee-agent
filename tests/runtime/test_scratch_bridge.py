@@ -1944,6 +1944,23 @@ class TestScratchDeleteTopologyDtos:
                 paths=("/obj/table1/draft1", "/obj/table1/draft1"),
             )
 
+    def test_delete_and_topology_paths_reject_traversal(self) -> None:
+        with pytest.raises(ValueError):
+            ScratchDeleteRequest.build(
+                request_id="req_path",
+                deadline_ms=5000,
+                scene_epoch=1,
+                allowed_paths=("/obj/../evil",),
+                paths=("/obj/../evil",),
+            )
+        with pytest.raises(ValueError):
+            ScratchTopologyRequest.build(
+                request_id="req_path2",
+                deadline_ms=5000,
+                scene_epoch=1,
+                paths=("/obj//bad",),
+            )
+
     def test_delete_result_round_trip(self) -> None:
         result = ScratchDeleteResult(
             deleted_paths=("/obj/table1/draft1",),

@@ -66,7 +66,7 @@ def _require_path(path: object, label: str) -> str:
         or not path.startswith("/")
         or len(path) > _MAX_PATH_CHARS
         or "\\" in path
-        or ".." in path.split("/")
+        or any(segment in ("", ".", "..") for segment in path.split("/")[1:])
     ):
         raise ValueError(f"{label} must be a bounded absolute node path")
     return path
