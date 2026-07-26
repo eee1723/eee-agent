@@ -2384,7 +2384,10 @@ class ChangeSetExecutor:
                 "hard_failures": [cook_gate],
             }
 
-        bake = verify_world_axes_baked(output_node)
+        bake = verify_world_axes_baked(
+            output_node,
+            require_component_ids=bool(orientation_checks),
+        )
         if skip_structure_check:
             structure = {
                 "gate": "structure", "passed": True, "hard": True,

@@ -97,7 +97,11 @@ def _gate_result(
 # --------------------------------------------------------------------------
 
 
-def verify_world_axes_baked(out_node: Any) -> dict[str, Any]:
+def verify_world_axes_baked(
+    out_node: Any,
+    *,
+    require_component_ids: bool = False,
+) -> dict[str, Any]:
     """G1: confirm every prim on the output carries a non-zero
     ``edini_world_axis`` (the deterministic construction axis).
 
@@ -105,8 +109,11 @@ def verify_world_axes_baked(out_node: Any) -> dict[str, Any]:
     "not baked" — a legitimate axis always has unit length after rotation, so a
     zero can never be a real construction axis.
 
-    SKIPPED (passes vacuously) when there are no ``@component_id`` prims —
-    simple single-piece assets have no construction axes to bake.
+    Simple single-piece assets may omit construction axes when
+    ``require_component_ids`` is false.  When orientation checks are requested,
+    callers must set ``require_component_ids=True`` so a catalog path that
+    cannot carry the required attributes fails closed instead of passing
+    vacuously.
     """
     try:
         geo = out_node.geometry()
@@ -122,7 +129,16 @@ def verify_world_axes_baked(out_node: Any) -> dict[str, Any]:
 
     comp_attr = _find_prim_attrib(geo, "component_id")
     if comp_attr is None:
-        # No component_id prims → nothing to bake. Pass vacuously.
+        if require_component_ids:
+            return _gate_result(
+                "bake", passed=False, hard=True,
+                reason=(
+                    "component_id prim attribute is required for the requested "
+                    "orientation checks but is missing."
+                ),
+                detail={"required": "component_id"},
+            )
+        # No component_id prims on a simple asset → nothing to bake.
         return _gate_result(
             "bake", passed=True, hard=True,
             detail={"skipped": "no component_id prims"},
@@ -141,6 +157,15 @@ def verify_world_axes_baked(out_node: Any) -> dict[str, Any]:
             missing_cids.add(cid)
 
     if not has_any_cid:
+        if require_component_ids:
+            return _gate_result(
+                "bake", passed=False, hard=True,
+                reason=(
+                    "orientation checks require at least one non-empty "
+                    "component_id prim attribute."
+                ),
+                detail={"required": "component_id"},
+            )
         return _gate_result(
             "bake", passed=True, hard=True,
             detail={"skipped": "no component_id prims"},
@@ -293,8 +318,12 @@ def verify_orientation(
     comp_attr = _find_prim_attrib(geo, "component_id")
     if comp_attr is None:
         return _gate_result(
-            "orientation", passed=True, hard=True,
-            detail={"skipped": "no component_id prims"},
+            "orientation", passed=False, hard=True,
+            reason=(
+                "orientation checks were requested but the output has no "
+                "component_id prim attribute."
+            ),
+            detail={"required": "component_id"},
         )
 
     results: list[dict[str, Any]] = []
@@ -616,10 +645,14 @@ def run_verify_gates(
     only if every HARD gate passed. Advisory gate failures are recorded but do
     not block.
     """
-    bake = verify_world_axes_baked(output_node)
+    checks = list(orientation_checks) if orientation_checks else []
+    bake = verify_world_axes_baked(
+        output_node,
+        require_component_ids=bool(checks),
+    )
     structure = check_modular_structure(sandbox_root)
     orientation = verify_orientation(
-        output_node, list(orientation_checks) if orientation_checks else []
+        output_node, checks
     )
     health = inspect_geometry_health(output_node)
 
