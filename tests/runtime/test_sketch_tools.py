@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import struct
+import zlib
 from types import MappingProxyType
 from types import SimpleNamespace
 
@@ -11,6 +13,32 @@ from eee_agent.runtime.agent_context import RuntimeToolContext
 from eee_agent.runtime.sketch_tools import render_sketch, verify_geometry
 from eee_agent.sketch import chrome as chrome_module
 from eee_agent.sketch.chrome import ChromeSketchRenderer
+
+
+def _png(width: int = 320, height: int = 200, *, blank: bool = False) -> bytes:
+    rows = bytearray()
+    for y in range(height):
+        rows.append(0)
+        for x in range(width):
+            if blank:
+                rows.extend((255, 255, 255, 255))
+            elif x < width // 2:
+                rows.extend((30, 60, 180, 255))
+            else:
+                rows.extend((240, 200 if y < height // 2 else 80, 40, 255))
+
+    def chunk(name: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(name)
+        crc = zlib.crc32(data, crc) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + name + data + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(bytes(rows)))
+        + chunk(b"IEND", b"")
+    )
 
 
 def _run(coro):
@@ -286,9 +314,10 @@ def test_renderer_success_writes_html_and_returns_png(tmp_path, monkeypatch) -> 
     class _Proc:
         def __init__(self, png_path) -> None:
             self._png_path = png_path
+            self.returncode = 0
 
         async def communicate(self):
-            self._png_path.write_bytes(b"\x89PNG fake")
+            self._png_path.write_bytes(_png())
             return (b"", b"")
 
         def kill(self):
@@ -307,14 +336,74 @@ def test_renderer_success_writes_html_and_returns_png(tmp_path, monkeypatch) -> 
     renderer = ChromeSketchRenderer(tmp_path)
     result = _run(renderer.render_sketch(html_content="<html>hi</html>", sketch_name="bike"))
     assert result["ok"] is True
-    assert result["image_bytes"] == len(b"\x89PNG fake")
+    assert result["image_bytes"] == len(_png())
+    assert result["image_width"] == 320
+    assert result["image_height"] == 200
+    assert result["pixel_channel_span"] >= 8
     assert (tmp_path / "bike.html").read_text(encoding="utf-8") == "<html>hi</html>"
+
+
+def test_renderer_rejects_blank_png(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(chrome_module, "resolve_browser", lambda: "/fake/chrome")
+
+    class _Proc:
+        returncode = 0
+
+        def __init__(self, png_path) -> None:
+            self._png_path = png_path
+
+        async def communicate(self):
+            self._png_path.write_bytes(_png(blank=True))
+            return (b"", b"")
+
+    async def fake_exec(*cmd, **kwargs):
+        png_arg = next(arg for arg in cmd if arg.startswith("--screenshot="))
+        from pathlib import Path
+
+        return _Proc(Path(png_arg.split("=", 1)[1]))
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    renderer = ChromeSketchRenderer(tmp_path)
+    result = _run(
+        renderer.render_sketch(html_content="<html/>", sketch_name="blank")
+    )
+    assert result["ok"] is False
+    assert result["code"] == "sketch.image_blank"
+
+
+def test_renderer_removes_stale_png_before_failed_render(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(chrome_module, "resolve_browser", lambda: "/fake/chrome")
+    stale = tmp_path / "bike.png"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    stale.write_bytes(_png())
+
+    class _Proc:
+        returncode = 1
+
+        async def communicate(self):
+            return (b"", b"browser failed")
+
+    async def fake_exec(*cmd, **kwargs):
+        return _Proc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    renderer = ChromeSketchRenderer(tmp_path)
+    result = _run(
+        renderer.render_sketch(html_content="<html/>", sketch_name="bike")
+    )
+    assert result["ok"] is False
+    assert result["code"] == "sketch.render_failed"
+    assert not stale.exists()
 
 
 def test_renderer_maps_timeout(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(chrome_module, "resolve_browser", lambda: "/fake/chrome")
 
     class _SlowProc:
+        returncode = None
+
         async def communicate(self):
             await asyncio.sleep(60)
 

@@ -306,7 +306,7 @@ Wave A 出口：
 
 ## Wave B — 完成 HTML→Houdini 产品链路（P1，预计 6–10 个开发日）
 
-- [ ] B1. Headless Chrome 真机 smoke：
+- [x] B1. Headless Chrome 真机 smoke：
   - 浏览器发现；
   - HTML/PNG 写入；
   - PNG 格式、尺寸、大小限制；
