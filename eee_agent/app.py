@@ -65,6 +65,13 @@ def build_agent(
     except Exception as e:  # noqa: BLE001
         _log.warning("tool-call guard disabled: %s", e, exc_info=True)
     try:
+        from eee_agent import html_workflow_guard
+        if html_workflow_guard.is_enabled():
+            middleware.append(html_workflow_guard.HtmlWorkflowGuardMiddleware())
+            _log.info("HTML workflow guard middleware enabled")
+    except Exception as e:  # noqa: BLE001
+        _log.warning("HTML workflow guard disabled: %s", e, exc_info=True)
+    try:
         from eee_agent import context_trim
         if context_trim.is_enabled():
             middleware.append(context_trim.TrimReadbacksMiddleware())

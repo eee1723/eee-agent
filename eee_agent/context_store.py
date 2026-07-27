@@ -68,17 +68,23 @@ def build_middleware(model):
 # Lessons distilled from trace analysis, retargeted to the
 # sandbox → verify → commit workflow (scratch_build / scratch_commit).
 _LESSONS = [
+    "For procedural/parametric or complex multi-part asset requests, do NOT "
+    "start Houdini construction immediately. First author and render the "
+    "self-contained Three.js HTML sketch, report the HTML/PNG paths, and stop "
+    "for explicit user approval. Only after a later user approval may you "
+    "translate the approved sketch with scratch_build, verify_geometry, and "
+    "scratch_commit.",
+
     "Iterate with scratch_build ONE small step at a time: add a primitive, set "
     "its parms, read the returned cook errors and geometry stats, then adjust "
     "the SAME sandbox with the next scratch_build call. Do NOT try to build the "
     "whole asset in a single call, and do NOT restart from scratch on a cook "
     "error — the error names the failing node; fix that operation.",
 
-    "scratch_build set_parm accepts literal values only — no expressions, no "
-    "ch() references, no VEX. If you need a driven relationship, bake the "
-    "values yourself and set the numbers. There is no attribwrangle in the "
-    "catalog; procedural logic belongs in your op sequence (copytopoints2, "
-    "sweep2, boolean2, polyextrude2), not in code snippets.",
+    "scratch_build set_parm accepts literals or the bounded C1 typed expr AST; "
+    "never send raw Hscript, Python, VEX, file text, or arbitrary code. Public "
+    "design parameters belong on component subnets via declare_parm, and "
+    "derived geometry may reference them with safe relative refs.",
 
     "Only call scratch_commit AFTER scratch_build iterations produce the "
     "geometry you want. A refused commit is not an error to retry blindly: "
@@ -86,7 +92,7 @@ _LESSONS = [
     "Never use skip_structure_check to bypass a monolithic-structure failure.",
 ]
 
-_SEED_VERSION = "v2"
+_SEED_VERSION = "v3"
 
 
 def _seed_lessons(ctx) -> None:

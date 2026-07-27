@@ -35,6 +35,17 @@ def test_prompt_lists_scratch_tools_as_available() -> None:
     # The iterative sandbox workflow tools must be visible to the LLM.
     assert "scratch_build" in BASE_PROMPT
     assert "scratch_commit" in BASE_PROMPT
+    assert "render_sketch" in BASE_PROMPT
+    assert "verify_geometry" in BASE_PROMPT
+
+
+def test_prompt_requires_html_route_for_procedural_assets() -> None:
+    assert "程序化" in BASE_PROMPT
+    assert "HTML → 用户审核 → Houdini" in BASE_PROMPT
+    assert "禁止从 scene_status 直接进入 scratch_build" in BASE_PROMPT
+    assert "等待用户明确批准草图" in BASE_PROMPT
+    assert "render_sketch 成功不等于用户批准" in BASE_PROMPT
+    assert "procedural-modeling html-to-houdini workflow" in BASE_PROMPT
 
 
 def test_prompt_documents_every_read_only_tool() -> None:

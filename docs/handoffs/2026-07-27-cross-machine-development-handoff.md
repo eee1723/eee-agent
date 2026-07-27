@@ -192,6 +192,23 @@ actual executable path in the smoke commands.
    subnet parameter. The resulting HIP was inspected headlessly: each subnet
    has a spare public parm and the committed component contains only `wheel`,
    `frame`, `assembled`, and `OUT` at the top level.
+   **Natural-language HTML routing correction (2026-07-27):** a real panel
+   run for `做一个程序化自行车` (`run_01f44cda63364b0e9a4cb2ccd4a316db`)
+   called `write_todos` and `scene_status`, then planned a direct
+   `scratch_build`; it emitted no `render_sketch`. Root cause: the Runtime
+   system prompt explicitly recommended direct scratch construction for
+   familiar modeling while the procedural/HTML skills were only available
+   through on-demand Knowledge search and therefore were never injected.
+   `BASE_PROMPT` now classifies procedural/parametric and complex multi-part
+   assets into the mandatory HTML -> user review -> Houdini route, lists
+   `render_sketch`/`verify_geometry`, requires the project-workflow Knowledge
+   lookup, and forbids Houdini writes before a later user approval message.
+   `HtmlWorkflowGuardMiddleware` independently enforces that boundary from
+   checkpointed messages: `scratch_build`/`scratch_commit` return
+   `workflow.html_sketch_required` before a successful render and
+   `workflow.sketch_approval_required` before post-render approval. Simple,
+   explicit node edits remain on the direct sandbox route. Offline Runtime
+   evidence after the correction: `2324 passed`.
 5. **Manual Houdini UI:** inspect the read-only task graph block in the docked
    panel after a real modeling run.
 
