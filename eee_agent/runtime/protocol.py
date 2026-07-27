@@ -40,6 +40,7 @@ COMMAND_TYPES = frozenset(
         "run.stop",
         "run.force_stop",
         "changeset.list",
+        "task_graph.list",
         "changeset.approve",
         "changeset.reject",
         "changeset.recover",

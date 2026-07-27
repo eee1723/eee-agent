@@ -27,12 +27,12 @@ parms so a model can be reshaped without rebuilding.
 - **Persistent, authenticated Runtime**: WebSocket `eee.runtime/1`, loopback
   only, SQLite sessions/runs/events + LangGraph checkpoints, multi-session,
   reconnect-safe.
-- **Offline-first testing**: ~3458 tests pass with no live LLM and no Houdini;
+- **Offline-first testing**: 3546 tests pass with no live LLM and no Houdini;
   real-provider and real-Houdini checks are explicit opt-in acceptance runs.
 
 > **Read first each session:** `CLAUDE.md` (full context + gotchas) and the
 > current handoff,
-> `docs/handoffs/2026-07-24-sandbox-verify-commit-handoff.md`. This README is the
+> `docs/handoffs/2026-07-27-cross-machine-development-handoff.md`. This README is the
 > orientation map; older handoffs retain milestone history.
 
 ## Architecture (three processes, deps isolated)
@@ -217,7 +217,8 @@ uv run --extra eval python -m eee_agent.runtime serve --help   # options
 | **Foundation milestone** | ✅ done — uv-locked deps, core contracts, provider registry (DeepSeek via official Anthropic endpoint), normalized events, explicit harness (no implicit `task`), `cli versions`. See `docs/handoffs/2026-07-13-foundation-migration.md` |
 | **Live Runtime acceptance on current machine** | real provider journey **passed 2026-07-20** (DeepSeek + Houdini 21.0.440, strict evidence harness); the RC tag remains (the interactive GUI checklist passed in Stage B acceptance) — see `docs/handoffs/2026-07-20-runtime-development-transfer.md` |
 | Runtime + typed Houdini ChangeSets | Complete through local Task 16-E acceptance (merged to `main`): trusted Workspace, ordered created references, transactional Apply, atomic receipts, and no-replay restart recovery. |
-| **Sandbox + verify + commit (Pi model)** | ✅ merged to `main`: iterative `scratch_build` in an isolated `/obj/eee_scratch_<run>` container, four hard verify gates (`houdini_side/scratch_verify.py`: bake/structure/orientation/health), `scratch_commit` promotion wrapped in one undo group, and `scratch.destroy` cleanup on run end/cancel/restart. Pure-Python orientation math ported to `eee_agent/modeling/orientation_math.py`. Legacy `propose_modeling` retired from the agent graph (module retained). Full offline gate is **3458 passed, 11 skipped**. |
+| **Sandbox + verify + commit (Pi model)** | ✅ merged to `main`: iterative `scratch_build` in an isolated `/obj/eee_scratch_<run>` container, four hard verify gates (`houdini_side/scratch_verify.py`: bake/structure/orientation/health), `scratch_commit` promotion wrapped in one undo group, and `scratch.destroy` cleanup on run end/cancel/restart. Pure-Python orientation math ported to `eee_agent/modeling/orientation_math.py`. Legacy `propose_modeling` retired from the agent graph (module retained). Current full offline gate is **3546 passed, 12 skipped**. |
+| **HTML-to-Houdini + node lifecycle wave** | 🚧 branch implementation complete through deterministic/offline coverage: scratch-native Provider evidence, task graph schema/projection, `scratch.v2`, safe two-phase cleanup, and panel task view. Real-Provider three-run acceptance, Waves B/C, panel manual review, and Houdini SOP display/render-flag persistence remain open. See `docs/handoffs/2026-07-27-cross-machine-development-handoff.md`. |
 | Docked Runtime panel | Task 17-A and Task 17-B are accepted. The complete Houdini 21.0.440 gate passed Chinese IME/default Session behavior, read-only Run, high-volume reopen, Runtime restart recovery, Stop to Cancelled, empty approvals/no Apply, Scene regression, and zero mutation. See `docs/superpowers/reviews/2026-07-16-task17-b-review-result.md` and `docs/handoffs/2026-07-16-runtime-17b-transfer.md` |
 | Strict modeling foundation | Task 18-A through 18-H, all deterministic validators (Spec/Graph/Cook/Geometry/Sensitivity/Semantic), bounded repair tickets, Golden Case catalog batches, and the MODEL/REVIEW product flow are implemented (merged to `main`): strict Brief/Spec contracts, catalog-gated compilation, trusted bootstrap persistence, approval-to-single-flight Apply, durable validation evidence, and verified assembly/surface/boolean replays. Dedicated Houdini 21 hython Golden Case replay passed. Richer asset batches remain iterative. See `docs/superpowers/plans/2026-07-17-task18-h-product-ui.md` and `docs/superpowers/plans/2026-07-17-task18-g-catalog-golden-cases.md` |
 | Capture · Vision · Eval | Task 19-A content-addressed Artifact foundation and Task 19-B advisory Vision router are wired into the production post-Apply flow; the Vision real-provider journey passed in Stage B acceptance (B-08, qwen-vl-plus); the delivery/observability slice (19-C) remains open. Deterministic failure precedence holds — vision cannot override a hard validator failure. |

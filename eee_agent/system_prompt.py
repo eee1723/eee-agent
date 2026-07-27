@@ -123,7 +123,7 @@ def _pitfall_clause() -> str:
 
 
 def build_system_prompt() -> str:
-    # The four skill files under skills/ have been migrated to the current
+    # The six skill files under skills/ have been migrated to the current
     # sandbox+verify+commit tool surface (scratch_build / scratch_commit,
     # catalog node types, literal-only parms). Runtime still returns only this
     # audited, capability-scoped prompt; the skills are served to the agent

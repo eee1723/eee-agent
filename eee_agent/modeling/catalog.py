@@ -13,8 +13,14 @@ from eee_agent.modeling.contracts import QualityProfile, ValidatorKind
 def houdini_21_minimal_catalog() -> NodeCatalog:
     """Return the small catalog verified with Houdini 21.0.440 hython.
 
-    Only literal numeric parameters are included. Source/expression/file
-    parameters and node types that were not verified are intentionally absent.
+    Only literal numeric parameters are included (menu parms are encoded as
+    their integer index, e.g. torus ``orient`` and sweep2 ``surfaceshape``).
+    Source/expression/file parameters and node types that were not verified
+    are intentionally absent.
+
+    torus / sphere / copyxform entries and the sweep2 tube-mode parms were
+    probe-verified against live Houdini 21.0.440 on 2026-07-24 (see
+    tests/modeling/catalog_probe_houdini.py).
     """
     return NodeCatalog(
         entries=(
@@ -95,6 +101,20 @@ def houdini_21_minimal_catalog() -> NodeCatalog:
                 max_output_index=0,
             ),
             NodeTypeDefinition(
+                node_type="copyxform",
+                parameters=(
+                    ParmDefinition("ncy", 2),
+                    ParmDefinition("rx", 0.0),
+                    ParmDefinition("ry", 0.0),
+                    ParmDefinition("rz", 0.0),
+                    ParmDefinition("px", 0.0),
+                    ParmDefinition("py", 0.0),
+                    ParmDefinition("pz", 0.0),
+                ),
+                max_inputs=1,
+                max_output_index=0,
+            ),
+            NodeTypeDefinition(
                 node_type="null",
                 parameters=(
                     ParmDefinition("cacheinput", 0),
@@ -160,12 +180,46 @@ def houdini_21_minimal_catalog() -> NodeCatalog:
                 max_output_index=0,
             ),
             NodeTypeDefinition(
+                node_type="sphere",
+                parameters=(
+                    ParmDefinition("radx", 1.0),
+                    ParmDefinition("rady", 1.0),
+                    ParmDefinition("radz", 1.0),
+                    ParmDefinition("tx", 0.0),
+                    ParmDefinition("ty", 0.0),
+                    ParmDefinition("tz", 0.0),
+                    ParmDefinition("rows", 13),
+                    ParmDefinition("cols", 24),
+                ),
+                max_inputs=1,
+                max_output_index=0,
+            ),
+            NodeTypeDefinition(
+                node_type="torus",
+                parameters=(
+                    ParmDefinition("radx", 1.0),
+                    ParmDefinition("rady", 0.5),
+                    ParmDefinition("tx", 0.0),
+                    ParmDefinition("ty", 0.0),
+                    ParmDefinition("tz", 0.0),
+                    ParmDefinition("orient", 1),
+                    ParmDefinition("rows", 12),
+                    ParmDefinition("cols", 24),
+                ),
+                max_inputs=0,
+                max_output_index=0,
+            ),
+            NodeTypeDefinition(
                 node_type="sweep2",
                 create_type="sweep::2.0",
                 parameters=(
                     ParmDefinition("surfacetype", 5),
                     ParmDefinition("scale", 1.0),
                     ParmDefinition("roll", 0.0),
+                    ParmDefinition("surfaceshape", 0),
+                    ParmDefinition("radius", 0.1),
+                    ParmDefinition("cols", 8),
+                    ParmDefinition("endcaptype", 0),
                 ),
                 max_inputs=2,
                 max_output_index=0,

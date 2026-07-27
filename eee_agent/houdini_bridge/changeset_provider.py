@@ -23,10 +23,15 @@ from eee_agent.houdini_bridge.capture import (
 from eee_agent.houdini_bridge.scratch import (
     ScratchCommitRequest,
     ScratchCommitResult,
+    ScratchParmDeclaration,
+    ScratchDeleteRequest,
+    ScratchDeleteResult,
     ScratchDestroyRequest,
     ScratchDestroyResult,
     ScratchRequest,
     ScratchResult,
+    ScratchTopologyRequest,
+    ScratchTopologyResult,
 )
 from eee_agent.houdini_bridge.changesets import (
     ApplyRequest,
@@ -216,6 +221,7 @@ class BridgeChangeSetProvider:
         *,
         sandbox_id: str,
         operations: tuple,
+        purpose: str,
         preserve_on_failure: bool = True,
     ) -> ScratchResult:
         """Run a scratch sandbox build and return bounded diagnostics.
@@ -232,6 +238,7 @@ class BridgeChangeSetProvider:
             scene_epoch=binding.scene_epoch,
             sandbox_id=sandbox_id,
             operations=operations,
+            purpose=purpose,
             preserve_on_failure=preserve_on_failure,
         )
         return await self._call("scratch_exec", request, may_have_changed=True)
@@ -244,6 +251,8 @@ class BridgeChangeSetProvider:
         target_name: str,
         orientation_checks: tuple[Mapping[str, object], ...] = (),
         skip_structure_check: bool = False,
+        annotations: Mapping[str, str] | None = None,
+        parameters: tuple[ScratchParmDeclaration, ...] = (),
     ) -> ScratchCommitResult:
         """Commit a verified sandbox into the real scene through hard gates.
 
@@ -263,6 +272,8 @@ class BridgeChangeSetProvider:
             target_name=target_name,
             orientation_checks=tuple(orientation_checks),
             skip_structure_check=skip_structure_check,
+            annotations=annotations,
+            parameters=parameters,
         )
         return await self._call("scratch_commit", request, may_have_changed=True)
 
@@ -285,6 +296,40 @@ class BridgeChangeSetProvider:
             sandbox_id=sandbox_id,
         )
         return await self._call("scratch_destroy", request, may_have_changed=True)
+
+    async def delete_nodes(
+        self,
+        *,
+        paths: tuple[str, ...],
+        allowed_paths: tuple[str, ...],
+    ) -> ScratchDeleteResult:
+        """Delete committed nodes only from the Runtime-supplied allowlist."""
+        binding = await self.current_binding()
+        request = ScratchDeleteRequest.build(
+            request_id=self._request_id("scratch_delete"),
+            deadline_ms=self._deadline_ms,
+            scene_epoch=binding.scene_epoch,
+            allowed_paths=allowed_paths,
+            paths=paths,
+        )
+        return await self._call(
+            "scratch_delete_nodes", request, may_have_changed=True
+        )
+
+    async def scene_topology(
+        self,
+        *,
+        paths: tuple[str, ...],
+    ) -> ScratchTopologyResult:
+        """Read-only per-path wiring facts for cleanup decisions."""
+        binding = await self.current_binding()
+        request = ScratchTopologyRequest.build(
+            request_id=self._request_id("scratch_topology"),
+            deadline_ms=self._deadline_ms,
+            scene_epoch=binding.scene_epoch,
+            paths=paths,
+        )
+        return await self._call("scratch_topology", request, may_have_changed=False)
 
     async def receipt(self, changeset: ChangeSet) -> ChangeReceipt:
         if type(changeset) is not ChangeSet:

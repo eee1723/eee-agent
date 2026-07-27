@@ -1,19 +1,17 @@
-# Declarative geometry expectations for the offline evaluator.
-# Supported command: python -m eval.run_eval --dry
-# Live provider execution is deferred (no bounded Runtime-driving harness yet).
-
 - name: 3-storey house with windows
-  prompt: "Build a 3-storey house with windows on each floor and a flat roof, then export to output/house.obj"
+  prompt: "Build a 3-storey house with windows on each floor and a flat roof."
   export_path: output/house.obj
   expect:
-    min_verts: 50          # a real house, not an empty export
-    max_verts: 500000      # not exploded
+    min_verts: 50
+    max_verts: 500000
     min_faces: 20
-    bbox_min: [-100, -100, -100]   # sanity envelope (agent may center at origin)
+    bbox_min: [-100, -100, -100]
     bbox_max: [100, 100, 100]
+  tags: [legacy]
+  regression: deterministic
 
 - name: simple box tower (smoke)
-  prompt: "Build a simple 4m tall box tower 2x2m, then export to output/tower.obj"
+  prompt: "Build a simple 4m tall box tower 2x2m."
   export_path: output/tower.obj
   expect:
     min_verts: 8
@@ -21,3 +19,5 @@
     min_faces: 6
     bbox_min: [-2, -1, -2]
     bbox_max: [2, 5, 2]
+  tags: [legacy]
+  regression: deterministic

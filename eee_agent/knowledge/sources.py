@@ -31,8 +31,10 @@ class SourceError(Exception):
 # A build fails if any is missing or if any extra ``*/SKILL.md`` is present, so a
 # stale glob result can never pass as the complete source set.
 REQUIRED_SKILL_PATHS = (
+    "html-to-houdini/SKILL.md",
     "parametric-building/SKILL.md",
     "procedural-components/SKILL.md",
+    "procedural-modeling/SKILL.md",
     "sop-cookbook/SKILL.md",
     "vex-patterns/SKILL.md",
 )
@@ -61,7 +63,7 @@ def load_archive_entries(data: bytes) -> list[tuple[str, bytes]]:
 def load_skill_sources(
     skills_dir: Path, repo_root: Path
 ) -> tuple[tuple[SourceFingerprint, ...], list[tuple[str, bytes]]]:
-    """Load exactly the four required project skills under ``skills_dir``.
+    """Load exactly the six required project skills under ``skills_dir``.
 
     Returns ``(fingerprints, entries)`` where each logical path is the SKILL.md
     path relative to ``repo_root``, normalized to POSIX form. A missing required

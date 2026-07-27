@@ -57,7 +57,13 @@ def from_bridge_stats(s: Dict[str, Any]) -> Dict[str, Any]:
         mn, mx = bb.get("min"), bb.get("max")
         bbox = {"min": list(mn), "max": list(mx),
                 "size": [mx[i] - mn[i] for i in range(3)]}
-    return {"verts": s.get("points", 0), "faces": s.get("prims", 0), "bbox": bbox}
+    return {
+        "verts": s.get("points", 0),
+        # The production Secure Bridge uses ``primitives``. Keep ``prims`` as
+        # a compatibility fallback for older eval fixtures and adapters.
+        "faces": s.get("primitives", s.get("prims", 0)),
+        "bbox": bbox,
+    }
 
 
 def evaluate(stats: Optional[Dict[str, Any]], expected: Dict[str, Any]) -> Dict[str, Any]:
@@ -105,3 +111,113 @@ def check_file(path: str, expected: Dict[str, Any]) -> Dict[str, Any]:
     res = evaluate(stats, expected)
     res["stats"] = stats
     return res
+
+
+def mesh_component_count(path: str) -> Optional[int]:
+    """Count geometric connected components of a Wavefront .obj mesh.
+
+    Parses ``v``/``f`` lines and unions vertex indices shared by faces
+    (union-find). Vertices not referenced by any face count as singleton
+    components. Returns None when the file is missing or contains no
+    vertices; otherwise the component count (>= 1). Used by the
+    "disconnected / detached parts" assertion.
+    """
+    nverts = 0
+    faces: List[List[int]] = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if line.startswith("v "):
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        try:
+                            float(parts[1]); float(parts[2]); float(parts[3])
+                        except ValueError:
+                            continue
+                        nverts += 1
+                elif line.startswith("f "):
+                    idx: List[int] = []
+                    for tok in line.split()[1:]:
+                        try:
+                            i = int(tok.split("/")[0])
+                        except ValueError:
+                            continue
+                        if i < 0:  # negative indices are relative to the end
+                            i = nverts + 1 + i
+                        if 1 <= i <= nverts:
+                            idx.append(i - 1)
+                    if idx:
+                        faces.append(idx)
+    except FileNotFoundError:
+        return None
+    if nverts == 0:
+        return None
+
+    parent = list(range(nverts))
+
+    def find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for face in faces:
+        root = face[0]
+        for other in face[1:]:
+            ra, rb = find(root), find(other)
+            if ra != rb:
+                parent[ra] = rb
+
+    return len({find(i) for i in range(nverts)})
+
+
+def evaluate_parts(parts: Dict[str, Dict[str, Any]],
+                   expected: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+    """Per-part assertions over {part_name: stats} (same stats shape as
+    ``evaluate``). ``expected`` maps part_name -> {"required": bool
+    (default True), plus any key ``evaluate`` supports}.
+
+    Returns {"ok": bool, "issues": [...]}. Every issue is prefixed with the
+    part name (e.g. "leg_fl: verts 0 < min 8" or "leg_fl: missing") so the
+    failing part is directly locatable by the agent.
+    """
+    issues: List[str] = []
+    for name, spec in expected.items():
+        spec = spec or {}
+        required = spec.get("required", True)
+        stats = parts.get(name)
+        if stats is None:
+            if required:
+                issues.append(f"{name}: missing")
+            continue
+        sub_spec = {k: v for k, v in spec.items() if k != "required"}
+        sub = evaluate(stats, sub_spec)
+        issues.extend(f"{name}: {msg}" for msg in sub["issues"])
+    return {"ok": len(issues) == 0, "issues": issues}
+
+
+def evaluate_color(attr: Optional[Dict[str, Any]], expected_rgb,
+                   tol: float = 0.05) -> Dict[str, Any]:
+    """Deterministic part of the color/material assertion.
+
+    ``attr`` is the Cd attribute stats of one part's geometry:
+    {"mean": [r, g, b], "present": bool}. Compares each channel of the mean
+    against ``expected_rgb`` within ``tol``. Returns {"ok", "issues"}; when
+    ``attr`` is None or ``present`` is False the single issue is
+    "color attribute missing".
+    """
+    if attr is None or not attr.get("present"):
+        return {"ok": False, "issues": ["color attribute missing"]}
+    mean = attr.get("mean")
+    if mean is None or len(mean) < 3:
+        return {"ok": False, "issues": ["color attribute missing mean"]}
+    issues: List[str] = []
+    exp = list(expected_rgb)
+    for i, ch in enumerate("rgb"):
+        diff = abs(float(mean[i]) - float(exp[i]))
+        if diff > tol:
+            issues.append(
+                f"{ch} mean {float(mean[i]):.3f} vs expected "
+                f"{float(exp[i]):.3f} (|diff| {diff:.3f} > tol {tol})"
+            )
+    return {"ok": len(issues) == 0, "issues": issues}

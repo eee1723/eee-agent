@@ -38,15 +38,22 @@ from eee_agent.houdini_bridge.capture import (
 )
 from eee_agent.houdini_bridge.scratch import (
     SCRATCH_V1,
+    SCRATCH_V2,
     ScratchCommitRequest,
     ScratchCommitResult,
+    ScratchDeleteRequest,
+    ScratchDeleteResult,
     ScratchDestroyRequest,
     ScratchDestroyResult,
     ScratchRequest,
     ScratchResult,
+    ScratchTopologyRequest,
+    ScratchTopologyResult,
     parse_scratch_commit_response,
+    parse_scratch_delete_response,
     parse_scratch_destroy_response,
     parse_scratch_response,
+    parse_scratch_topology_response,
 )
 from eee_agent.houdini_bridge.changesets import (
     CHANGESET_V1,
@@ -704,6 +711,15 @@ class BridgeClient:
                 "The bridge does not support scratch sandbox operations.",
                 retryable=False,
             )
+        if any(op.kind == "delete_node" for op in request.operations) and (
+            SCRATCH_V2 not in self._capabilities
+        ):
+            raise _client_error(
+                "bridge.capability_unavailable",
+                "capability",
+                "The bridge does not support scratch node deletion.",
+                retryable=False,
+            )
         if not self._helloed or self._transport is None:
             raise RuntimeError(
                 "BridgeClient.scratch_exec() requires a successful open()/hello"
@@ -860,6 +876,112 @@ class BridgeClient:
                 "bridge.invalid_request",
                 "protocol",
                 "The bridge scratch destroy response is not a valid result.",
+            )
+        return result
+
+    async def scratch_delete_nodes(
+        self, request: ScratchDeleteRequest
+    ) -> ScratchDeleteResult:
+        """Delete Runtime-allowlisted committed nodes through ``scratch.v2``."""
+        if type(request) is not ScratchDeleteRequest:
+            raise TypeError("request must be a ScratchDeleteRequest")
+        if SCRATCH_V2 not in self._capabilities:
+            raise _client_error(
+                "bridge.capability_unavailable",
+                "capability",
+                "The bridge does not support scratch node deletion.",
+                retryable=False,
+            )
+        if not self._helloed or self._transport is None:
+            raise RuntimeError(
+                "BridgeClient.scratch_delete_nodes() requires a successful open()/hello"
+            )
+        response_bytes = await self._exchange(request.to_json(), request.deadline_ms)
+        try:
+            response = parse_scratch_delete_response(response_bytes)
+        except (TypeError, ValueError) as exc:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response is not a valid scratch delete envelope.",
+            ) from exc
+        if response.request_id != request.request_id:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response does not match the request id.",
+            )
+        if response.error is not None:
+            err = response.error
+            raise BridgeClientError(
+                code=err.code,
+                category=err.category,
+                message_for_user=err.message_for_user,
+                retryable=err.retryable,
+                technical_detail_ref=err.technical_detail_ref,
+            )
+        result = response.result
+        if type(result) is not ScratchDeleteResult:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge scratch delete response is not a valid result.",
+            )
+        return result
+
+    async def scratch_topology(
+        self, request: ScratchTopologyRequest
+    ) -> ScratchTopologyResult:
+        """Read bounded live wiring facts through ``scratch.v2``."""
+        if type(request) is not ScratchTopologyRequest:
+            raise TypeError("request must be a ScratchTopologyRequest")
+        if SCRATCH_V2 not in self._capabilities:
+            raise _client_error(
+                "bridge.capability_unavailable",
+                "capability",
+                "The bridge does not support scratch topology queries.",
+                retryable=False,
+            )
+        if not self._helloed or self._transport is None:
+            raise RuntimeError(
+                "BridgeClient.scratch_topology() requires a successful open()/hello"
+            )
+        response_bytes = await self._exchange(request.to_json(), request.deadline_ms)
+        try:
+            response = parse_scratch_topology_response(response_bytes)
+        except (TypeError, ValueError) as exc:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response is not a valid scratch topology envelope.",
+            ) from exc
+        if response.request_id != request.request_id:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge response does not match the request id.",
+            )
+        if response.error is not None:
+            err = response.error
+            raise BridgeClientError(
+                code=err.code,
+                category=err.category,
+                message_for_user=err.message_for_user,
+                retryable=err.retryable,
+                technical_detail_ref=err.technical_detail_ref,
+            )
+        result = response.result
+        if type(result) is not ScratchTopologyResult:
+            await self._abort()
+            raise _client_error(
+                "bridge.invalid_request",
+                "protocol",
+                "The bridge scratch topology response is not a valid result.",
             )
         return result
 

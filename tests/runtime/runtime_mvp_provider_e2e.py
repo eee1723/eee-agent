@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shlex
 import subprocess
 import tempfile
@@ -39,19 +38,19 @@ _CREDENTIAL_VARS = (
     "OPENAI_API_KEY",
 )
 _MAX_EVIDENCE_BYTES = 16 * 1024
-_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _EVIDENCE_FIELDS = frozenset(
     {
-        "proposal_digest",
-        "approval_event",
-        "receipt_status",
-        "validation_status",
-        "artifact_status",
-        "vision_status",
-        "vision_accepted",
-        "vision_reason_code",
-        "vision_artifact_digest_match",
-        "replay_last_seq",
+        "run_status",
+        "scratch_build_seen",
+        "scratch_build_ok",
+        "geometry_verified",
+        "scratch_commit_seen",
+        "commit_status",
+        "commit_receipt_present",
+        "final_path",
+        "final_geometry_ok",
+        "sandbox_absent",
+        "restart_replay_last_seq",
         "scene_cleanup",
     }
 )
@@ -103,19 +102,22 @@ def _validate_evidence(path: Path) -> bool:
     if type(payload) is not dict or frozenset(payload) != _EVIDENCE_FIELDS:
         return False
     return (
-        type(payload["proposal_digest"]) is str
-        and _DIGEST_RE.fullmatch(payload["proposal_digest"]) is not None
-        and payload["approval_event"] == "approved"
-        and payload["receipt_status"] in {"applied", "already_applied"}
-        and payload["validation_status"] == "passed"
-        and payload["artifact_status"] == "available"
-        and payload["vision_status"] in {"completed", "unavailable", "failed"}
-        and type(payload["vision_accepted"]) is bool
-        and type(payload["vision_reason_code"]) is str
-        and 1 <= len(payload["vision_reason_code"]) <= 64
-        and type(payload["vision_artifact_digest_match"]) is bool
-        and type(payload["replay_last_seq"]) is int
-        and payload["replay_last_seq"] >= 1
+        payload["run_status"] == "completed"
+        and payload["scratch_build_seen"] is True
+        and payload["scratch_build_ok"] is True
+        and payload["geometry_verified"] is True
+        and payload["scratch_commit_seen"] is True
+        and payload["commit_status"] == "committed"
+        and payload["commit_receipt_present"] is True
+        and type(payload["final_path"]) is str
+        and payload["final_path"].startswith("/obj/")
+        and 6 <= len(payload["final_path"]) <= 512
+        and "\n" not in payload["final_path"]
+        and "\r" not in payload["final_path"]
+        and payload["final_geometry_ok"] is True
+        and payload["sandbox_absent"] is True
+        and type(payload["restart_replay_last_seq"]) is int
+        and payload["restart_replay_last_seq"] >= 1
         and payload["scene_cleanup"] == "completed"
     )
 

@@ -14,9 +14,9 @@ whose returned `geometry`/`errors` you check before moving on.
 ## The tool contract (read first)
 - `scratch_build(operations=[...])` writes ONLY to the isolated sandbox
   (`/obj/eee_scratch_<run>`). Ops: `create_node` / `set_parm` / `connect`.
-- `set_parm` values are LITERALS ONLY: numbers, booleans, strings, or a list
-  of <=16 numbers. No expressions, no `ch()` references, no VEX, no file
-  paths. Compute every derived number yourself and send the literal result.
+- `set_parm` values are literals or bounded C1 typed `expr` ASTs: numbers,
+  booleans, strings, or a list of <=16 numbers. Use safe relative `ch()`
+  references for derived dimensions; no VEX or file paths.
 - One small step per call (a node or two + their parms). Read the returned
   `geometry` (point/prim/vertex counts + bbox) and `errors` before the next.
 - When the cooked result matches the design, `scratch_commit(

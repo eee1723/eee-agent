@@ -29,6 +29,15 @@ suggest restarting `start_rpc.py`.
   `inspect_workspace`, `geometry_stats`, `work_status`) over the
   authenticated loopback Secure Bridge; they return bounded plain dicts, never
   live HOM objects.
+- The procedural-modeling pipeline (`skills/procedural-modeling`) adds two
+  bounded tools registered on the modeling graph: `render_sketch` (Three.js
+  HTML → headless-Chrome PNG for the user review gate, provider seam
+  `SketchRenderProvider` in `runtime/agent_context.py`, implementation
+  `eee_agent/sketch/chrome.py`) and `verify_geometry` (in-loop geometry
+  assertions reusing `eval/geometry_assertions.py`). Project skills are an
+  exact allowlist in `eee_agent/knowledge/sources.py`
+  (`REQUIRED_SKILL_PATHS`, currently six) — adding a SKILL.md without
+  registering it there fails the knowledge build by design.
 - Houdini-side code (`houdini_side/`) uses only Houdini's bundled Python and
   PySide6 — no agent venv deps, no provider SDKs, no credentials.
 

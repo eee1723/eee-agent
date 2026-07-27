@@ -887,6 +887,44 @@ def parse_changeset_list(result: object) -> tuple[Mapping[str, object], ...]:
     return tuple(parsed)
 
 
+_TASK_STEP_FIELDS = frozenset({"seq", "tool", "purpose", "status", "node_count"})
+_TASK_STEP_STATUSES = frozenset({"open", "committed", "deleted"})
+
+
+def parse_task_graph_list(result: object) -> tuple[Mapping[str, object], ...]:
+    if type(result) is not dict or set(result) != {"steps"}:
+        raise PanelClientError("Runtime task graph list is invalid.")
+    items = result["steps"]
+    if type(items) is not list or len(items) > 50:
+        raise PanelClientError("Runtime task graph list is invalid.")
+    parsed: list[Mapping[str, object]] = []
+    for item in items:
+        if type(item) is not dict or set(item) != _TASK_STEP_FIELDS:
+            raise PanelClientError("Runtime task graph list is invalid.")
+        if type(item["seq"]) is not int or item["seq"] < 1:
+            raise PanelClientError("Runtime task graph list is invalid.")
+        if type(item["tool"]) is not str or type(item["purpose"]) is not str:
+            raise PanelClientError("Runtime task graph list is invalid.")
+        if item["status"] not in _TASK_STEP_STATUSES:
+            raise PanelClientError("Runtime task graph list is invalid.")
+        if type(item["node_count"]) is not int or item["node_count"] < 0:
+            raise PanelClientError("Runtime task graph list is invalid.")
+        parsed.append(item)
+    return tuple(parsed)
+
+
+def format_task_graph_steps(
+    steps: tuple[Mapping[str, object], ...],
+) -> str:
+    if not steps:
+        return "No build steps recorded for this run."
+    return "\n".join(
+        f"{step['seq']}. [{step['status']}] {step['purpose']} "
+        f"({step['node_count']} nodes)"
+        for step in steps
+    )
+
+
 def changeset_refresh_required(message: Mapping[str, object]) -> bool:
     return (
         message.get("kind") == "event"

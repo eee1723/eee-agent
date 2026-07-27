@@ -268,6 +268,17 @@ class TestBakeGate:
         assert result["hard"] is True
         assert result["detail"]["skipped"]
 
+    def test_no_component_id_fails_when_axes_are_required(self) -> None:
+        pts = _quad_points()
+        prim = _quad_prim(0, pts)
+        geo = _Geometry(pts, [prim], attribs=set())
+        result = verify_world_axes_baked(
+            _OutputNode(geo), require_component_ids=True
+        )
+        assert result["passed"] is False
+        assert result["hard"] is True
+        assert result["detail"]["required"] == "component_id"
+
     def test_all_components_baked_passes(self) -> None:
         pts = _quad_points()
         prim = _quad_prim(0, pts, component_id="top", world_axis=(0.0, 1.0, 0.0))
@@ -358,11 +369,12 @@ class TestOrientationGate:
         assert result["passed"] is True
         assert result["detail"]["skipped"]
 
-    def test_no_component_id_passes_vacuously(self) -> None:
+    def test_no_component_id_fails_when_checks_are_requested(self) -> None:
         geo = _Geometry([], [], attribs=set())
         result = verify_orientation(_OutputNode(geo), [{"component_id": "x"}])
-        assert result["passed"] is True
-        assert result["detail"]["skipped"]
+        assert result["passed"] is False
+        assert result["hard"] is True
+        assert result["detail"]["required"] == "component_id"
 
     def test_correct_axis_passes(self) -> None:
         pts = _quad_points()
@@ -524,6 +536,20 @@ class TestRunVerifyGates:
         assert result["passed"] is False
         gate_names = {g["gate"] for g in result["hard_failures"]}
         assert "health" in gate_names
+
+    def test_orientation_checks_fail_closed_without_component_attributes(self) -> None:
+        pts = _quad_points()
+        prim = _quad_prim(0, pts)
+        geo = _Geometry(pts, [prim], attribs=set())
+        sandbox_root = _Node("/obj/eee_scratch_run1", "geo", children=[])
+        result = run_verify_gates(
+            sandbox_root,
+            _OutputNode(geo),
+            orientation_checks=[{"component_id": "wheel", "expected_axis": "Y"}],
+        )
+        assert result["passed"] is False
+        gate_names = {g["gate"] for g in result["hard_failures"]}
+        assert {"bake", "orientation"} <= gate_names
 
     def test_bake_failure_blocks_overall(self) -> None:
         pts = _quad_points()

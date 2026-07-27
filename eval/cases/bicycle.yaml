@@ -1,0 +1,22 @@
+# Bicycle regression case for the html-to-houdini pipeline.
+- name: parametric bicycle (html-to-houdini reference)
+  prompt: "Build a bicycle: two 0.34m-radius wheels 1.1m apart, red tubular frame, handlebar, saddle, cranks and pedals."
+  export_path: output/bicycle_eval.obj
+  expect:
+    min_verts: 1000
+    max_verts: 200000
+    min_faces: 800
+    bbox_min: [-1.2, -0.05, -0.6]
+    bbox_max: [1.2, 1.3, 0.6]
+  parts:
+    wheel_f: {required: true}
+    wheel_r: {required: true}
+    frame: {required: false}
+    saddle: {required: false}
+  parameters:
+    - {name: wheel_radius, tab: Wheels, classification: design_intent, min: 0.25, default: 0.34, max: 0.45, unit: m}
+    - {name: frame_length, tab: Frame, classification: design_intent, min: 0.8, default: 1.1, max: 1.4, unit: m}
+    - {name: seat_height, tab: Frame, classification: design_intent, min: 0.7, default: 0.85, max: 1.1, unit: m}
+  scan_expect: {mesh_components: 1, scan_tol: 0.5}
+  tags: [parametric, deterministic]
+  regression: deterministic

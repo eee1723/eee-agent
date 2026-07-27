@@ -20,7 +20,9 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -35,14 +37,20 @@ from eee_agent.houdini_bridge.scratch import (
     SCRATCH_DESTROY_OPERATION,
     SCRATCH_EXEC_OPERATION,
     SCRATCH_V1,
+    SCRATCH_V2,
     ScratchCommitRequest,
     ScratchCommitResult,
+    ScratchDeleteRequest,
+    ScratchDeleteResult,
     ScratchDestroyRequest,
     ScratchDestroyResult,
+    ScratchExpr,
     ScratchGeometry,
     ScratchOp,
     ScratchRequest,
     ScratchResult,
+    ScratchTopologyRequest,
+    ScratchTopologyResult,
     parse_scratch_commit_request,
     parse_scratch_commit_response,
     parse_scratch_destroy_request,
@@ -52,6 +60,7 @@ from eee_agent.houdini_bridge.scratch import (
 )
 from eee_agent.modeling.scratch_coordinator import (
     ScratchCoordinator,
+    ScratchError,
     ScratchSessionContext,
     ScratchToolContext,
     scratch_build,
@@ -206,7 +215,7 @@ class TestScratchOp:
 
     def test_unknown_kind_rejected(self) -> None:
         with pytest.raises(ValueError):
-            ScratchOp(kind="delete_node", node_name="x")
+            ScratchOp(kind="move_node", node_name="x")
 
     def test_bad_node_name_rejected(self) -> None:
         with pytest.raises(ValueError):
@@ -232,6 +241,310 @@ class TestScratchOp:
         op = ScratchOp(kind="create_node", node_name="x", node_type="box")
         with pytest.raises(dataclasses.FrozenInstanceError):
             op.node_name = "y"  # type: ignore[misc]
+
+
+# ==========================================================================
+# ScratchExpr DTO strictness (scratch.v2 C1 typed parameter expressions)
+# ==========================================================================
+
+
+def _expr_dict() -> dict[str, object]:
+    """mul(ref ../box1/sizex, 2.0) — the canonical smoke expression."""
+    return {
+        "kind": "op",
+        "name": "mul",
+        "args": [
+            {"kind": "ref", "path": "../box1/sizex"},
+            {"kind": "num", "value": 2.0},
+        ],
+    }
+
+
+class TestScratchExpr:
+    def test_num_round_trip(self) -> None:
+        expr = ScratchExpr(kind="num", value=2.5)
+        assert expr.to_dict() == {"kind": "num", "value": 2.5}
+        assert ScratchExpr.from_dict(expr.to_dict()) == expr
+        assert ScratchExpr.from_dict({"kind": "num", "value": 2}).value == 2
+
+    def test_ref_round_trip_relative_and_absolute(self) -> None:
+        for path in ("../ctrl/sizex", "ctrl/sizex", "sizex", "/obj/eee_scratch_r/box1/sizex"):
+            expr = ScratchExpr(kind="ref", path=path)
+            assert expr.to_dict() == {"kind": "ref", "path": path}
+            assert ScratchExpr.from_dict(expr.to_dict()) == expr
+
+    def test_nested_op_func_round_trip(self) -> None:
+        expr = ScratchExpr(
+            kind="func",
+            name="clamp",
+            args=(
+                ScratchExpr(kind="op", name="add", args=(
+                    ScratchExpr(kind="ref", path="../a/width"),
+                    ScratchExpr(kind="num", value=1),
+                )),
+                ScratchExpr(kind="num", value=0.0),
+                ScratchExpr(kind="func", name="sqrt", args=(
+                    ScratchExpr(kind="num", value=16.0),
+                )),
+            ),
+        )
+        assert ScratchExpr.from_dict(expr.to_dict()) == expr
+
+    def test_num_rejects_bool_nan_inf(self) -> None:
+        for bad in (True, float("nan"), float("inf"), float("-inf")):
+            with pytest.raises((TypeError, ValueError)):
+                ScratchExpr(kind="num", value=bad)
+
+    def test_ref_rejects_injection_and_file_path_chars(self) -> None:
+        for bad in (
+            "C:/temp/x.hip",          # ':' drive path
+            "..\\ctrl\\sizex",        # backslash
+            "$HIP/x",                 # variable expansion
+            "`ls`",                   # backtick execution
+            'ch("x")',                # quotes/parens
+            "../ctrl/size x",         # whitespace
+            "a;b",                    # statement separator
+        ):
+            with pytest.raises(ValueError):
+                ScratchExpr(kind="ref", path=bad)
+
+    def test_ref_rejects_malformed_paths(self) -> None:
+        for bad in ("", "x" * 257, "../box1/", "../box1//sizex", "./sizex"):
+            with pytest.raises(ValueError):
+                ScratchExpr(kind="ref", path=bad)
+        with pytest.raises(TypeError):
+            ScratchExpr(kind="ref", path=1)  # type: ignore[arg-type]
+
+    def test_unknown_kind_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            ScratchExpr(kind="python", value=1)  # type: ignore[arg-type]
+        with pytest.raises(ValueError):
+            ScratchExpr.from_dict({"kind": "python", "value": 1})
+
+    def test_from_dict_rejects_unknown_fields(self) -> None:
+        with pytest.raises(ValueError):
+            ScratchExpr.from_dict({"kind": "num", "value": 1.0, "bogus": 1})
+        with pytest.raises(ValueError):
+            ScratchExpr.from_dict({"kind": "ref", "path": "a/b", "name": "x"})
+
+    def test_non_whitelist_func_rejected(self) -> None:
+        for name in ("python", "eval", "exec", "ch", "opinputpath", "bbox"):
+            with pytest.raises(ValueError):
+                ScratchExpr(kind="func", name=name, args=(ScratchExpr(kind="num", value=1),))
+
+    def test_arity_rules(self) -> None:
+        num = ScratchExpr(kind="num", value=1.0)
+        with pytest.raises(ValueError):
+            ScratchExpr(kind="op", name="add", args=(num,))  # noqa: E501
+        with pytest.raises(ValueError):
+            ScratchExpr(kind="op", name="neg", args=(num, num))
+        with pytest.raises(ValueError):
+            ScratchExpr(kind="func", name="clamp", args=(num, num))
+        with pytest.raises(ValueError):
+            ScratchExpr(kind="func", name="pow", args=(num,))
+        with pytest.raises(ValueError):
+            ScratchExpr(kind="func", name="sqrt", args=(num, num))
+        with pytest.raises(ValueError):
+            ScratchExpr(kind="func", name="min", args=())
+        with pytest.raises(ValueError):
+            ScratchExpr(kind="func", name="max", args=(num,) * 5)
+        # min/max accept 1..4 args
+        ScratchExpr(kind="func", name="max", args=(num, num, num, num))
+
+    def test_depth_bound(self) -> None:
+        expr = ScratchExpr(kind="num", value=1.0)
+        for _ in range(7):  # depth 8 total — allowed
+            expr = ScratchExpr(kind="op", name="neg", args=(expr,))
+        with pytest.raises(ValueError):
+            ScratchExpr(kind="op", name="neg", args=(expr,))  # depth 9
+
+    def test_node_count_bound(self) -> None:
+        # Wide (not deep) trees: max() with 4 args grows the node count
+        # without growing depth. A 21-node tree is allowed; 85 is not.
+        def wide(children: tuple[ScratchExpr, ...]) -> ScratchExpr:
+            return ScratchExpr(kind="func", name="max", args=children)
+
+        nums = tuple(ScratchExpr(kind="num", value=i) for i in range(4))
+        inner = tuple(wide(nums) for _ in range(4))  # 5 nodes each, depth 2
+        tree = wide(inner)  # 21 nodes, depth 3 — allowed
+        with pytest.raises(ValueError):
+            wide((tree, tree, tree, tree))  # 85 nodes
+
+    def test_args_must_be_exprs(self) -> None:
+        with pytest.raises(TypeError):
+            ScratchExpr(kind="op", name="add", args=(
+                ScratchExpr(kind="num", value=1), 1.0,  # type: ignore[arg-type]
+            ))
+        with pytest.raises(TypeError):
+            ScratchExpr.from_dict({"kind": "op", "name": "add", "args": [{"kind": "num", "value": 1}, 2]})
+
+    def test_frozen(self) -> None:
+        import dataclasses
+
+        expr = ScratchExpr(kind="num", value=1.0)
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            expr.kind = "ref"  # type: ignore[misc]
+
+
+class TestScratchOpExpr:
+    def test_set_parm_expr_round_trip(self) -> None:
+        op = ScratchOp(
+            kind="set_parm", node_name="box2", parm="sizex",
+            expr=ScratchExpr.from_dict(_expr_dict()),
+        )
+        d = op.to_dict()
+        assert d == {
+            "kind": "set_parm", "node_name": "box2", "parm": "sizex",
+            "expr": _expr_dict(),
+        }
+        assert "value" not in d
+        assert ScratchOp.from_dict(d) == op
+
+    def test_value_and_expr_conflict_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            ScratchOp(
+                kind="set_parm", node_name="box1", parm="sizex",
+                value=1.0, expr=ScratchExpr(kind="num", value=2.0),
+            )
+        with pytest.raises(ValueError):
+            ScratchOp.from_dict({
+                "kind": "set_parm", "node_name": "box1", "parm": "sizex",
+                "value": 1.0, "expr": {"kind": "num", "value": 2.0},
+            })
+
+    def test_neither_value_nor_expr_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            ScratchOp(kind="set_parm", node_name="box1", parm="sizex")
+        with pytest.raises(ValueError):
+            ScratchOp.from_dict({
+                "kind": "set_parm", "node_name": "box1", "parm": "sizex",
+            })
+
+    def test_expr_only_valid_for_set_parm(self) -> None:
+        with pytest.raises(ValueError):
+            ScratchOp(
+                kind="create_node", node_name="box1", node_type="box",
+                expr=ScratchExpr(kind="num", value=1.0),
+            )
+
+    def test_expr_must_be_typed(self) -> None:
+        with pytest.raises(TypeError):
+            ScratchOp(
+                kind="set_parm", node_name="box1", parm="sizex",
+                expr={"kind": "num", "value": 1.0},  # type: ignore[arg-type]
+            )
+        with pytest.raises((TypeError, ValueError)):
+            ScratchOp.from_dict({
+                "kind": "set_parm", "node_name": "box1", "parm": "sizex",
+                "expr": "ch('../box1/sizex')",
+            })
+
+    def test_request_round_trip_with_expr_op(self) -> None:
+        request = ScratchRequest.build(
+            request_id="req_expr",
+            deadline_ms=5000,
+            scene_epoch=1,
+            sandbox_id="run1",
+            operations=(
+                ScratchOp(kind="create_node", node_name="box1", node_type="box"),
+                ScratchOp(
+                    kind="set_parm", node_name="box2", parm="sizex",
+                    expr=ScratchExpr.from_dict(_expr_dict()),
+                ),
+            ),
+            purpose="expr round trip",
+        )
+        parsed = ScratchRequest.from_dict(request.to_dict())
+        assert parsed.operations[1].expr == request.operations[1].expr
+
+
+
+class TestScratchV2DtoExtensions:
+    def test_delete_node_round_trip(self) -> None:
+        op = ScratchOp(kind="delete_node", node_name="draft1")
+        assert ScratchOp.from_dict(op.to_dict()) == op
+        assert op.to_dict() == {"kind": "delete_node", "node_name": "draft1"}
+
+    def test_create_note_is_bounded_and_kind_specific(self) -> None:
+        op = ScratchOp(
+            kind="create_node",
+            node_name="box1",
+            node_type="box",
+            note="桌面粗模",
+        )
+        assert ScratchOp.from_dict(op.to_dict()).note == "桌面粗模"
+        with pytest.raises(ValueError):
+            ScratchOp(kind="delete_node", node_name="x", note="nope")
+        with pytest.raises(ValueError):
+            ScratchOp(
+                kind="create_node",
+                node_name="box1",
+                node_type="box",
+                note="x" * 201,
+            )
+
+    def test_purpose_is_required_and_bounded(self) -> None:
+        base = {
+            "request_id": "req_purpose",
+            "deadline_ms": 5000,
+            "scene_epoch": 1,
+            "sandbox_id": "run1",
+            "operations": (
+                ScratchOp(kind="create_node", node_name="b", node_type="box"),
+            ),
+        }
+        with pytest.raises(ValueError):
+            ScratchRequest(**base, purpose="")  # type: ignore[arg-type]
+        with pytest.raises(ValueError):
+            ScratchRequest(**base, purpose="x" * 201)  # type: ignore[arg-type]
+        request = ScratchRequest(**base, purpose="创建桌腿")  # type: ignore[arg-type]
+        assert ScratchRequest.from_dict(request.to_dict()).purpose == "创建桌腿"
+
+    def test_annotations_and_warnings_round_trip(self) -> None:
+        request = ScratchCommitRequest.build(
+            request_id="req_annotations",
+            deadline_ms=5000,
+            scene_epoch=1,
+            sandbox_id="run1",
+            target_parent_path="/obj",
+            target_name="table1",
+            annotations={"box1": "桌面", "blast1": "最终输出"},
+        )
+        parsed = ScratchCommitRequest.from_dict(request.to_dict())
+        assert dict(parsed.annotations) == {
+            "blast1": "最终输出",
+            "box1": "桌面",
+        }
+        result = ScratchCommitResult(
+            committed=True,
+            refused=False,
+            final_path="/obj/table1",
+            reason="",
+            gates=(),
+            receipt={"passed": True},
+            warnings=("layout skipped: unavailable",),
+        )
+        assert ScratchCommitResult.from_dict(result.to_dict()).warnings == (
+            "layout skipped: unavailable",
+        )
+
+    def test_annotations_reject_bad_key_and_value(self) -> None:
+        common = {
+            "request_id": "req_annotations_bad",
+            "deadline_ms": 5000,
+            "scene_epoch": 1,
+            "sandbox_id": "run1",
+            "target_parent_path": "/obj",
+            "target_name": "table1",
+        }
+        with pytest.raises(ValueError):
+            ScratchCommitRequest.build(
+                **common, annotations={"not a name!": "x"}  # type: ignore[arg-type]
+            )
+        with pytest.raises(ValueError):
+            ScratchCommitRequest.build(
+                **common, annotations={"box1": "x" * 501}  # type: ignore[arg-type]
+            )
 
 
 # ==========================================================================
@@ -275,6 +588,7 @@ class TestScratchRequest:
             "scene_epoch": 42,
             "sandbox_id": "run1",
             "operations": (ScratchOp(kind="create_node", node_name="box1", node_type="box"),),
+            "purpose": "build the tabletop",
             "preserve_on_failure": True,
         }
         kwargs.update(overrides)
@@ -530,6 +844,7 @@ def _scratch_request() -> ScratchRequest:
         scene_epoch=42,
         sandbox_id="run1",
         operations=(ScratchOp(kind="create_node", node_name="box1", node_type="box"),),
+        purpose="build the tabletop",
     )
 
 
@@ -662,12 +977,14 @@ class _FakeScratchProvider:
         *,
         sandbox_id: str,
         operations: tuple[ScratchOp, ...],
+        purpose: str,
         preserve_on_failure: bool = True,
     ) -> ScratchResult:
         self.calls.append(
             {
                 "sandbox_id": sandbox_id,
                 "operations": operations,
+                "purpose": purpose,
                 "preserve_on_failure": preserve_on_failure,
             }
         )
@@ -691,6 +1008,7 @@ class _FakeScratchProvider:
         target_name: str,
         orientation_checks: tuple = (),
         skip_structure_check: bool = False,
+        annotations: tuple[tuple[str, str], ...] = (),
     ) -> ScratchCommitResult:
         # Minimal stub so the provider satisfies the ScratchProvider Protocol.
         # Commit-specific behavior is tested via the dedicated commit tests.
@@ -714,6 +1032,39 @@ def _coordinator(provider: _FakeScratchProvider, *, sandbox_id: str = "run1") ->
 
 
 class TestScratchCoordinator:
+    def test_parse_operations_accepts_typed_expr(self) -> None:
+        coord = _coordinator(_FakeScratchProvider())
+        ops = coord._parse_operations([
+            {"kind": "create_node", "node_name": "box1", "node_type": "box"},
+            {
+                "kind": "set_parm", "node_name": "box2", "parm": "sizex",
+                "expr": _expr_dict(),
+            },
+        ])
+        assert ops[1].expr == ScratchExpr.from_dict(_expr_dict())
+        assert ops[1].value is None
+
+    def test_parse_operations_rejects_invalid_expr(self) -> None:
+        coord = _coordinator(_FakeScratchProvider())
+        bad_exprs = (
+            {"kind": "func", "name": "python", "args": [{"kind": "num", "value": 1}]},
+            {"kind": "ref", "path": "$HIP/file.hip"},
+            {"kind": "num", "value": 1.0, "bogus": 1},
+        )
+        for bad in bad_exprs:
+            with pytest.raises(ScratchError):
+                coord._parse_operations([
+                    {"kind": "set_parm", "node_name": "box1", "parm": "sizex", "expr": bad},
+                ])
+        # value/expr conflict is also a bounded input error
+        with pytest.raises(ScratchError):
+            coord._parse_operations([
+                {
+                    "kind": "set_parm", "node_name": "box1", "parm": "sizex",
+                    "value": 1.0, "expr": _expr_dict(),
+                },
+            ])
+
     def test_happy_path_summarizes_result(self) -> None:
         provider = _FakeScratchProvider(
             result=ScratchResult(
@@ -728,6 +1079,7 @@ class TestScratchCoordinator:
 
         async def run() -> dict[str, object]:
             return await coord.build(
+                purpose="build test geometry",
                 operations=[
                     {"kind": "create_node", "node_name": "box1", "node_type": "box"},
                     {"kind": "set_parm", "node_name": "box1", "parm": "sizex", "value": 2.0},
@@ -753,7 +1105,11 @@ class TestScratchCoordinator:
         coord = _coordinator(provider)
 
         async def run() -> None:
-            await coord.build(operations=[_op_create()], preserve_on_failure=False)
+            await coord.build(
+                purpose="test failure cleanup",
+                operations=[_op_create()],
+                preserve_on_failure=False,
+            )
 
         asyncio.run(run())
         assert provider.calls[0]["preserve_on_failure"] is False
@@ -763,7 +1119,7 @@ class TestScratchCoordinator:
         coord = _coordinator(provider)
 
         async def run() -> dict[str, object]:
-            return await coord.build(operations=[])
+            return await coord.build(purpose="test empty", operations=[])
 
         result = asyncio.run(run())
         assert result["ok"] is False
@@ -775,7 +1131,9 @@ class TestScratchCoordinator:
         coord = _coordinator(provider)
 
         async def run() -> dict[str, object]:
-            return await coord.build(operations="not a list")  # type: ignore[arg-type]
+            return await coord.build(  # type: ignore[arg-type]
+                purpose="test invalid", operations="not a list"
+            )
 
         result = asyncio.run(run())
         assert result["ok"] is False
@@ -787,7 +1145,7 @@ class TestScratchCoordinator:
         ops = [_op_create(node_name=f"n{i}") for i in range(65)]
 
         async def run() -> dict[str, object]:
-            return await coord.build(operations=ops)
+            return await coord.build(purpose="test bound", operations=ops)
 
         result = asyncio.run(run())
         assert result["ok"] is False
@@ -800,6 +1158,7 @@ class TestScratchCoordinator:
 
         async def run() -> dict[str, object]:
             return await coord.build(
+                purpose="test malformed op",
                 operations=[{"kind": "create_node", "node_name": "bad name", "node_type": "box"}]
             )
 
@@ -814,7 +1173,9 @@ class TestScratchCoordinator:
         coord = _coordinator(provider)
 
         async def run() -> dict[str, object]:
-            return await coord.build(operations=[_op_create()])
+            return await coord.build(
+                purpose="test bridge failure", operations=[_op_create()]
+            )
 
         result = asyncio.run(run())
         assert result["ok"] is False
@@ -827,7 +1188,9 @@ class TestScratchCoordinator:
         coord = _coordinator(provider)
 
         async def run() -> dict[str, object]:
-            return await coord.build(operations=[_op_create()])
+            return await coord.build(
+                purpose="test operation failure", operations=[_op_create()]
+            )
 
         result = asyncio.run(run())
         assert result["ok"] is False
@@ -847,7 +1210,9 @@ class TestScratchCoordinator:
         coord = _coordinator(provider)
 
         async def run() -> dict[str, object]:
-            return await coord.build(operations=[_op_create()])
+            return await coord.build(
+                purpose="test missing geometry", operations=[_op_create()]
+            )
 
         result = asyncio.run(run())
         # M2: a result with per-op errors reports ok=False (partial failure is
@@ -906,6 +1271,7 @@ class TestScratchBuildTool:
     def test_no_context_fails_closed(self) -> None:
         async def run() -> dict[str, object]:
             return await scratch_build.coroutine(
+                purpose="test missing context",
                 operations=[_op_create()],
                 runtime=_runtime_with_context(None),
             )
@@ -917,6 +1283,7 @@ class TestScratchBuildTool:
     def test_wrong_context_type_fails_closed(self) -> None:
         async def run() -> dict[str, object]:
             return await scratch_build.coroutine(
+                purpose="test wrong context",
                 operations=[_op_create()],
                 runtime=_runtime_with_context("not a context"),
             )
@@ -932,6 +1299,7 @@ class TestScratchBuildTool:
 
         async def run() -> dict[str, object]:
             return await scratch_build.coroutine(
+                purpose="test missing scratch",
                 operations=[_op_create()],
                 runtime=_runtime_with_context(ctx),
             )
@@ -945,6 +1313,7 @@ class TestScratchBuildTool:
 
         async def run() -> dict[str, object]:
             return await scratch_build.coroutine(
+                purpose="test bad preserve",
                 operations=[_op_create()],
                 runtime=_runtime_with_context(self._ctx(provider)),
                 preserve_on_failure="yes",  # type: ignore[arg-type]
@@ -967,6 +1336,7 @@ class TestScratchBuildTool:
 
         async def run() -> dict[str, object]:
             return await scratch_build.coroutine(
+                purpose="build one box",
                 operations=[_op_create()],
                 runtime=_runtime_with_context(self._ctx(provider)),
             )
@@ -1029,6 +1399,7 @@ def _commit_result_dict(
             "orientation": {"passed": 1, "failed": 0, "total": 1},
             "health": {"hard_errors_count": 0, "soft_warnings_count": 0},
         },
+        "warnings": [],
     }
 
 
@@ -1356,6 +1727,9 @@ class _CommitFakeProvider:
         target_name: str,
         orientation_checks: tuple = (),
         skip_structure_check: bool = False,
+        # Mirrors the real ScratchProvider contract: a Mapping, NOT the
+        # coordinator's internal pair-tuple.
+        annotations: Mapping[str, str] | None = None,
     ) -> ScratchCommitResult:
         self.commit_calls.append({
             "sandbox_id": sandbox_id,
@@ -1363,6 +1737,7 @@ class _CommitFakeProvider:
             "target_name": target_name,
             "orientation_checks": orientation_checks,
             "skip_structure_check": skip_structure_check,
+            "annotations": annotations,
         })
         if self._raise is not None:
             raise self._raise
@@ -1391,6 +1766,7 @@ class TestScratchCoordinatorCommit:
         assert result["committed"] is True
         assert result["refused"] is False
         assert result["final_path"] == "/obj/my_asset"
+        assert list(result).index("receipt") < list(result).index("gates")
         assert len(provider.commit_calls) == 1
         assert provider.commit_calls[0]["target_name"] == "my_asset"
 
@@ -1482,6 +1858,61 @@ class TestScratchCoordinatorCommit:
 
         asyncio.run(run())
         assert provider.commit_calls[0]["skip_structure_check"] is True
+
+    def test_commit_annotations_reach_provider_as_mapping(self, tmp_path: Path) -> None:
+        # Regression: the coordinator used to forward its internal pair-tuple
+        # straight into the provider's Mapping[str, str] contract; the real
+        # request builder then crashed with "'tuple' object has no attribute
+        # 'items'" on every commit that carried task-graph annotations.
+        from eee_agent.runtime.database import RuntimeDatabase
+        from eee_agent.runtime.task_graph import TaskGraphStore
+
+        async def run() -> tuple[_CommitFakeProvider, dict[str, object]]:
+            database = await RuntimeDatabase.open(tmp_path / "app.sqlite")
+            try:
+                store = TaskGraphStore(database)
+                now = datetime.now(timezone.utc).isoformat()
+                async with database.write_transaction() as conn:
+                    await conn.execute(
+                        "INSERT INTO sessions(session_id,title,status,created_at,"
+                        "updated_at,last_seq,replay_floor_seq) VALUES "
+                        "('sess_1','t','active',?,?,0,0)",
+                        (now, now),
+                    )
+                    await conn.execute(
+                        "INSERT INTO runs(run_id,session_id,status,user_input,"
+                        "created_at,model_snapshot_json) VALUES "
+                        "('run_1','sess_1','Planning','build',?,'{}')",
+                        (now,),
+                    )
+                step = await store.record_step(
+                    run_id="run_1", tool="scratch_build", purpose="build tabletop"
+                )
+                await store.record_nodes(
+                    step_id=step.step_id,
+                    nodes=[("/obj/eee_scratch_run1/tabletop", "box", "输出")],
+                )
+                provider = _CommitFakeProvider(committed=True)
+                coord = ScratchCoordinator(
+                    ScratchSessionContext(
+                        provider=provider,
+                        sandbox_id="run1",
+                        run_id="run_1",
+                        task_store=store,
+                    )
+                )
+                result = await coord.commit(
+                    target_parent_path="/obj", target_name="asset"
+                )
+                return provider, result
+            finally:
+                await database.close()
+
+        provider, result = asyncio.run(run())
+        assert result["committed"] is True
+        annotations = provider.commit_calls[0]["annotations"]
+        assert type(annotations) is dict
+        assert annotations == {"tabletop": "输出"}
 
 
 # ==========================================================================
@@ -1785,3 +2216,187 @@ class TestServiceScratchCleanup:
         sid = _sandbox_id_from_run("run with spaces!")
         assert " " not in sid
         assert all(c.isalnum() or c in "_-" for c in sid)
+
+
+class TestScratchDeleteTopologyDtos:
+    def test_delete_request_round_trip(self) -> None:
+        req = ScratchDeleteRequest.build(
+            request_id="req_d1",
+            deadline_ms=5000,
+            scene_epoch=1,
+            allowed_paths=("/obj/table1/box1", "/obj/table1/draft1"),
+            paths=("/obj/table1/draft1",),
+        )
+        parsed = ScratchDeleteRequest.from_dict(req.to_dict())
+        assert parsed.paths == ("/obj/table1/draft1",)
+        assert parsed.allowed_paths == (
+            "/obj/table1/box1",
+            "/obj/table1/draft1",
+        )
+
+    def test_delete_request_paths_must_be_allowlisted(self) -> None:
+        with pytest.raises(ValueError):
+            ScratchDeleteRequest.build(
+                request_id="req_d2",
+                deadline_ms=5000,
+                scene_epoch=1,
+                allowed_paths=("/obj/table1/box1",),
+                paths=("/obj/other/nope",),
+            )
+
+    def test_delete_request_rejects_duplicates(self) -> None:
+        with pytest.raises(ValueError):
+            ScratchDeleteRequest.build(
+                request_id="req_d3",
+                deadline_ms=5000,
+                scene_epoch=1,
+                allowed_paths=("/obj/table1/draft1",),
+                paths=("/obj/table1/draft1", "/obj/table1/draft1"),
+            )
+
+    def test_delete_and_topology_paths_reject_traversal(self) -> None:
+        with pytest.raises(ValueError):
+            ScratchDeleteRequest.build(
+                request_id="req_path",
+                deadline_ms=5000,
+                scene_epoch=1,
+                allowed_paths=("/obj/../evil",),
+                paths=("/obj/../evil",),
+            )
+        with pytest.raises(ValueError):
+            ScratchTopologyRequest.build(
+                request_id="req_path2",
+                deadline_ms=5000,
+                scene_epoch=1,
+                paths=("/obj//bad",),
+            )
+
+    def test_delete_result_round_trip(self) -> None:
+        result = ScratchDeleteResult(
+            deleted_paths=("/obj/table1/draft1",),
+            skipped=(
+                {
+                    "path": "/obj/table1/box1",
+                    "reason": "still referenced by /obj/table1/out",
+                },
+            ),
+        )
+        parsed = ScratchDeleteResult.from_dict(result.to_dict())
+        assert parsed.deleted_paths == ("/obj/table1/draft1",)
+        assert parsed.skipped[0]["path"] == "/obj/table1/box1"
+
+    def test_topology_request_round_trip(self) -> None:
+        req = ScratchTopologyRequest.build(
+            request_id="req_t1",
+            deadline_ms=5000,
+            scene_epoch=1,
+            paths=("/obj/table1/box1",),
+        )
+        parsed = ScratchTopologyRequest.from_dict(req.to_dict())
+        assert parsed.paths == ("/obj/table1/box1",)
+
+    def test_topology_result_round_trip(self) -> None:
+        result = ScratchTopologyResult(
+            nodes=(
+                {
+                    "path": "/obj/table1/box1",
+                    "exists": True,
+                    "inputs": [],
+                    "outputs": ["/obj/table1/xform1"],
+                    "display_flag": False,
+                },
+                {
+                    "path": "/obj/table1/gone",
+                    "exists": False,
+                    "inputs": [],
+                    "outputs": [],
+                    "display_flag": False,
+                },
+            ),
+        )
+        parsed = ScratchTopologyResult.from_dict(result.to_dict())
+        assert parsed.nodes[0]["outputs"] == ["/obj/table1/xform1"]
+        assert parsed.nodes[1]["exists"] is False
+
+
+def _delete_request() -> ScratchDeleteRequest:
+    return ScratchDeleteRequest.build(
+        request_id="req_del_001",
+        deadline_ms=5000,
+        scene_epoch=42,
+        allowed_paths=("/obj/table1/draft1",),
+        paths=("/obj/table1/draft1",),
+    )
+
+
+def _topology_request() -> ScratchTopologyRequest:
+    return ScratchTopologyRequest.build(
+        request_id="req_topo_001",
+        deadline_ms=5000,
+        scene_epoch=42,
+        paths=("/obj/table1/draft1",),
+    )
+
+
+@async_test
+async def test_scratch_delete_without_v2_capability_sends_no_frame() -> None:
+    fake = FakeTransport(inbox=_ack_frame(ok=True, caps=[SCRATCH_V1]))
+    client = _client(fake)
+    await client.open()
+    with pytest.raises(BridgeClientError) as exc:
+        await client.scratch_delete_nodes(_delete_request())
+    assert exc.value.code == "bridge.capability_unavailable"
+    assert len(_parse_frames(bytes(fake.outbox))) == 1
+
+
+@async_test
+async def test_scratch_topology_without_v2_capability_sends_no_frame() -> None:
+    fake = FakeTransport(inbox=_ack_frame(ok=True, caps=[SCRATCH_V1]))
+    client = _client(fake)
+    await client.open()
+    with pytest.raises(BridgeClientError) as exc:
+        await client.scratch_topology(_topology_request())
+    assert exc.value.code == "bridge.capability_unavailable"
+    assert len(_parse_frames(bytes(fake.outbox))) == 1
+
+
+@async_test
+async def test_scratch_exec_delete_op_requires_v2_capability() -> None:
+    fake = FakeTransport(inbox=_ack_frame(ok=True, caps=[SCRATCH_V1]))
+    client = _client(fake)
+    await client.open()
+    request = ScratchRequest(
+        request_id="req_scratch_del",
+        deadline_ms=5000,
+        scene_epoch=42,
+        sandbox_id="run1",
+        operations=(ScratchOp(kind="delete_node", node_name="draft1"),),
+        purpose="cleanup draft",
+    )
+    with pytest.raises(BridgeClientError) as exc:
+        await client.scratch_exec(request)
+    assert exc.value.code == "bridge.capability_unavailable"
+    assert len(_parse_frames(bytes(fake.outbox))) == 1
+
+
+@async_test
+async def test_scratch_delete_happy_path() -> None:
+    response = {
+        "protocol": _PROTO,
+        "kind": "response",
+        "request_id": "req_del_001",
+        "ok": True,
+        "result": {
+            "deleted_paths": ["/obj/table1/draft1"],
+            "skipped": [],
+        },
+    }
+    fake = FakeTransport(
+        inbox=_ack_frame(ok=True, caps=[SCRATCH_V1, SCRATCH_V2])
+        + _frame(_dumps(response))
+    )
+    client = _client(fake)
+    await client.open()
+    result = await client.scratch_delete_nodes(_delete_request())
+    assert result.deleted_paths == ("/obj/table1/draft1",)
+    assert result.skipped == ()

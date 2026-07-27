@@ -1,0 +1,13 @@
+- name: chair
+  prompt: "Build a parametric dining chair with a seat, four legs, and a backrest."
+  export_path: output/chair_eval.obj
+  expect: {min_verts: 24, min_faces: 12, bbox_min: [-0.5, -0.05, -0.5], bbox_max: [0.5, 1.3, 0.5]}
+  parts:
+    seat: {required: true, min_verts: 8}
+    legs: {required: false, min_verts: 8}
+  parameters:
+    - {name: seat_width, tab: Seat, classification: design_intent, min: 0.35, default: 0.45, max: 0.60, unit: m}
+    - {name: seat_depth, tab: Seat, classification: design_intent, min: 0.35, default: 0.45, max: 0.60, unit: m}
+  scan_expect: {mesh_components: 1, scan_tol: 0.5}
+  tags: [l4-journey, parametric]
+  regression: journey

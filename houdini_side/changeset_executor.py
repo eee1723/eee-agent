@@ -41,6 +41,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+from collections.abc import Mapping, Sequence
 from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -79,11 +80,17 @@ from eee_agent.houdini_bridge.capture import (
 from eee_agent.houdini_bridge.scratch import (
     ScratchCommitRequest,
     ScratchCommitResult,
+    ScratchDeleteRequest,
+    ScratchDeleteResult,
     ScratchDestroyRequest,
     ScratchDestroyResult,
+    ScratchExpr,
     ScratchGeometry,
+    ScratchOp,
     ScratchRequest,
     ScratchResult,
+    ScratchTopologyRequest,
+    ScratchTopologyResult,
 )
 from eee_agent.houdini_bridge.changesets import (
     ApplyRequest,
@@ -156,7 +163,9 @@ def _gate_failure_reason(gate_report: dict) -> str:
     return "; ".join(parts)[:_MAX_ERROR_CHARS]
 
 
-def _build_commit_receipt(gate_report: dict) -> dict:
+def _build_commit_receipt(
+    gate_report: dict, parameters: tuple[object, ...] = ()
+) -> dict:
     """Build the tamper-evident verification receipt for a commit verdict.
 
     The agent's report must reference fields from this receipt rather than
@@ -168,7 +177,7 @@ def _build_commit_receipt(gate_report: dict) -> dict:
     health_detail = health_gate.get("detail", {}) if isinstance(health_gate, dict) else {}
     orientation_gate = next((g for g in gates if g.get("gate") == "orientation"), {})
     orientation_detail = orientation_gate.get("detail", {}) if isinstance(orientation_gate, dict) else {}
-    return {
+    receipt = {
         "passed": gate_report.get("passed", False),
         "orientation": {
             "passed": orientation_detail.get("passed", 0) if isinstance(orientation_detail, dict) else 0,
@@ -180,11 +189,110 @@ def _build_commit_receipt(gate_report: dict) -> dict:
             "soft_warnings_count": health_detail.get("soft_warnings_count", 0) if isinstance(health_detail, dict) else 0,
         },
     }
+    if parameters:
+        tabs: dict[str, list[str]] = {}
+        ranges: dict[str, dict[str, object]] = {}
+        for item in parameters:
+            tabs.setdefault(item.tab, []).append(item.name)
+            if item.classification == "design_intent":
+                ranges[item.name] = {
+                    "min": item.min, "default": item.default, "max": item.max
+                }
+        receipt["parameter_tabs"] = tabs
+        receipt["parameter_ranges"] = ranges
+    return receipt
 
 
 # Bounds mirrored from the scratch DTO module for error-text truncation.
 _MAX_ERROR_CHARS = 1000
 _MAX_ERRORS = 32
+
+_SCRATCH_EXPR_BINOPS = {"add": "+", "sub": "-", "mul": "*", "div": "/"}
+
+
+def _resolve_scratch_ref(
+    hou: object, container_path: str, target_path: str, ref: str
+) -> str:
+    """Resolve a sandbox parm ref to an absolute ``node/parm`` path.
+
+    Relative refs resolve against the TARGET node's path (``..`` walks up).
+    The resolved node must live inside the sandbox container, must exist, and
+    must carry the named parm; anything else fails closed with a bounded
+    message that identifies the offending ref.
+    """
+    if ref.startswith("/"):
+        resolved: list[str] = []
+        segments = ref[1:].split("/")
+    else:
+        resolved = [s for s in target_path.split("/") if s]
+        segments = ref.split("/")
+    for segment in segments:
+        if segment == "..":
+            if not resolved:
+                raise _scratch_failed(
+                    f"expression ref escapes above root: {ref}"
+                )
+            resolved.pop()
+        else:
+            resolved.append(segment)
+    if len(resolved) < 2:
+        raise _scratch_failed(f"expression ref is not a parm path: {ref}")
+    node_path = "/" + "/".join(resolved[:-1])
+    parm_name = resolved[-1]
+    if node_path != container_path and not node_path.startswith(container_path + "/"):
+        raise _scratch_failed(
+            f"expression ref escapes the sandbox: {ref}"
+        )
+    ref_node = hou.node(node_path)  # type: ignore[attr-defined]
+    if ref_node is None:
+        raise _scratch_failed(f"expression ref node not found: {ref}")
+    if ref_node.parm(parm_name) is None:
+        raise _scratch_failed(f"expression ref parm not found: {ref}")
+    return f"{node_path}/{parm_name}"
+
+
+def _render_scratch_expr(
+    hou: object, container_path: str, target_path: str, expr: ScratchExpr
+) -> str:
+    """Render a validated ScratchExpr to a bounded Hscript expression string."""
+    if expr.kind == "num":
+        return repr(expr.value)
+    if expr.kind == "ref":
+        abs_parm = _resolve_scratch_ref(hou, container_path, target_path, expr.path)
+        return f'ch("{abs_parm}")'
+    if expr.kind == "op":
+        if expr.name == "neg":
+            inner = _render_scratch_expr(hou, container_path, target_path, expr.args[0])
+            return f"(-{inner})"
+        symbol = _SCRATCH_EXPR_BINOPS[expr.name]
+        left = _render_scratch_expr(hou, container_path, target_path, expr.args[0])
+        right = _render_scratch_expr(hou, container_path, target_path, expr.args[1])
+        return f"({left} {symbol} {right})"
+    rendered_args = ", ".join(
+        _render_scratch_expr(hou, container_path, target_path, arg)
+        for arg in expr.args
+    )
+    return f"{expr.name}({rendered_args})"
+
+
+def _apply_scratch_expr(
+    hou: object, container_path: str, node: object, parm: object, op: ScratchOp
+) -> None:
+    """Set a typed expression on a numeric scratch parm (fail-closed)."""
+    template = parm.parmTemplate()  # type: ignore[attr-defined]
+    template_type = template.type() if template is not None else None
+    numeric = (hou.parmTemplateType.Float, hou.parmTemplateType.Int)  # type: ignore[attr-defined]
+    if template_type not in numeric:
+        raise _scratch_failed(
+            f"expression target parm is not numeric: {op.node_name}/{op.parm}"
+        )
+    rendered = _render_scratch_expr(hou, container_path, node.path(), op.expr)  # type: ignore[attr-defined,arg-type]
+    try:
+        parm.setExpression(rendered, hou.exprLanguage.Hscript)  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001 — a rejected expression is an op failure
+        raise _scratch_failed(
+            f"expression rejected on {op.node_name}/{op.parm}: {exc}"[:_MAX_ERROR_CHARS]
+        ) from exc
 
 
 def _ambiguous() -> HoudiniAdapterError:
@@ -820,6 +928,50 @@ def _wire_equal(actual: WireRef | None, expected: WireRef | None) -> bool:
 
 _RECEIPT_CACHE_MAX = 256
 _UNDO_LABEL_PREFIX = "EEE Agent - "
+
+_LAYOUT_COLUMN_WIDTH = 3.0
+_LAYOUT_ROW_HEIGHT = 2.0
+
+
+def _layered_layout(
+    node_paths: Sequence[str],
+    edges: Mapping[str, Sequence[str]],
+    *,
+    anchor: tuple[float, float],
+) -> dict[str, tuple[float, float]]:
+    """Return a deterministic layered layout for a bounded node set.
+
+    The input order is the stable tie-break. Edges outside the set are ignored
+    and cycles are broken at depth zero, so malformed topology can never make
+    finalization recurse forever.
+    """
+    members = set(node_paths)
+    depths: dict[str, int] = {}
+    visiting: set[str] = set()
+
+    def depth(path: str) -> int:
+        if path in depths:
+            return depths[path]
+        if path in visiting:
+            return 0
+        visiting.add(path)
+        upstream = [u for u in edges.get(path, ()) if u in members]
+        value = 0 if not upstream else 1 + max(depth(u) for u in upstream)
+        visiting.discard(path)
+        depths[path] = value
+        return value
+
+    columns: dict[int, list[str]] = {}
+    for path in node_paths:
+        columns.setdefault(depth(path), []).append(path)
+    positions: dict[str, tuple[float, float]] = {}
+    for column, paths in columns.items():
+        for row, path in enumerate(paths):
+            positions[path] = (
+                anchor[0] + column * _LAYOUT_COLUMN_WIDTH,
+                anchor[1] - row * _LAYOUT_ROW_HEIGHT,
+            )
+    return positions
 
 
 def _frozen() -> HoudiniAdapterError:
@@ -2028,6 +2180,21 @@ class ChangeSetExecutor:
 
     # --------------------------------------------------------------- scratch sandbox
 
+    def _resolve_scratch_node(
+        self, container_path: str, node_index: dict[str, object], ref: str,
+    ) -> object | None:
+        """Resolve a scratch-relative ref without silently falling back to root."""
+        if ref == "":
+            return self._hou.node(container_path)
+        node = node_index.get(ref)
+        if node is not None:
+            return node
+        if ref.startswith("/") or "\\" in ref or any(
+            segment in ("", ".", "..") for segment in ref.split("/")
+        ):
+            return None
+        return self._hou.node(f"{container_path}/{ref}")
+
     def scratch_exec(self, request: ScratchRequest) -> ScratchResult:
         """Build/extend a reserved scratch container and return diagnostics.
 
@@ -2077,18 +2244,23 @@ class ChangeSetExecutor:
 
                 for op in request.operations:
                     if op.kind == "create_node":
-                        parent = node_index.get(op.parent, container)
+                        parent = self._resolve_scratch_node(
+                            container_path, node_index, op.parent
+                        )
+                        if parent is None:
+                            raise _scratch_failed(
+                                f"create_node parent not found: {op.parent}"
+                            )
                         node = parent.createNode(op.node_type, op.node_name)
                         created_this_call.append(node)
-                        node_index[op.node_name] = node
+                        key = f"{op.parent}/{op.node_name}" if op.parent else op.node_name
+                        node_index[key] = node
                         output_node_path = node.path()
                         applied += 1
                     elif op.kind == "set_parm":
-                        node = node_index.get(op.node_name)
-                        if node is None:
-                            node = hou.node(
-                                f"{container_path}/{op.node_name}"
-                            )
+                        node = self._resolve_scratch_node(
+                            container_path, node_index, op.node_name
+                        )
                         if node is None:
                             raise _scratch_failed(
                                 f"set_parm target node not found: {op.node_name}"
@@ -2098,25 +2270,41 @@ class ChangeSetExecutor:
                             raise _scratch_failed(
                                 f"parm not found on {op.node_name}: {op.parm}"
                             )
-                        parm.set(op.value)
+                        if op.expr is not None:
+                            _apply_scratch_expr(
+                                hou, container_path, node, parm, op
+                            )
+                        else:
+                            parm.set(op.value)
                         applied += 1
                     elif op.kind == "connect":
-                        node = node_index.get(op.node_name)
-                        if node is None:
-                            node = hou.node(
-                                f"{container_path}/{op.node_name}"
-                            )
-                        source = node_index.get(op.source)
-                        if source is None:
-                            source = hou.node(
-                                f"{container_path}/{op.source}"
-                            )
+                        node = self._resolve_scratch_node(
+                            container_path, node_index, op.node_name
+                        )
+                        source = self._resolve_scratch_node(
+                            container_path, node_index, op.source
+                        )
                         if node is None or source is None:
                             raise _scratch_failed(
                                 f"connect endpoints not found: "
                                 f"{op.node_name} or {op.source}"
                             )
                         node.setInput(op.input_index, source, op.source_output_index)
+                        applied += 1
+                    elif op.kind == "delete_node":
+                        node = self._resolve_scratch_node(
+                            container_path, node_index, op.node_name
+                        )
+                        if node is None:
+                            raise _scratch_failed(
+                                f"delete_node target node not found: {op.node_name}"
+                            )
+                        node.destroy()
+                        for key, value in list(node_index.items()):
+                            if value is node:
+                                node_index.pop(key, None)
+                        if output_node_path == node.path():
+                            output_node_path = container_path
                         applied += 1
         except HoudiniAdapterError:
             failure = sys.exc_info()[1]  # type: ignore[assignment]
@@ -2201,6 +2389,97 @@ class ChangeSetExecutor:
             missing=False,
         )
 
+    def delete_nodes(self, request: ScratchDeleteRequest) -> ScratchDeleteResult:
+        """Delete allowlisted nodes, refusing nodes with external consumers."""
+        binding = self.binding()
+        if binding.scene_epoch != request.scene_epoch:
+            raise _stale("The scene changed before the delete operation could run.")
+        hou = self._hou
+        allowed = set(request.allowed_paths)
+        delete_set = set(request.paths)
+        deleted: list[str] = []
+        skipped: list[dict[str, object]] = []
+        with hou.undos.group(_UNDO_LABEL_PREFIX + "cleanup"):
+            for path in request.paths:
+                if path not in allowed:
+                    skipped.append({"path": path, "reason": "not in the allowlist"})
+                    continue
+                node = hou.node(path)
+                if node is None:
+                    skipped.append({"path": path, "reason": "node does not exist"})
+                    continue
+                try:
+                    consumers = [output.path() for output in (node.outputs() or [])]
+                except Exception as exc:  # noqa: BLE001
+                    skipped.append(
+                        {
+                            "path": path,
+                            "reason": f"topology read failed: {exc}"[:_MAX_ERROR_CHARS],
+                        }
+                    )
+                    continue
+                external = [consumer for consumer in consumers if consumer not in delete_set]
+                if external:
+                    skipped.append(
+                        {
+                            "path": path,
+                            "reason": f"still referenced by {external[0]}",
+                        }
+                    )
+                    continue
+                try:
+                    node.destroy()
+                    deleted.append(path)
+                except Exception as exc:  # noqa: BLE001
+                    skipped.append(
+                        {
+                            "path": path,
+                            "reason": f"destroy failed: {exc}"[:_MAX_ERROR_CHARS],
+                        }
+                    )
+        return ScratchDeleteResult(
+            deleted_paths=tuple(deleted), skipped=tuple(skipped)
+        )
+
+    def scratch_topology(
+        self, request: ScratchTopologyRequest
+    ) -> ScratchTopologyResult:
+        """Read-only bounded wiring facts for cleanup analysis."""
+        binding = self.binding()
+        if binding.scene_epoch != request.scene_epoch:
+            raise _stale("The scene changed before the topology query could run.")
+        hou = self._hou
+        nodes: list[dict[str, object]] = []
+        for path in request.paths:
+            node = hou.node(path)
+            if node is None:
+                nodes.append(
+                    {
+                        "path": path,
+                        "exists": False,
+                        "inputs": [],
+                        "outputs": [],
+                        "display_flag": False,
+                    }
+                )
+                continue
+            inputs = [
+                src.path()
+                for src in (node.inputs() or ())  # type: ignore[attr-defined]
+                if src is not None
+            ][:_MAX_ERRORS]
+            outputs = [output.path() for output in (node.outputs() or [])][:_MAX_ERRORS]
+            nodes.append(
+                {
+                    "path": path,
+                    "exists": True,
+                    "inputs": inputs,
+                    "outputs": outputs,
+                    "display_flag": bool(node.isDisplayFlagSet()),
+                }
+            )
+        return ScratchTopologyResult(nodes=tuple(nodes))
+
     def scratch_commit(self, request: ScratchCommitRequest) -> ScratchCommitResult:
         """Promote a verified sandbox into the real scene through hard gates.
 
@@ -2244,7 +2523,7 @@ class ChangeSetExecutor:
 
         if not gate_report["passed"]:
             # Refused: preserve the sandbox. Build a receipt + verdict.
-            receipt = _build_commit_receipt(gate_report)
+            receipt = _build_commit_receipt(gate_report, request.parameters)
             return ScratchCommitResult(
                 committed=False,
                 refused=True,
@@ -2262,6 +2541,7 @@ class ChangeSetExecutor:
         # left half-promoted (renamed but not moved).
         original_name = container.name()
         moved = False
+        finalize_warnings: list[str] = []
         promote_failure: BaseException | None = None
         try:
             with hou.undos.group(_UNDO_LABEL_PREFIX + "scratch.commit"):
@@ -2284,6 +2564,10 @@ class ChangeSetExecutor:
                 if container.parent().path() != request.target_parent_path:
                     container.move(target_parent)
                     moved = True
+                finalize_warnings = self._finalize_commit(
+                    container, output_node, final_path, request.annotations,
+                    request.parameters,
+                )
         except HoudiniAdapterError:
             promote_failure = sys.exc_info()[1]  # type: ignore[assignment]
         except Exception as exc:  # noqa: BLE001 — classify any HOM failure
@@ -2317,7 +2601,42 @@ class ChangeSetExecutor:
                 f"{promote_failure}; rollback: {rollback_error}"[:_MAX_ERROR_CHARS]
             ) from promote_failure
 
-        receipt = _build_commit_receipt(gate_report)
+        # Houdini can recompute network flags when a container is renamed or
+        # moved. Re-assert cosmetic state after the promotion group closes;
+        # this remains best-effort and never changes the hard-gate verdict.
+        # Resolve fresh HOM handles after rename/move; retained handles can be
+        # stale for network-flag writes in Houdini even though their path reads.
+        fresh_container = hou.node(final_path) or container
+        output_name = output_node.name()
+        fresh_output = hou.node(f"{final_path}/{output_name}") or output_node
+        finalize_warnings.extend(
+            self._finalize_commit(
+                fresh_container, fresh_output, final_path, request.annotations,
+                request.parameters,
+            )
+        )
+        # Idempotent safety net: re-assert the flags on freshly resolved
+        # handles after the container rename/move, so a stale pre-promotion
+        # handle can never silently drop the write.
+        try:
+            with hou.undos.disabler():
+                fresh_output.setDisplayFlag(True)
+                if fresh_output.type().category().name() == "Sop":
+                    fresh_output.setRenderFlag(True)
+                # A second fresh lookup flushes Houdini's network-item cache
+                # after a parent rename/move.
+                refreshed_output = hou.node(f"{final_path}/{output_name}")
+                if refreshed_output is not None:
+                    refreshed_output.setDisplayFlag(True)
+                    if refreshed_output.type().category().name() == "Sop":
+                        refreshed_output.setRenderFlag(True)
+            if not fresh_output.isDisplayFlagSet():  # type: ignore[attr-defined]
+                finalize_warnings.append("display flag did not persist")
+            elif fresh_output.type().category().name() == "Sop" and not fresh_output.isRenderFlagSet():  # type: ignore[attr-defined]
+                finalize_warnings.append("render flag did not persist")
+        except Exception as exc:  # noqa: BLE001
+            finalize_warnings.append(f"display flag failed: {exc}"[:_MAX_ERROR_CHARS])
+        receipt = _build_commit_receipt(gate_report, request.parameters)
         return ScratchCommitResult(
             committed=True,
             refused=False,
@@ -2325,22 +2644,163 @@ class ChangeSetExecutor:
             reason="",
             gates=tuple(gate_report["gates"]),
             receipt=receipt,
+            warnings=tuple(finalize_warnings),
         )
 
     def _scratch_output_node(self, container: object) -> object:
-        """Return the output (display) node of the sandbox container.
+        """Return the output (terminal) node of the sandbox container.
 
-        Falls back to the container itself if no display flag is set.
+        Prefers the unique sink — the child with no downstream connections.
+        The sandbox display flag is only an accidental creation default
+        (``scratch_exec`` never sets it), so it can point at a mid-chain
+        node; committing the flag holder instead of the chain end would
+        verify and publish the wrong geometry. Ambiguous networks (zero or
+        multiple sinks) fall back to the display-flag holder, then the last
+        child, then the container itself.
         """
         try:
-            children = container.children()  # type: ignore[attr-defined]
-            for child in children:
-                if getattr(child, "isDisplayFlagSet", lambda: False)():
-                    return child
-            # No display flag: use the last child, else the container.
-            return children[-1] if children else container
+            children = list(container.children())  # type: ignore[attr-defined]
         except Exception:
             return container
+        if not children:
+            return container
+        sinks: list[object] = []
+        for child in children:
+            try:
+                if not (child.outputs() or []):  # type: ignore[attr-defined]
+                    sinks.append(child)
+            except Exception:  # noqa: BLE001 — unreadable node is not a sink
+                pass
+        if len(sinks) == 1:
+            return sinks[0]
+        if sinks:
+            # Multiple sinks: an assembled asset's output is downstream of
+            # the parts (a merge/output null), while a stray disconnected
+            # node (e.g. a leftover default box) has no inputs. Prefer the
+            # sink with the most wired inputs so junk can never hijack the
+            # commit output and display flag; ties keep children order.
+            def _in_degree(node: object) -> int:
+                try:
+                    return sum(
+                        1
+                        for src in (node.inputs() or ())  # type: ignore[attr-defined]
+                        if src is not None
+                    )
+                except Exception:  # noqa: BLE001
+                    return 0
+
+            connected = [sink for sink in sinks if _in_degree(sink) > 0]
+            if connected:
+                return max(connected, key=_in_degree)
+        for child in children:
+            if getattr(child, "isDisplayFlagSet", lambda: False)():
+                return child
+        return children[-1]
+
+    def _finalize_commit(
+        self,
+        container: object,
+        output_node: object,
+        final_path: str,
+        annotations: tuple[tuple[str, str], ...],
+        parameters: tuple[object, ...] = (),
+    ) -> list[str]:
+        """Best-effort cosmetic finalization inside the commit undo group."""
+        warnings: list[str] = []
+        hou = self._hou
+        # Prefer a fresh path lookup: a HOM handle captured before a network
+        # rename/move can silently ignore flag writes after promotion.
+        try:
+            resolved = hou.node(f"{final_path}/{output_node.name()}")
+            if resolved is not None:
+                output_node = resolved
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            children = list(container.children())  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001
+            children = []
+            warnings.append(f"layout skipped: cannot list committed nodes: {exc}")
+        if children:
+            try:
+                edges: dict[str, tuple[str, ...]] = {}
+                xs: list[float] = []
+                ys: list[float] = []
+                def descendants(parent: object) -> list[object]:
+                    found: list[object] = []
+                    for child in parent.children() or ():  # type: ignore[attr-defined]
+                        found.append(child)
+                        found.extend(descendants(child))
+                    return found
+                all_children = descendants(container)
+                for child in all_children:
+                    upstream: list[str] = []
+                    # node.inputs() is the reliable upstream accessor;
+                    # inputConnections().outputNode() returns the node itself
+                    # in 21.0.440 (see _read_wire_source).
+                    for src in child.inputs() or ():
+                        if src is not None:
+                            upstream.append(src.path())
+                    edges[child.path()] = tuple(upstream)
+                    pos = child.position()
+                    xs.append(float(pos[0]))
+                    ys.append(float(pos[1]))
+                positions = _layered_layout(
+                    [child.path() for child in all_children],
+                    edges,
+                    anchor=(min(xs), max(ys)),
+                )
+                for child in all_children:
+                    target = positions.get(child.path())
+                    if target is not None:
+                        child.setPosition(target)
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"layout failed: {exc}")
+
+        try:
+            output_node.setDisplayFlag(True)  # type: ignore[attr-defined]
+            try:
+                category = output_node.type().category().name()  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                category = ""
+            if category == "Sop":
+                output_node.setRenderFlag(True)  # type: ignore[attr-defined]
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"display flag failed: {exc}")
+
+        if annotations:
+            try:
+                root = container.path().rstrip("/")
+                all_nodes: dict[str, object] = {}
+                for child in (container.children() or ()):  # type: ignore[attr-defined]
+                    stack = [child]
+                    while stack:
+                        current = stack.pop()
+                        rel = current.path()[len(root) + 1:]
+                        all_nodes[rel] = current
+                        stack.extend(list(current.children() or ()))
+                by_name = all_nodes
+            except Exception:  # noqa: BLE001
+                by_name = {}
+            for name, comment in annotations:
+                node = by_name.get(name)
+                if node is None:
+                    warnings.append(f"comment skipped: no committed node at {name}")
+                    continue
+                try:
+                    node.setComment(comment)
+                    node.setGenericFlag(hou.nodeFlag.DisplayComment, True)  # type: ignore[attr-defined]
+                except Exception as exc:  # noqa: BLE001
+                    warnings.append(f"comment failed on {name}: {exc}")
+        if parameters:
+            try:
+                manifest_json = canonical_json_dumps(
+                    [item.to_dict() for item in parameters]
+                )
+                container.setComment(manifest_json[:8192])
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"parameter manifest comment failed: {exc}")
+        return [warning[:_MAX_ERROR_CHARS] for warning in warnings[:_MAX_ERRORS]]
 
     def _run_scratch_gates(
         self,
@@ -2384,7 +2844,10 @@ class ChangeSetExecutor:
                 "hard_failures": [cook_gate],
             }
 
-        bake = verify_world_axes_baked(output_node)
+        bake = verify_world_axes_baked(
+            output_node,
+            require_component_ids=bool(orientation_checks),
+        )
         if skip_structure_check:
             structure = {
                 "gate": "structure", "passed": True, "hard": True,

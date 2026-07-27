@@ -506,6 +506,9 @@ class RuntimeService:
         self._sessions = SessionRepository(database)
         self._runs = RunRepository(database)
         self._events = EventStore(database)
+        from eee_agent.runtime.task_graph import TaskGraphStore
+
+        self._task_store = TaskGraphStore(database)
         self._artifacts = ArtifactStore(database, paths.artifacts_dir)
         self._callbacks: set[EventCallback] = set()
         self._tasks: dict[str, asyncio.Task[None]] = {}
@@ -551,6 +554,12 @@ class RuntimeService:
             and isinstance(changeset_bridge_provider, ScratchProvider)
             else None
         )
+        # Sketch rendering is local (headless browser, no bridge), so it is
+        # always constructed; a missing browser fails closed at call time
+        # with sketch.browser_missing rather than disabling the tool.
+        from eee_agent.sketch import ChromeSketchRenderer
+
+        self._sketch_renderer = ChromeSketchRenderer(paths.artifacts_dir / "sketches")
         # Trusted ChangeSet approval service. It shares this service's EventStore
         # so proposal/decision events commit in the same transaction as the
         # changeset/approval mutation, and it is constructed with injected
@@ -1540,6 +1549,26 @@ class RuntimeService:
         )
         return tuple(summary.to_dict() for summary in summaries)
 
+    async def list_task_steps(self, run_id: str) -> list[dict[str, object]]:
+        """Return at most the newest 50 task-graph steps for the panel."""
+        store = getattr(self, "_task_store", None)
+        if store is None or type(run_id) is not str or not run_id:
+            return []
+        try:
+            steps = await store.list_run_steps(run_id)
+        except Exception:
+            return []
+        return [
+            {
+                "seq": step.seq,
+                "tool": step.tool,
+                "purpose": step.purpose,
+                "status": step.status,
+                "node_count": len(step.nodes),
+            }
+            for step in steps[-50:]
+        ]
+
     async def reject_changeset(
         self, change_id: str, changeset_digest: str
     ) -> dict[str, object]:
@@ -1885,11 +1914,19 @@ class RuntimeService:
         if self._modeling_catalog_provider is not None:
             modeling = await self._build_modeling_context(session_id, run_id)
         scratch = self._build_scratch_context(run_id)
+        task_graph = None
+        task_store = getattr(self, "_task_store", None)
+        if task_store is not None:
+            from eee_agent.runtime.task_graph import TaskGraphToolContext
+
+            task_graph = TaskGraphToolContext(store=task_store, run_id=run_id)
         return RuntimeToolContext(
             read_only=self._read_only_provider,
             knowledge=self._knowledge,
             modeling=modeling,
             scratch=scratch,
+            sketch=getattr(self, "_sketch_renderer", None),
+            task_graph=task_graph,
         )
 
     def _build_scratch_context(self, run_id: str) -> object | None:
@@ -1916,7 +1953,12 @@ class RuntimeService:
         # container name is a valid Houdini node name.
         sandbox_id = _sandbox_id_from_run(run_id)
         try:
-            session_ctx = ScratchSessionContext(provider=provider, sandbox_id=sandbox_id)
+            session_ctx = ScratchSessionContext(
+                provider=provider,
+                sandbox_id=sandbox_id,
+                run_id=run_id,
+                task_store=getattr(self, "_task_store", None),
+            )
         except (TypeError, ValueError):
             _log.exception(
                 "scratch context build failed (sandbox_id=%s)", sandbox_id

@@ -690,8 +690,12 @@ def test_factory_opt_in_modeling_adds_modeling_tools(monkeypatch) -> None:
     assert runner._graph is sentinel  # noqa: SLF001
     assert {tool.name for tool in captured["tools"]} == {
         *EXPECTED_READ_ONLY,
-        "scratch_build",
-        "scratch_commit",
+            "scratch_build",
+            "scratch_commit",
+            "cleanup_nodes",
+            "task_graph_status",
+            "render_sketch",
+        "verify_geometry",
     }
     assert captured["context_schema"].__name__ == "RuntimeToolContext"
 
@@ -707,7 +711,15 @@ def test_agent_runner_builds_only_secure_tools(monkeypatch) -> None:
     )
     build_agent_runner(object(), modeling=True)
     names = {item.name for item in captured["tools"]}
-    assert names == {*EXPECTED_READ_ONLY, "scratch_build", "scratch_commit"}
+    assert names == {
+        *EXPECTED_READ_ONLY,
+            "scratch_build",
+            "scratch_commit",
+            "cleanup_nodes",
+            "task_graph_status",
+        "render_sketch",
+        "verify_geometry",
+    }
     # The legacy propose_modeling tool is retired (Phase 3.1).
     assert "propose_modeling" not in names
     assert not names & {"create_node", "set_parms", "scene_reset", "save_hip"}

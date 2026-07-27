@@ -163,6 +163,9 @@ class ConversationView(QtWidgets.QWidget):
         self.thinking_panel = ThinkingPanel(self)
         layout.addWidget(self.activity_panel)
         layout.addWidget(self.thinking_panel)
+        from houdini_side.runtime_panel.task_graph_panel import TaskGraphPanel
+        self.task_graph_panel = TaskGraphPanel(self)
+        layout.addWidget(self.task_graph_panel)
 
         composer = QtWidgets.QHBoxLayout()
         self.input = RunRequestEdit()

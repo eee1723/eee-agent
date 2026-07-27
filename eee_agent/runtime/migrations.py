@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Exact schema v1 DDL from the approved design spec section 7.3. No IF NOT
 # EXISTS: a partially-wrong schema must surface, not be silently masked.
@@ -232,6 +232,40 @@ CREATE INDEX changesets_by_session ON changesets(session_id, change_id);
 CREATE INDEX changesets_by_state ON changesets(state, change_id);
 """
 
+# Exact schema v8 DDL (node lifecycle & task graph). Additive only: it creates
+# the per-run task graph tables and leaves every v1-v7 table untouched. No
+# IF NOT EXISTS: a partially-wrong schema must surface, not be silently masked.
+MIGRATION_V8_SQL = """
+CREATE TABLE task_steps (
+    step_id INTEGER PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL CHECK (seq > 0),
+    tool TEXT NOT NULL CHECK (tool IN (
+        'scratch_build', 'scratch_commit', 'cleanup_nodes'
+    )),
+    purpose TEXT NOT NULL CHECK (length(purpose) BETWEEN 1 AND 200),
+    status TEXT NOT NULL CHECK (status IN ('open', 'committed', 'deleted')),
+    created_at TEXT NOT NULL,
+    UNIQUE(run_id, seq)
+);
+
+CREATE INDEX task_steps_by_run ON task_steps(run_id, seq);
+
+CREATE TABLE task_nodes (
+    node_id INTEGER PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    step_id INTEGER NOT NULL REFERENCES task_steps(step_id) ON DELETE CASCADE,
+    node_path TEXT NOT NULL,
+    committed_path TEXT,
+    node_type TEXT NOT NULL,
+    note TEXT,
+    status TEXT NOT NULL CHECK (status IN ('sandbox', 'committed', 'deleted')),
+    UNIQUE(run_id, node_path)
+);
+
+CREATE INDEX task_nodes_by_run ON task_nodes(run_id, status);
+"""
+
 # Ordered migrations. Each entry is (version, SQL script). The orchestrator
 # splits the script into statements and runs them in one atomic transaction.
 MIGRATIONS: tuple[tuple[int, str], ...] = (
@@ -242,6 +276,7 @@ MIGRATIONS: tuple[tuple[int, str], ...] = (
     (5, MIGRATION_V5_SQL),
     (6, MIGRATION_V6_SQL),
     (7, MIGRATION_V7_SQL),
+    (8, MIGRATION_V8_SQL),
 )
 
 

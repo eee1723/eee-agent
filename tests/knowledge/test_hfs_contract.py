@@ -37,8 +37,10 @@ _HFS_CANDIDATES = (
 _MACHINE_PATH_RE = re.compile(r"(?:\\\\|(?<![A-Za-z0-9])[A-Za-z]:[\\/])")
 
 _REQUIRED_SKILL_PATHS = {
+    "skills/html-to-houdini/SKILL.md",
     "skills/parametric-building/SKILL.md",
     "skills/procedural-components/SKILL.md",
+    "skills/procedural-modeling/SKILL.md",
     "skills/sop-cookbook/SKILL.md",
     "skills/vex-patterns/SKILL.md",
 }
@@ -105,7 +107,7 @@ def test_corpus_entity_counts_in_audited_ranges(kb_build) -> None:
     # Sanity: the other audited kinds are present and non-empty.
     assert counts["hom_function"] > 0
     assert counts["hom_module"] > 0
-    assert counts["skill_reference"] == 4
+    assert counts["skill_reference"] == len(_REQUIRED_SKILL_PATHS)
 
 
 def test_required_operators_verified_at_build(kb_build) -> None:
@@ -201,12 +203,12 @@ def test_sop_source_scope_is_exact(kb_build) -> None:
         )
 
 
-def test_four_project_skills_represented(kb_build) -> None:
+def test_six_project_skills_represented(kb_build) -> None:
     with _store(kb_build["path"]) as store:
         rows = store.connection.execute(
             "SELECT source_path, authority FROM entities WHERE kind='skill_reference'"
         ).fetchall()
-    assert len(rows) == 4
+    assert len(rows) == 6
     assert {row[0] for row in rows} == _REQUIRED_SKILL_PATHS
     assert all(row[1] == "project_verified_skill" for row in rows)
 

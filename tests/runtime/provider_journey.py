@@ -1,4 +1,4 @@
-"""Real provider + real Houdini Runtime MVP journey adapter.
+"""Real provider + real Houdini scratch-native Runtime journey adapter.
 
 This is the adapter contract required by the acceptance harness
 ``tests/runtime/runtime_mvp_provider_e2e.py``: the harness invokes it via
@@ -12,11 +12,12 @@ evidence JSON record.
 Journey: start hython bridge worker -> open RuntimeService with the exact
 production wiring (BridgeWorkspaceFactProvider, BridgeChangeSetProvider,
 build_agent_runner(saver, modeling=True), houdini_21_minimal_catalog) ->
-create session -> run a modeling brief through the real provider -> locate
-the persisted proposal (digest) -> approve (which drives the trusted Apply)
--> receipt applied -> validation passed -> artifact captured and available ->
-close and reopen the service to prove durable event replay (last_seq) ->
-scene cleanup in the Houdini worker -> write evidence.
+create session -> run a scratch modeling brief through the real provider ->
+require scratch_build -> verify_geometry -> scratch_commit tool evidence ->
+read the committed path and geometry back through the Secure Bridge -> prove
+the run sandbox disappeared -> close and reopen the service to prove durable
+event replay (last_seq) -> scene cleanup in the Houdini worker -> write
+strict bounded evidence.
 
 Credential hygiene: provider output, prompts, and secrets are never printed
 and never written into the evidence record. stdout carries only bounded
@@ -35,7 +36,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -60,23 +60,22 @@ _STOP_FILENAME = "provider_journey.stop"
 _CLEANUP_FILENAME = "provider_journey_cleanup.json"
 _WORKER_LOG_FILENAME = "provider_journey_hython.log"
 
-_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _EVIDENCE_FIELDS = frozenset(
     {
-        "proposal_digest",
-        "approval_event",
-        "receipt_status",
-        "validation_status",
-        "artifact_status",
-        "vision_status",
-        "vision_accepted",
-        "vision_reason_code",
-        "vision_artifact_digest_match",
-        "replay_last_seq",
+        "run_status",
+        "scratch_build_seen",
+        "scratch_build_ok",
+        "geometry_verified",
+        "scratch_commit_seen",
+        "commit_status",
+        "commit_receipt_present",
+        "final_path",
+        "final_geometry_ok",
+        "sandbox_absent",
+        "restart_replay_last_seq",
         "scene_cleanup",
     }
 )
-_RECEIPT_STATUS_MAP = {"Applied": "applied", "AlreadyApplied": "already_applied"}
 _MAX_EVIDENCE_BYTES = 16 * 1024
 _REPLAY_LIMIT = 1000
 # Real provider runs emit thousands of delta events; pagination must remain
@@ -85,46 +84,87 @@ _REPLAY_MAX_PAGES = 64
 _BRIDGE_DISCOVERY_TIMEOUT_SECONDS = 180.0
 _RUN_TIMEOUT_SECONDS = 600.0
 _WORKER_STOP_TIMEOUT_SECONDS = 120.0
+_TARGET_NAME = "eee_provider_scratch_table"
+_FINAL_PATH = f"/obj/{_TARGET_NAME}"
+_OUTPUT_NAME = "tabletop"
+_REQUIRED_TOOLS = frozenset({"scratch_build", "verify_geometry", "scratch_commit"})
 
 # Bounded modeling brief. It is persisted in runtime events (normal runtime
 # behavior) but never copied into stdout/stderr or the evidence record.
 _BRIEF = (
-    "Use the scratch_build tool to create a simple parametric table in the "
-    "sandbox: one box tabletop. Set its size. Observe the cooked result, then "
-    "use scratch_commit to promote it into the real scene. Stop after the commit."
+    "Use scratch_build with purpose='build the approved tabletop test asset' "
+    "to create exactly one box node named tabletop in the run sandbox. Set "
+    "sizex=2.0, sizey=0.25, and sizez=1.2 in the same build "
+    "call. Inspect the cooked geometry returned by scratch_build. Then call "
+    "verify_geometry on the returned output_node with min_verts=8, max_verts=8, "
+    "min_faces=6, and max_faces=6. Only if verification succeeds, call "
+    "scratch_commit with target_parent_path=/obj, target_name="
+    f"{_TARGET_NAME}, skip_structure_check=true, and no orientation checks. "
+    "Do not use proposals, changesets, approvals, or propose_modeling. Stop "
+    "immediately after the successful commit."
 )
 
 
-def _extract_vision_evidence(
-    payload: object,
-    *,
-    artifact_id: str,
-    artifact_digest: str,
-) -> tuple[str, bool, str, bool] | None:
-    """Extract bounded Vision facts from a replayed read-only event payload."""
+def _tool_result(event: object) -> dict[str, object] | None:
+    """Decode one complete, bounded tool result preview."""
+    if getattr(event, "event_type", None) != "tool.completed":
+        return None
+    payload = getattr(event, "payload", None)
+    if not isinstance(payload, Mapping) or payload.get("truncated") is not False:
+        return None
+    content = payload.get("content")
+    if type(content) is not str:
+        return None
+    try:
+        result = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    return result if type(result) is dict else None
+
+
+def _tool_events(events: list[object], name: str) -> tuple[list[object], list[object]]:
+    started = [
+        event
+        for event in events
+        if getattr(event, "event_type", None) == "tool.started"
+        and isinstance(getattr(event, "payload", None), Mapping)
+        and event.payload.get("name") == name
+    ]
+    completed = [
+        event
+        for event in events
+        if getattr(event, "event_type", None) == "tool.completed"
+        and isinstance(getattr(event, "payload", None), Mapping)
+        and event.payload.get("name") == name
+    ]
+    return started, completed
+
+
+def _commit_preview_is_success(event: object) -> bool:
+    """Validate the stable prefix of the bounded scratch_commit preview.
+
+    A commit result may exceed the 600-character event preview because it
+    carries four gate details. The coordinator deliberately emits ``ok``,
+    ``committed``, ``refused``, ``final_path``, and the compact ``receipt``
+    before those variable-size fields, so those facts remain auditable even
+    when truncated. The real-scene and sandbox checks below independently
+    prove the promotion.
+    """
+    payload = getattr(event, "payload", None)
     if not isinstance(payload, Mapping):
-        return None
-    vision_status = payload.get("vision_status")
-    decision = payload.get("final_decision")
-    refs = payload.get("artifact_refs")
-    if (
-        type(vision_status) is not str
-        or not isinstance(decision, Mapping)
-        or not isinstance(refs, (list, tuple))
-        or len(refs) != 1
-    ):
-        return None
-    vision_accepted = decision.get("accepted")
-    reason_code = payload.get("vision_reason_code")
-    if type(vision_accepted) is not bool or type(reason_code) is not str:
-        return None
-    ref = refs[0]
-    digest_match = (
-        isinstance(ref, Mapping)
-        and ref.get("artifact_id") == artifact_id
-        and ref.get("sha256") == artifact_digest
+        return False
+    content = payload.get("content")
+    if type(content) is not str:
+        return False
+    compact = "".join(content.split())
+    expected = json.dumps(_FINAL_PATH)
+    return (
+        '"ok":true' in compact
+        and '"committed":true' in compact
+        and '"refused":false' in compact
+        and f'"final_path":{expected}' in compact
+        and '"receipt":{' in compact
     )
-    return vision_status, vision_accepted, reason_code, digest_match
 
 
 class _StepError(Exception):
@@ -325,7 +365,7 @@ def _service_wiring(paths: object) -> dict[str, object]:
 
 
 async def _run_journey(paths: object) -> tuple[dict[str, object], str]:
-    """Run the proposal->approval->apply->validation->artifact journey.
+    """Run the scratch_build->verify_geometry->scratch_commit journey.
 
     Returns the partial evidence record (everything except ``scene_cleanup``)
     and the session id used for the restart replay.
@@ -344,94 +384,119 @@ async def _run_journey(paths: object) -> tuple[dict[str, object], str]:
                 raise _StepError("run", f"run finished as {final.status.value}")
             _status("provider run completed")
 
-            summaries = await service.list_changesets(session.session_id, limit=16)
-            proposal = next(
+            events, _ = await _replay_all(service, session.session_id)
+            tool_events = {
+                name: _tool_events(events, name) for name in _REQUIRED_TOOLS
+            }
+            if any(not started or not completed for started, completed in tool_events.values()):
+                raise _StepError(
+                    "tools", "required scratch tool events are incomplete"
+                )
+
+            build_results = [
+                result
+                for event in tool_events["scratch_build"][1]
+                if (result := _tool_result(event)) is not None
+            ]
+            build = next(
                 (
-                    item
-                    for item in summaries
-                    if item.get("run_id") == run.run_id
-                    and item.get("state") == "AwaitingApproval"
+                    result
+                    for result in build_results
+                    if result.get("ok") is True
+                    and isinstance(result.get("geometry"), Mapping)
+                    and result["geometry"].get("point_count") == 8
+                    and result["geometry"].get("prim_count") == 6
+                    and type(result.get("output_node")) is str
+                    and result["output_node"].endswith(f"/{_OUTPUT_NAME}")
                 ),
                 None,
             )
-            if proposal is None:
-                raise _StepError("proposal", "no awaiting-approval changeset found")
-            change_id = proposal["change_id"]
-            digest = proposal["changeset_digest"]
-            if type(digest) is not str or _DIGEST_RE.fullmatch(digest) is None:
-                raise _StepError("proposal", "proposal digest is invalid")
+            if build is None:
+                raise _StepError("scratch_build", "no valid cooked build result")
 
-            decision = await service.approve_changeset(change_id, digest)
-            apply_info = decision.get("apply")
-            if type(apply_info) is not dict:
-                raise _StepError("apply", "approval did not cross the apply boundary")
-            receipt_status = _RECEIPT_STATUS_MAP.get(apply_info.get("receipt_status"))
-            if receipt_status is None:
-                raise _StepError("apply", "apply receipt was not applied")
-            _status("proposal approved and applied")
-
-            events, _ = await _replay_all(service, session.session_id)
-            if not any(e.event_type == "approval.approved" for e in events):
-                raise _StepError("approval", "approval.approved event is missing")
-            validation = next(
-                (e for e in events if e.event_type == "modeling.validation_completed"),
+            verify_results = [
+                result
+                for event in tool_events["verify_geometry"][1]
+                if (result := _tool_result(event)) is not None
+            ]
+            verified = next(
+                (
+                    result
+                    for result in verify_results
+                    if result.get("ok") is True
+                    and result.get("issues") == []
+                    and isinstance(result.get("stats"), Mapping)
+                    and result["stats"].get("verts") == 8
+                    and result["stats"].get("faces") == 6
+                ),
                 None,
             )
-            if validation is None or validation.payload.get("complete") is not True:
-                raise _StepError("validation", "post-apply validation did not pass")
-            captured = next(
-                (e for e in events if e.event_type == "modeling.artifact_captured"),
-                None,
-            )
-            if captured is None:
-                raise _StepError("artifact", "no artifact capture event")
-            artifact = captured.payload.get("artifact")
-            artifact_id = artifact.get("artifact_id") if isinstance(artifact, Mapping) else None
-            artifact_digest = artifact.get("sha256") if isinstance(artifact, Mapping) else None
-            if type(artifact_id) is not str:
-                raise _StepError("artifact", "artifact reference is invalid")
-            # ArtifactStore.get resolves only rows whose state is 'available'
-            # (same seam the offline suites assert on).
-            if await service._artifacts.get(artifact_id) is None:
-                raise _StepError("artifact", "artifact is not available")
-            _status("validation passed and artifact available")
+            if verified is None:
+                raise _StepError("verify_geometry", "geometry verification did not pass")
 
-            vision = next(
-                (e for e in events if e.event_type == "vision.evaluation_completed"),
+            commit_event = next(
+                (
+                    event
+                    for event in tool_events["scratch_commit"][1]
+                    if _commit_preview_is_success(event)
+                ),
                 None,
             )
-            if vision is None:
-                raise _StepError("vision", "no durable vision evaluation event")
-            extracted = _extract_vision_evidence(
-                vision.payload,
-                artifact_id=artifact_id,
-                artifact_digest=artifact_digest,
+            if commit_event is None:
+                raise _StepError("scratch_commit", "no committed scratch result")
+
+            from eee_agent.houdini_bridge.read_only_provider import (
+                BridgeReadOnlyProvider,
             )
-            if extracted is None:
-                raise _StepError("vision", "vision evidence is malformed")
-            (
-                vision_status,
-                vision_accepted,
-                reason_code,
-                vision_artifact_digest_match,
-            ) = extracted
+            from eee_agent.runtime.service import _sandbox_id_from_run
+
+            read_only = BridgeReadOnlyProvider(paths.state_dir)
+            final_query = await read_only.query_scene([_FINAL_PATH])
             if (
-                vision_status != "completed"
-                or not vision_artifact_digest_match
+                final_query.get("ok") is not True
+                or final_query.get("node_count") != 1
             ):
-                raise _StepError("vision", "real visual evaluation did not complete")
-            _status("vision completed with exact artifact digest")
+                raise _StepError("final_query", "committed path is unavailable")
+            final_stats = await read_only.geometry_stats(
+                f"{_FINAL_PATH}/{_OUTPUT_NAME}"
+            )
+            geometry = final_stats.get("geometry_stats")
+            if (
+                final_stats.get("ok") is not True
+                or not isinstance(geometry, Mapping)
+                or geometry.get("points") != 8
+                or geometry.get("primitives") != 6
+            ):
+                raise _StepError("final_query", "committed geometry is invalid")
+            sandbox_path = f"/obj/eee_scratch_{_sandbox_id_from_run(run.run_id)}"
+            sandbox_query = await read_only.query_scene([sandbox_path])
+            # Absence is proven two ways: an empty query result, or the
+            # bridge's not-found read error for the removed container. The
+            # bridge reports a missing node as bridge.houdini_read_failed
+            # rather than ok=True with node_count=0.
+            sandbox_absent = (
+                sandbox_query.get("ok") is True
+                and sandbox_query.get("node_count") == 0
+            ) or (
+                sandbox_query.get("ok") is False
+                and sandbox_query.get("code") == "bridge.houdini_read_failed"
+                and "not found" in str(sandbox_query.get("message", "")).lower()
+            )
+            if not sandbox_absent:
+                raise _StepError("sandbox_cleanup", "run sandbox still exists")
+            _status("scratch tools and committed scene verified")
 
     evidence = {
-        "proposal_digest": digest,
-        "approval_event": "approved",
-        "receipt_status": receipt_status,
-        "validation_status": "passed",
-        "artifact_status": "available",
-        "vision_status": vision_status,
-        "vision_accepted": vision_accepted,
-        "vision_reason_code": reason_code,
-        "vision_artifact_digest_match": vision_artifact_digest_match,
+        "run_status": "completed",
+        "scratch_build_seen": True,
+        "scratch_build_ok": True,
+        "geometry_verified": True,
+        "scratch_commit_seen": True,
+        "commit_status": "committed",
+        "commit_receipt_present": True,
+        "final_path": _FINAL_PATH,
+        "final_geometry_ok": True,
+        "sandbox_absent": True,
     }
     return evidence, session.session_id
 
@@ -470,8 +535,12 @@ async def _restart_replay(paths: object, session_id: str) -> int:
             events, last_seq = await _replay_all(service, session_id)
             if type(last_seq) is not int or last_seq < 1:
                 raise _StepError("replay", "replay last_seq is invalid")
-            if not any(e.event_type == "changeset.proposed" for e in events):
-                raise _StepError("replay", "proposal event did not survive restart")
+            for name in _REQUIRED_TOOLS:
+                started, completed = _tool_events(events, name)
+                if not started or not completed:
+                    raise _StepError(
+                        "replay", "scratch tool events did not survive restart"
+                    )
     _status("restart replay confirmed")
     return last_seq
 
@@ -524,7 +593,7 @@ def main() -> int:
         _wait_for_bridge(config, worker)
         _status("secure bridge ready")
         evidence, session_id = asyncio.run(_run_journey(config.paths))
-        evidence["replay_last_seq"] = asyncio.run(
+        evidence["restart_replay_last_seq"] = asyncio.run(
             _restart_replay(config.paths, session_id)
         )
         evidence["scene_cleanup"] = _finish_scene_cleanup(config, worker)

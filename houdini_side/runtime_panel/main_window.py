@@ -151,6 +151,7 @@ class RuntimePanel(QtWidgets.QWidget):
         # conversation card, skipping the full-snapshot inspector rebuild.
         c.streamingDelta.connect(self._on_streaming_delta)
         c.changesetsChanged.connect(self._on_changesets)
+        c.taskGraphChanged.connect(self.conversation.task_graph_panel.set_steps)
         c.artifactObserved.connect(self._on_artifact)
         c.visionObserved.connect(self._on_vision)
         c.commandSucceeded.connect(self._on_command_succeeded)

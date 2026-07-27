@@ -348,12 +348,22 @@ def build_agent_runner(
     tools = build_read_only_tools()
     if modeling:
         from eee_agent.modeling.scratch_coordinator import (
+            cleanup_nodes,
             scratch_build,
             scratch_commit,
+            task_graph_status,
+        )
+        from eee_agent.runtime.sketch_tools import (
+            render_sketch,
+            verify_geometry,
         )
 
         tools.append(scratch_build)
         tools.append(scratch_commit)
+        tools.append(cleanup_nodes)
+        tools.append(task_graph_status)
+        tools.append(render_sketch)
+        tools.append(verify_geometry)
     graph = build_agent(
         tools=tools,
         checkpointer=checkpointer,

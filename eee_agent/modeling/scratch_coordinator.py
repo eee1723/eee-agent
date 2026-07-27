@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+import logging
 from typing import Protocol, runtime_checkable
 
 from langchain.tools import ToolRuntime, tool
@@ -34,10 +35,16 @@ from eee_agent.houdini_bridge.scratch import (
     ScratchCommitResult,
     ScratchDestroyResult,
     ScratchGeometry,
+    ScratchParmDeclaration,
     ScratchOp,
     ScratchResult,
+    ScratchExpr,
 )
 from eee_agent.runtime.agent_context import RuntimeToolContext
+from eee_agent.runtime.task_graph import TaskGraphStore
+from eee_agent.runtime.task_graph import TaskGraphToolContext
+
+_log = logging.getLogger(__name__)
 
 # Bounded input limit enforced at the tool seam before the bridge wire.
 # Per-field length bounds (node name/type/parm name, sandbox id) are enforced
@@ -70,6 +77,7 @@ class ScratchProvider(Protocol):
         *,
         sandbox_id: str,
         operations: tuple[ScratchOp, ...],
+        purpose: str,
         preserve_on_failure: bool = True,
     ) -> ScratchResult: ...
 
@@ -81,6 +89,8 @@ class ScratchProvider(Protocol):
         target_name: str,
         orientation_checks: tuple = (),
         skip_structure_check: bool = False,
+        annotations: tuple[tuple[str, str], ...] = (),
+        parameters: tuple[ScratchParmDeclaration, ...] = (),
     ) -> ScratchCommitResult: ...
 
     async def scratch_destroy(
@@ -101,6 +111,8 @@ class ScratchSessionContext:
 
     provider: ScratchProvider
     sandbox_id: str
+    run_id: str = "run_1"
+    task_store: TaskGraphStore | None = None
 
     def __post_init__(self) -> None:
         if self.provider is None or not isinstance(self.provider, ScratchProvider):
@@ -109,12 +121,18 @@ class ScratchSessionContext:
             )
         if type(self.sandbox_id) is not str or not self.sandbox_id:
             raise TypeError("ScratchSessionContext.sandbox_id must be a non-empty string")
+        if type(self.run_id) is not str or not self.run_id:
+            raise TypeError("ScratchSessionContext.run_id must be a non-empty string")
+        if self.task_store is not None and type(self.task_store) is not TaskGraphStore:
+            raise TypeError("ScratchSessionContext.task_store must be a TaskGraphStore")
 
 
 class ScratchCoordinator:
     """Validate tool input, call the provider, return a bounded plain result.
 
-    Owns no state. Translates the agent's plain-dict operation list into typed
+    Records successful steps/nodes into the optional task graph store. A store
+    failure degrades recording for the rest of the run; modeling is never
+    blocked. Translates the agent's plain-dict operation list into typed
     :class:`ScratchOp` instances, delegates to the injected provider, and maps
     every failure into a bounded ``{"ok": False, ...}`` dict so the tool never
     raises into the graph.
@@ -124,26 +142,44 @@ class ScratchCoordinator:
         if type(context) is not ScratchSessionContext:
             raise TypeError("context must be an exact ScratchSessionContext")
         self._context = context
+        self._store_failed = False
+        self._expr_refs: set[str] = set()
 
     async def build(
         self,
         *,
+        purpose: str,
         operations: list[Mapping[str, object]],
         preserve_on_failure: bool = True,
     ) -> dict[str, object]:
         sandbox_id = self._context.sandbox_id
+        if (
+            type(purpose) is not str
+            or not purpose.strip()
+            or len(purpose) > 200
+        ):
+            return {
+                "ok": False,
+                "code": "scratch.input_invalid",
+                "message": "purpose must be 1..200 characters.",
+            }
         try:
             typed_ops = self._parse_operations(operations)
+            self._expr_refs.update(
+                ref for op in typed_ops if op.expr is not None for ref in _expr_refs(op.expr)
+            )
         except ScratchError as exc:
             return {"ok": False, "code": exc.code, "message": str(exc)}
         try:
             result = await self._context.provider.scratch_exec(
                 sandbox_id=sandbox_id,
                 operations=typed_ops,
+                purpose=purpose,
                 preserve_on_failure=preserve_on_failure,
             )
         except Exception as exc:  # noqa: BLE001 - bounded at this seam
             return _bridge_or_op_failure(exc, default="scratch.op_failed")
+        await self._record_build(purpose, typed_ops, result)
         return self._summarize(result)
 
     async def commit(
@@ -153,6 +189,7 @@ class ScratchCoordinator:
         target_name: str,
         orientation_checks: list[Mapping[str, object]] | None = None,
         skip_structure_check: bool = False,
+        parameters: list[Mapping[str, object]] | None = None,
     ) -> dict[str, object]:
         """Commit a verified sandbox into the real scene through hard gates.
 
@@ -181,16 +218,255 @@ class ScratchCoordinator:
         except ScratchError as exc:
             return {"ok": False, "code": exc.code, "message": str(exc)}
         try:
-            result = await self._context.provider.scratch_commit(
+            manifest = self._parse_parameters(parameters)
+            self._validate_manifest_refs(manifest)
+        except ScratchError as exc:
+            return {"ok": False, "code": exc.code, "message": str(exc)}
+        annotations = await self._commit_annotations()
+        try:
+            commit_kwargs = dict(
                 sandbox_id=sandbox_id,
                 target_parent_path=target_parent_path,
                 target_name=target_name,
                 orientation_checks=checks,
                 skip_structure_check=skip_structure_check,
+                # The provider contract is Mapping[str, str]; the internal
+                # pair-tuple is converted here so the request builder can
+                # rely on .items().
+                annotations=dict(annotations),
             )
+            if manifest:
+                commit_kwargs["parameters"] = manifest
+            result = await self._context.provider.scratch_commit(**commit_kwargs)
         except Exception as exc:  # noqa: BLE001 - bounded at this seam
             return _bridge_or_op_failure(exc, default="scratch.op_failed")
+        if result.committed:
+            await self._record_commit(result)
         return self._summarize_commit(result)
+
+    async def _record_build(
+        self,
+        purpose: str,
+        typed_ops: tuple[ScratchOp, ...],
+        result: ScratchResult,
+    ) -> None:
+        store = self._context.task_store
+        if store is None or self._store_failed:
+            return
+        try:
+            step = await store.record_step(
+                run_id=self._context.run_id, tool="scratch_build", purpose=purpose
+            )
+            created = tuple(
+                (
+                    f"{result.sandbox_root}/{op.parent + '/' if op.parent else ''}{op.node_name}",
+                    op.node_type,
+                    op.note or None,
+                )
+                for op in typed_ops
+                if op.kind == "create_node"
+            )
+            if created:
+                await store.record_nodes(step_id=step.step_id, nodes=created)
+        except Exception:  # noqa: BLE001
+            self._store_failed = True
+            _log.exception(
+                "task graph recording failed; degrading for run=%s",
+                self._context.run_id,
+            )
+
+    async def _commit_annotations(self) -> tuple[tuple[str, str], ...]:
+        store = self._context.task_store
+        if store is None or self._store_failed:
+            return ()
+        try:
+            steps = await store.list_run_steps(self._context.run_id)
+        except Exception:  # noqa: BLE001
+            self._store_failed = True
+            _log.exception(
+                "task graph read failed; committing without annotations (run=%s)",
+                self._context.run_id,
+            )
+            return ()
+        annotations: dict[str, str] = {}
+        for step in steps:
+            for node in step.nodes:
+                if node.status != "sandbox":
+                    continue
+                root = f"/obj/eee_scratch_{self._context.sandbox_id}"
+                relative = node.node_path[len(root) + 1:] if node.node_path.startswith(root + "/") else node.node_path.rsplit("/", 1)[-1]
+                annotations[relative] = (node.note or step.purpose)[:500]
+        return tuple(sorted(annotations.items()))
+
+    async def _record_commit(self, result: ScratchCommitResult) -> None:
+        store = self._context.task_store
+        if store is None or self._store_failed:
+            return
+        try:
+            await store.mark_committed(
+                run_id=self._context.run_id,
+                sandbox_root=f"/obj/eee_scratch_{self._context.sandbox_id}",
+                final_path=result.final_path,
+            )
+        except Exception:  # noqa: BLE001
+            self._store_failed = True
+            _log.exception(
+                "task graph commit recording failed; degrading for run=%s",
+                self._context.run_id,
+            )
+
+    async def cleanup(self, *, paths: list[str] | None = None) -> dict[str, object]:
+        """Suggest safe abandoned nodes, or execute an explicit deletion set."""
+        store = self._context.task_store
+        if store is None or self._store_failed:
+            return {
+                "ok": False,
+                "code": "cleanup.store_unavailable",
+                "message": "The task graph is unavailable for this run.",
+            }
+        try:
+            steps = await store.list_run_steps(self._context.run_id)
+        except Exception as exc:  # noqa: BLE001
+            return _bridge_or_op_failure(exc, default="cleanup.store_unavailable")
+        live = [
+            (step, node)
+            for step in steps
+            for node in step.nodes
+            if node.status != "deleted"
+        ]
+        if paths is None:
+            return await self._cleanup_suggest(live)
+        return await self._cleanup_execute(store, live, paths)
+
+    async def _cleanup_suggest(self, live) -> dict[str, object]:
+        if not live:
+            return {"ok": True, "phase": "suggest", "candidates": []}
+        scene_paths = tuple(node.committed_path or node.node_path for _, node in live)
+        try:
+            topo = await self._context.provider.scene_topology(paths=scene_paths)
+        except Exception as exc:  # noqa: BLE001
+            return _bridge_or_op_failure(exc, default="cleanup.topology_failed")
+        info = {entry["path"]: entry for entry in topo.nodes}
+        candidates: list[dict[str, object]] = []
+        for _step, node in live:
+            path = node.committed_path or node.node_path
+            entry = info.get(path)
+            if entry is None or not entry["exists"]:
+                candidates.append({"path": path, "reason": "no longer exists in the scene"})
+            elif not entry["outputs"]:
+                candidates.append(
+                    {"path": path, "reason": "nothing is wired downstream of it"}
+                )
+        return {"ok": True, "phase": "suggest", "candidates": candidates}
+
+    async def _cleanup_execute(self, store, live, paths: list[str]) -> dict[str, object]:
+        if type(paths) is not list or len(paths) > 64:
+            return {
+                "ok": False,
+                "code": "cleanup.input_invalid",
+                "message": "paths must be a list of at most 64 absolute node paths.",
+            }
+        requested: list[str] = []
+        for path in paths:
+            if (
+                type(path) is not str
+                or not path.startswith("/")
+                or "\\" in path
+                or ".." in path.split("/")
+            ):
+                return {
+                    "ok": False,
+                    "code": "cleanup.input_invalid",
+                    "message": "paths must contain safe absolute node paths.",
+                }
+            requested.append(path)
+        by_path = {
+            (node.committed_path or node.node_path): node for _, node in live
+        }
+        skipped: list[dict[str, object]] = []
+        sandbox_targets: list[str] = []
+        committed_targets: list[str] = []
+        for path in requested:
+            node = by_path.get(path)
+            if node is None:
+                skipped.append({"path": path, "reason": "not a node recorded for this run"})
+            elif node.status == "sandbox":
+                sandbox_root = f"/obj/eee_scratch_{self._context.sandbox_id}"
+                relative = path[len(sandbox_root) + 1:] if path.startswith(sandbox_root + "/") else ""
+                if not relative:
+                    skipped.append(
+                        {"path": path, "reason": "sandbox root deletion is unsupported"}
+                    )
+                else:
+                    sandbox_targets.append(path)
+            else:
+                committed_targets.append(path)
+        targets = sandbox_targets + committed_targets
+        safe: set[str] = set()
+        if targets:
+            try:
+                topo = await self._context.provider.scene_topology(paths=tuple(targets))
+            except Exception as exc:  # noqa: BLE001
+                return _bridge_or_op_failure(exc, default="cleanup.topology_failed")
+            delete_set = set(targets)
+            for entry in topo.nodes:
+                if not entry["exists"]:
+                    skipped.append({"path": entry["path"], "reason": "no longer exists in the scene"})
+                else:
+                    external = [out for out in entry["outputs"] if out not in delete_set]
+                    if external:
+                        skipped.append(
+                            {"path": entry["path"], "reason": f"still referenced by {external[0]}"}
+                        )
+                    else:
+                        safe.add(entry["path"])
+        sandbox_targets = [path for path in sandbox_targets if path in safe]
+        committed_targets = [path for path in committed_targets if path in safe]
+        deleted: list[str] = []
+        if sandbox_targets:
+            root = f"/obj/eee_scratch_{self._context.sandbox_id}"
+            ops = tuple(
+                ScratchOp(
+                    kind="delete_node",
+                    node_name=path[len(root) + 1:],
+                )
+                for path in sorted(
+                    sandbox_targets,
+                    key=lambda p: p.count("/"),
+                    reverse=True,
+                )
+            )
+            try:
+                await self._context.provider.scratch_exec(
+                    sandbox_id=self._context.sandbox_id,
+                    operations=ops,
+                    purpose="cleanup: delete abandoned sandbox nodes",
+                    preserve_on_failure=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _bridge_or_op_failure(exc, default="cleanup.delete_failed")
+            deleted.extend(sandbox_targets)
+        if committed_targets:
+            allowed = tuple(
+                node.committed_path
+                for _, node in live
+                if node.status == "committed" and node.committed_path
+            )
+            try:
+                result = await self._context.provider.delete_nodes(
+                    paths=tuple(committed_targets), allowed_paths=allowed
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _bridge_or_op_failure(exc, default="cleanup.delete_failed")
+            deleted.extend(result.deleted_paths)
+            skipped.extend(dict(item) for item in result.skipped)
+        if deleted:
+            try:
+                await store.mark_deleted(run_id=self._context.run_id, node_paths=deleted)
+            except Exception:  # noqa: BLE001
+                self._store_failed = True
+                _log.exception("task graph delete recording failed")
+        return {"ok": True, "phase": "execute", "deleted": deleted, "skipped": skipped}
 
     def _parse_orientation_checks(
         self, checks: object
@@ -222,6 +498,84 @@ class ScratchCoordinator:
             out.append(clean)
         return tuple(out)
 
+    def _parse_parameters(self, parameters: object) -> tuple[ScratchParmDeclaration, ...]:
+        if parameters is None:
+            return ()
+        if type(parameters) is not list:
+            raise ScratchError("scratch.input_invalid", "parameters must be a list.")
+        try:
+            return tuple(ScratchParmDeclaration.from_dict(item) for item in parameters)
+        except (TypeError, ValueError) as exc:
+            raise ScratchError("scratch.input_invalid", f"parameter manifest is invalid: {exc}") from exc
+
+    def _validate_manifest_refs(self, manifest: tuple[ScratchParmDeclaration, ...]) -> None:
+        if not manifest:
+            return
+        by_name = {item.name: item for item in manifest}
+        for item in manifest:
+            if item.classification == "derived":
+                missing = [dep for dep in item.depends_on if dep not in by_name]
+                if missing:
+                    raise ScratchError(
+                        "scratch.manifest_invalid",
+                        f"parameter {item.name} depends on undeclared {missing[0]}",
+                    )
+                for dep in item.depends_on:
+                    dep_decl = by_name[dep]
+                    dep_binding = dict(dep_decl.binding)
+                    expected_suffix = f"{dep_binding['node']}/{dep_binding['parm']}"
+                    expected_leaf = (
+                        f"{dep_binding['node'].rsplit('/', 1)[-1]}/{dep_binding['parm']}"
+                    )
+                    if not any(
+                        ref == expected_suffix
+                        or ref.endswith("/" + expected_suffix)
+                        or ref.endswith("/" + expected_leaf)
+                        for ref in self._expr_refs
+                    ):
+                        raise ScratchError(
+                            "scratch.manifest_invalid",
+                            f"parameter {item.name} depends_on {dep} but no expr ref was recorded",
+                        )
+        declared_parms = {dict(item.binding)["parm"] for item in manifest}
+        for ref in self._expr_refs:
+            parm = ref.rsplit("/", 1)[-1]
+            if parm not in declared_parms:
+                raise ScratchError(
+                    "scratch.manifest_invalid",
+                    f"expr ref {ref} has no manifest binding",
+                )
+        graph = {
+            item.name: tuple(item.depends_on)
+            for item in manifest
+            if item.classification == "derived"
+        }
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(name: str) -> None:
+            if name in visiting:
+                raise ScratchError("scratch.manifest_invalid", f"parameter dependency cycle at {name}")
+            if name in visited:
+                return
+            visiting.add(name)
+            for dep in graph.get(name, ()):
+                visit(dep)
+            visiting.remove(name)
+            visited.add(name)
+
+        for name in graph:
+            visit(name)
+
+    def _manifest_receipt(self, manifest: tuple[ScratchParmDeclaration, ...]) -> dict[str, object]:
+        tabs: dict[str, list[str]] = {}
+        ranges: dict[str, dict[str, float | int | None]] = {}
+        for item in manifest:
+            tabs.setdefault(item.tab, []).append(item.name)
+            if item.classification == "design_intent":
+                ranges[item.name] = {"min": item.min, "default": item.default, "max": item.max}
+        return {"parameter_tabs": tabs, "parameter_ranges": ranges}
+
     @staticmethod
     def _summarize_commit(result: ScratchCommitResult) -> dict[str, object]:
         return {
@@ -230,8 +584,12 @@ class ScratchCoordinator:
             "refused": result.refused,
             "final_path": result.final_path,
             "reason": result.reason,
-            "gates": [dict(g) for g in result.gates],
+            # Keep the compact receipt before variable-size gate detail so the
+            # Runtime's bounded tool.completed preview can persist auditable
+            # commit evidence even when the full result is truncated.
             "receipt": dict(result.receipt),
+            "warnings": list(result.warnings),
+            "gates": [dict(g) for g in result.gates],
         }
 
     def _parse_operations(
@@ -334,6 +692,7 @@ class ScratchToolContext:
 
 @tool
 async def scratch_build(
+    purpose: str,
     operations: list[dict[str, object]],
     runtime: ToolRuntime,
     preserve_on_failure: bool = True,
@@ -358,6 +717,9 @@ async def scratch_build(
     once. Avoid the opposite extreme too — don't dump an entire complex asset's
     whole node tree in one call, since a single bad parm then fails the whole
     batch and is harder to localize.
+
+    purpose: one sentence (1..200 chars) saying what this functional unit
+      builds and why. It is recorded in the run task graph.
 
     operations — a non-empty list (<=64) of operation objects. Each has:
       kind: "create_node" | "set_parm" | "connect"
@@ -431,7 +793,14 @@ async def scratch_build(
             "code": "scratch.input_invalid",
             "message": "preserve_on_failure must be a boolean.",
         }
+    if type(purpose) is not str or not purpose.strip() or len(purpose) > 200:
+        return {
+            "ok": False,
+            "code": "scratch.input_invalid",
+            "message": "purpose must be 1..200 characters.",
+        }
     return await scratch_context.coordinator.build(
+        purpose=purpose,
         operations=operations,
         preserve_on_failure=preserve_on_failure,
     )
@@ -444,6 +813,7 @@ async def scratch_commit(
     runtime: ToolRuntime,
     orientation_checks: list[dict[str, object]] | None = None,
     skip_structure_check: bool = False,
+    parameters: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """Promote the verified sandbox into the real scene through hard gates.
 
@@ -514,7 +884,58 @@ async def scratch_commit(
         target_name=target_name,
         orientation_checks=orientation_checks,
         skip_structure_check=skip_structure_check,
+        parameters=parameters,
     )
+
+
+@tool
+async def cleanup_nodes(
+    runtime: ToolRuntime,
+    paths: list[str] | None = None,
+) -> dict[str, object]:
+    """Suggest first, then execute fail-closed cleanup of this run's nodes."""
+    context = getattr(runtime, "context", None)
+    if type(context) is not RuntimeToolContext:
+        return {
+            "ok": False,
+            "code": "cleanup.context_invalid",
+            "message": "A trusted scratch context is unavailable.",
+        }
+    scratch_context = getattr(context, "scratch", None)
+    if type(scratch_context) is not ScratchToolContext:
+        return {
+            "ok": False,
+            "code": "cleanup.context_invalid",
+            "message": "A trusted scratch context is unavailable.",
+        }
+    return await scratch_context.coordinator.cleanup(paths=paths)
+
+
+@tool
+async def task_graph_status(runtime: ToolRuntime) -> dict[str, object]:
+    """Return this run's recorded build steps without mutating the scene."""
+    context = getattr(runtime, "context", None)
+    if type(context) is not RuntimeToolContext:
+        return {"ok": False, "code": "task_graph.context_invalid",
+                "message": "A trusted task graph context is unavailable."}
+    task_graph = getattr(context, "task_graph", None)
+    if type(task_graph) is not TaskGraphToolContext:
+        return {"ok": False, "code": "task_graph.unavailable",
+                "message": "The task graph is unavailable for this run."}
+    try:
+        steps = await task_graph.store.list_run_steps(task_graph.run_id)
+    except Exception:  # noqa: BLE001
+        return {"ok": False, "code": "task_graph.unavailable",
+                "message": "The task graph could not be read."}
+    return {
+        "ok": True,
+        "run_id": task_graph.run_id,
+        "steps": [
+            {"seq": step.seq, "tool": step.tool, "purpose": step.purpose,
+             "status": step.status, "node_count": len(step.nodes)}
+            for step in steps[-50:]
+        ],
+    }
 
 
 __all__ = [
@@ -525,4 +946,15 @@ __all__ = [
     "ScratchToolContext",
     "scratch_build",
     "scratch_commit",
+    "cleanup_nodes",
+    "task_graph_status",
 ]
+
+
+def _expr_refs(expr: ScratchExpr) -> set[str]:
+    refs: set[str] = set()
+    if expr.kind == "ref":
+        refs.add(expr.path)
+    for arg in expr.args:
+        refs.update(_expr_refs(arg))
+    return refs
