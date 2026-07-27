@@ -44,6 +44,7 @@ from eee_agent.houdini_bridge.scratch import (
     ScratchDeleteResult,
     ScratchDestroyRequest,
     ScratchDestroyResult,
+    ScratchExpr,
     ScratchGeometry,
     ScratchOp,
     ScratchRequest,
@@ -59,6 +60,7 @@ from eee_agent.houdini_bridge.scratch import (
 )
 from eee_agent.modeling.scratch_coordinator import (
     ScratchCoordinator,
+    ScratchError,
     ScratchSessionContext,
     ScratchToolContext,
     scratch_build,
@@ -239,6 +241,222 @@ class TestScratchOp:
         op = ScratchOp(kind="create_node", node_name="x", node_type="box")
         with pytest.raises(dataclasses.FrozenInstanceError):
             op.node_name = "y"  # type: ignore[misc]
+
+
+# ==========================================================================
+# ScratchExpr DTO strictness (scratch.v2 C1 typed parameter expressions)
+# ==========================================================================
+
+
+def _expr_dict() -> dict[str, object]:
+    """mul(ref ../box1/sizex, 2.0) — the canonical smoke expression."""
+    return {
+        "kind": "op",
+        "name": "mul",
+        "args": [
+            {"kind": "ref", "path": "../box1/sizex"},
+            {"kind": "num", "value": 2.0},
+        ],
+    }
+
+
+class TestScratchExpr:
+    def test_num_round_trip(self) -> None:
+        expr = ScratchExpr(kind="num", value=2.5)
+        assert expr.to_dict() == {"kind": "num", "value": 2.5}
+        assert ScratchExpr.from_dict(expr.to_dict()) == expr
+        assert ScratchExpr.from_dict({"kind": "num", "value": 2}).value == 2
+
+    def test_ref_round_trip_relative_and_absolute(self) -> None:
+        for path in ("../ctrl/sizex", "ctrl/sizex", "sizex", "/obj/eee_scratch_r/box1/sizex"):
+            expr = ScratchExpr(kind="ref", path=path)
+            assert expr.to_dict() == {"kind": "ref", "path": path}
+            assert ScratchExpr.from_dict(expr.to_dict()) == expr
+
+    def test_nested_op_func_round_trip(self) -> None:
+        expr = ScratchExpr(
+            kind="func",
+            name="clamp",
+            args=(
+                ScratchExpr(kind="op", name="add", args=(
+                    ScratchExpr(kind="ref", path="../a/width"),
+                    ScratchExpr(kind="num", value=1),
+                )),
+                ScratchExpr(kind="num", value=0.0),
+                ScratchExpr(kind="func", name="sqrt", args=(
+                    ScratchExpr(kind="num", value=16.0),
+                )),
+            ),
+        )
+        assert ScratchExpr.from_dict(expr.to_dict()) == expr
+
+    def test_num_rejects_bool_nan_inf(self) -> None:
+        for bad in (True, float("nan"), float("inf"), float("-inf")):
+            with pytest.raises((TypeError, ValueError)):
+                ScratchExpr(kind="num", value=bad)
+
+    def test_ref_rejects_injection_and_file_path_chars(self) -> None:
+        for bad in (
+            "C:/temp/x.hip",          # ':' drive path
+            "..\\ctrl\\sizex",        # backslash
+            "$HIP/x",                 # variable expansion
+            "`ls`",                   # backtick execution
+            'ch("x")',                # quotes/parens
+            "../ctrl/size x",         # whitespace
+            "a;b",                    # statement separator
+        ):
+            with pytest.raises(ValueError):
+                ScratchExpr(kind="ref", path=bad)
+
+    def test_ref_rejects_malformed_paths(self) -> None:
+        for bad in ("", "x" * 257, "../box1/", "../box1//sizex", "./sizex"):
+            with pytest.raises(ValueError):
+                ScratchExpr(kind="ref", path=bad)
+        with pytest.raises(TypeError):
+            ScratchExpr(kind="ref", path=1)  # type: ignore[arg-type]
+
+    def test_unknown_kind_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            ScratchExpr(kind="python", value=1)  # type: ignore[arg-type]
+        with pytest.raises(ValueError):
+            ScratchExpr.from_dict({"kind": "python", "value": 1})
+
+    def test_from_dict_rejects_unknown_fields(self) -> None:
+        with pytest.raises(ValueError):
+            ScratchExpr.from_dict({"kind": "num", "value": 1.0, "bogus": 1})
+        with pytest.raises(ValueError):
+            ScratchExpr.from_dict({"kind": "ref", "path": "a/b", "name": "x"})
+
+    def test_non_whitelist_func_rejected(self) -> None:
+        for name in ("python", "eval", "exec", "ch", "opinputpath", "bbox"):
+            with pytest.raises(ValueError):
+                ScratchExpr(kind="func", name=name, args=(ScratchExpr(kind="num", value=1),))
+
+    def test_arity_rules(self) -> None:
+        num = ScratchExpr(kind="num", value=1.0)
+        with pytest.raises(ValueError):
+            ScratchExpr(kind="op", name="add", args=(num,))  # noqa: E501
+        with pytest.raises(ValueError):
+            ScratchExpr(kind="op", name="neg", args=(num, num))
+        with pytest.raises(ValueError):
+            ScratchExpr(kind="func", name="clamp", args=(num, num))
+        with pytest.raises(ValueError):
+            ScratchExpr(kind="func", name="pow", args=(num,))
+        with pytest.raises(ValueError):
+            ScratchExpr(kind="func", name="sqrt", args=(num, num))
+        with pytest.raises(ValueError):
+            ScratchExpr(kind="func", name="min", args=())
+        with pytest.raises(ValueError):
+            ScratchExpr(kind="func", name="max", args=(num,) * 5)
+        # min/max accept 1..4 args
+        ScratchExpr(kind="func", name="max", args=(num, num, num, num))
+
+    def test_depth_bound(self) -> None:
+        expr = ScratchExpr(kind="num", value=1.0)
+        for _ in range(7):  # depth 8 total — allowed
+            expr = ScratchExpr(kind="op", name="neg", args=(expr,))
+        with pytest.raises(ValueError):
+            ScratchExpr(kind="op", name="neg", args=(expr,))  # depth 9
+
+    def test_node_count_bound(self) -> None:
+        # Wide (not deep) trees: max() with 4 args grows the node count
+        # without growing depth. A 21-node tree is allowed; 85 is not.
+        def wide(children: tuple[ScratchExpr, ...]) -> ScratchExpr:
+            return ScratchExpr(kind="func", name="max", args=children)
+
+        nums = tuple(ScratchExpr(kind="num", value=i) for i in range(4))
+        inner = tuple(wide(nums) for _ in range(4))  # 5 nodes each, depth 2
+        tree = wide(inner)  # 21 nodes, depth 3 — allowed
+        with pytest.raises(ValueError):
+            wide((tree, tree, tree, tree))  # 85 nodes
+
+    def test_args_must_be_exprs(self) -> None:
+        with pytest.raises(TypeError):
+            ScratchExpr(kind="op", name="add", args=(
+                ScratchExpr(kind="num", value=1), 1.0,  # type: ignore[arg-type]
+            ))
+        with pytest.raises(TypeError):
+            ScratchExpr.from_dict({"kind": "op", "name": "add", "args": [{"kind": "num", "value": 1}, 2]})
+
+    def test_frozen(self) -> None:
+        import dataclasses
+
+        expr = ScratchExpr(kind="num", value=1.0)
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            expr.kind = "ref"  # type: ignore[misc]
+
+
+class TestScratchOpExpr:
+    def test_set_parm_expr_round_trip(self) -> None:
+        op = ScratchOp(
+            kind="set_parm", node_name="box2", parm="sizex",
+            expr=ScratchExpr.from_dict(_expr_dict()),
+        )
+        d = op.to_dict()
+        assert d == {
+            "kind": "set_parm", "node_name": "box2", "parm": "sizex",
+            "expr": _expr_dict(),
+        }
+        assert "value" not in d
+        assert ScratchOp.from_dict(d) == op
+
+    def test_value_and_expr_conflict_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            ScratchOp(
+                kind="set_parm", node_name="box1", parm="sizex",
+                value=1.0, expr=ScratchExpr(kind="num", value=2.0),
+            )
+        with pytest.raises(ValueError):
+            ScratchOp.from_dict({
+                "kind": "set_parm", "node_name": "box1", "parm": "sizex",
+                "value": 1.0, "expr": {"kind": "num", "value": 2.0},
+            })
+
+    def test_neither_value_nor_expr_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            ScratchOp(kind="set_parm", node_name="box1", parm="sizex")
+        with pytest.raises(ValueError):
+            ScratchOp.from_dict({
+                "kind": "set_parm", "node_name": "box1", "parm": "sizex",
+            })
+
+    def test_expr_only_valid_for_set_parm(self) -> None:
+        with pytest.raises(ValueError):
+            ScratchOp(
+                kind="create_node", node_name="box1", node_type="box",
+                expr=ScratchExpr(kind="num", value=1.0),
+            )
+
+    def test_expr_must_be_typed(self) -> None:
+        with pytest.raises(TypeError):
+            ScratchOp(
+                kind="set_parm", node_name="box1", parm="sizex",
+                expr={"kind": "num", "value": 1.0},  # type: ignore[arg-type]
+            )
+        with pytest.raises((TypeError, ValueError)):
+            ScratchOp.from_dict({
+                "kind": "set_parm", "node_name": "box1", "parm": "sizex",
+                "expr": "ch('../box1/sizex')",
+            })
+
+    def test_request_round_trip_with_expr_op(self) -> None:
+        request = ScratchRequest.build(
+            request_id="req_expr",
+            deadline_ms=5000,
+            scene_epoch=1,
+            sandbox_id="run1",
+            operations=(
+                ScratchOp(kind="create_node", node_name="box1", node_type="box"),
+                ScratchOp(
+                    kind="set_parm", node_name="box2", parm="sizex",
+                    expr=ScratchExpr.from_dict(_expr_dict()),
+                ),
+            ),
+            purpose="expr round trip",
+        )
+        parsed = ScratchRequest.from_dict(request.to_dict())
+        assert parsed.operations[1].expr == request.operations[1].expr
+
 
 
 class TestScratchV2DtoExtensions:
@@ -814,6 +1032,39 @@ def _coordinator(provider: _FakeScratchProvider, *, sandbox_id: str = "run1") ->
 
 
 class TestScratchCoordinator:
+    def test_parse_operations_accepts_typed_expr(self) -> None:
+        coord = _coordinator(_FakeScratchProvider())
+        ops = coord._parse_operations([
+            {"kind": "create_node", "node_name": "box1", "node_type": "box"},
+            {
+                "kind": "set_parm", "node_name": "box2", "parm": "sizex",
+                "expr": _expr_dict(),
+            },
+        ])
+        assert ops[1].expr == ScratchExpr.from_dict(_expr_dict())
+        assert ops[1].value is None
+
+    def test_parse_operations_rejects_invalid_expr(self) -> None:
+        coord = _coordinator(_FakeScratchProvider())
+        bad_exprs = (
+            {"kind": "func", "name": "python", "args": [{"kind": "num", "value": 1}]},
+            {"kind": "ref", "path": "$HIP/file.hip"},
+            {"kind": "num", "value": 1.0, "bogus": 1},
+        )
+        for bad in bad_exprs:
+            with pytest.raises(ScratchError):
+                coord._parse_operations([
+                    {"kind": "set_parm", "node_name": "box1", "parm": "sizex", "expr": bad},
+                ])
+        # value/expr conflict is also a bounded input error
+        with pytest.raises(ScratchError):
+            coord._parse_operations([
+                {
+                    "kind": "set_parm", "node_name": "box1", "parm": "sizex",
+                    "value": 1.0, "expr": _expr_dict(),
+                },
+            ])
+
     def test_happy_path_summarizes_result(self) -> None:
         provider = _FakeScratchProvider(
             result=ScratchResult(

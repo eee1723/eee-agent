@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import contextlib
 
+import pytest
+
 from eee_agent.houdini_bridge.scratch import (
     ScratchDeleteRequest,
+    ScratchExpr,
     ScratchOp,
     ScratchRequest,
     ScratchTopologyRequest,
 )
 from houdini_side.changeset_executor import ChangeSetExecutor, _layered_layout
-from houdini_side.secure_bridge import HoudiniSceneAdapter
+from houdini_side.secure_bridge import HoudiniAdapterError, HoudiniSceneAdapter
 
 
 class _Category:
@@ -55,6 +58,32 @@ class _Conn:
         return 0
 
 
+class _ParmTemplate:
+    def __init__(self, template_type: str) -> None:
+        self._template_type = template_type
+
+    def type(self) -> str:
+        return self._template_type
+
+
+class _Parm:
+    """Minimal hou.Parm stand-in: literal set + setExpression capture."""
+
+    def __init__(self, template_type: str = "Float") -> None:
+        self._template_type = template_type
+        self.value: object = None
+        self.expression: tuple[str, object] | None = None
+
+    def set(self, value: object) -> None:
+        self.value = value
+
+    def setExpression(self, expression: str, language: object = None) -> None:
+        self.expression = (expression, language)
+
+    def parmTemplate(self) -> _ParmTemplate:
+        return _ParmTemplate(self._template_type)
+
+
 class _Node:
     def __init__(
         self,
@@ -76,6 +105,7 @@ class _Node:
         self._render_flag = False
         self._comment = ""
         self._generic_flags: dict[object, bool] = {}
+        self._parms: dict[str, _Parm] = {}
         self.fail_children = False
         self.fail_destroy = False
 
@@ -124,6 +154,14 @@ class _Node:
 
     def setGenericFlag(self, flag: object, on: bool) -> None:
         self._generic_flags[flag] = on
+
+    def add_parm(self, name: str, template_type: str = "Float") -> _Parm:
+        parm = _Parm(template_type)
+        self._parms[name] = parm
+        return parm
+
+    def parm(self, name: str) -> _Parm | None:
+        return self._parms.get(name)
 
     def inputConnections(self) -> list[_Conn]:
         return [_Conn(node) for _, node in sorted(self._inputs.items())]
@@ -192,6 +230,15 @@ class _Hou:
     class hipFileEventType:
         AfterClear = "AfterClear"
         AfterLoad = "AfterLoad"
+
+    class parmTemplateType:
+        Float = "Float"
+        Int = "Int"
+        String = "String"
+
+    class exprLanguage:
+        Hscript = "Hscript"
+        Python = "Python"
 
     def __init__(self, scene: dict[str, _Node], spy: list[tuple]) -> None:
         self.scene, self.undos, self.hipFile = scene, _Undos(spy), _Hip()
@@ -345,3 +392,141 @@ def test_scratch_delete_node_op_removes_existing_sandbox_node() -> None:
     )
     executor.scratch_exec(deleted)
     assert scene.get("/obj/eee_scratch_run1/draft1") is None
+
+
+# --------------------------------------------------------------------------
+# scratch.v2 C1: typed parameter expressions on set_parm
+# --------------------------------------------------------------------------
+
+
+def _expr_request(
+    executor: ChangeSetExecutor,
+    operations: tuple[ScratchOp, ...],
+    *,
+    sandbox_id: str = "expr1",
+) -> ScratchRequest:
+    return ScratchRequest.build(
+        request_id="expr_req", deadline_ms=5000,
+        scene_epoch=executor.binding().scene_epoch, sandbox_id=sandbox_id,
+        operations=operations, purpose="expr test",
+    )
+
+
+def _expr_boxes(
+    executor: ChangeSetExecutor, scene: dict[str, _Node]
+) -> tuple[_Node, _Node]:
+    built = executor.scratch_exec(_expr_request(executor, (
+        ScratchOp(kind="create_node", node_name="box1", node_type="box"),
+        ScratchOp(kind="create_node", node_name="box2", node_type="box"),
+    )))
+    assert built.applied_ops == 2
+    box1 = scene["/obj/eee_scratch_expr1/box1"]
+    box2 = scene["/obj/eee_scratch_expr1/box2"]
+    box1.add_parm("sizex").set(1.0)
+    box2.add_parm("sizex")
+    return box1, box2
+
+
+def test_set_parm_expr_renders_and_resolves_relative_ref() -> None:
+    executor, scene, _ = _executor()
+    _, box2 = _expr_boxes(executor, scene)
+    executor.scratch_exec(_expr_request(executor, (
+        ScratchOp(
+            kind="set_parm", node_name="box2", parm="sizex",
+            expr=ScratchExpr(kind="op", name="mul", args=(
+                ScratchExpr(kind="ref", path="../box1/sizex"),
+                ScratchExpr(kind="num", value=2.0),
+            )),
+        ),
+    )))
+    target = box2.parm("sizex")
+    assert target is not None and target.expression is not None
+    rendered, language = target.expression
+    assert rendered == '(ch("/obj/eee_scratch_expr1/box1/sizex") * 2.0)'
+    assert language == _Hou.exprLanguage.Hscript
+
+
+def test_set_parm_expr_absolute_ref_inside_sandbox() -> None:
+    executor, scene, _ = _executor()
+    _, box2 = _expr_boxes(executor, scene)
+    executor.scratch_exec(_expr_request(executor, (
+        ScratchOp(
+            kind="set_parm", node_name="box2", parm="sizex",
+            expr=ScratchExpr(
+                kind="ref", path="/obj/eee_scratch_expr1/box1/sizex"
+            ),
+        ),
+    )))
+    target = box2.parm("sizex")
+    assert target is not None and target.expression is not None
+    assert target.expression[0] == 'ch("/obj/eee_scratch_expr1/box1/sizex")'
+
+
+def test_set_parm_expr_escaping_ref_fails_closed() -> None:
+    executor, scene, _ = _executor()
+    _expr_boxes(executor, scene)
+    for ref in ("../../box1/sizex", "/obj/box1/sizex"):
+        with pytest.raises(HoudiniAdapterError, match="escapes the sandbox"):
+            executor.scratch_exec(_expr_request(executor, (
+                ScratchOp(
+                    kind="set_parm", node_name="box2", parm="sizex",
+                    expr=ScratchExpr(kind="ref", path=ref),
+                ),
+            )))
+
+
+def test_set_parm_expr_missing_ref_node_or_parm_fails() -> None:
+    executor, scene, _ = _executor()
+    _expr_boxes(executor, scene)
+    with pytest.raises(HoudiniAdapterError, match="node not found"):
+        executor.scratch_exec(_expr_request(executor, (
+            ScratchOp(
+                kind="set_parm", node_name="box2", parm="sizex",
+                expr=ScratchExpr(kind="ref", path="../ghost1/sizex"),
+            ),
+        )))
+    with pytest.raises(HoudiniAdapterError, match="parm not found"):
+        executor.scratch_exec(_expr_request(executor, (
+            ScratchOp(
+                kind="set_parm", node_name="box2", parm="sizex",
+                expr=ScratchExpr(kind="ref", path="../box1/nope"),
+            ),
+        )))
+
+
+def test_set_parm_expr_rejects_non_numeric_target() -> None:
+    executor, scene, _ = _executor()
+    _, box2 = _expr_boxes(executor, scene)
+    box2.add_parm("label", template_type="String")
+    with pytest.raises(HoudiniAdapterError, match="not numeric"):
+        executor.scratch_exec(_expr_request(executor, (
+            ScratchOp(
+                kind="set_parm", node_name="box2", parm="label",
+                expr=ScratchExpr(kind="num", value=1.0),
+            ),
+        )))
+
+
+def test_set_parm_expr_func_and_neg_render() -> None:
+    executor, scene, _ = _executor()
+    _, box2 = _expr_boxes(executor, scene)
+    executor.scratch_exec(_expr_request(executor, (
+        ScratchOp(
+            kind="set_parm", node_name="box2", parm="sizex",
+            expr=ScratchExpr(kind="func", name="clamp", args=(
+                ScratchExpr(kind="op", name="neg", args=(
+                    ScratchExpr(kind="ref", path="sizex"),
+                )),
+                ScratchExpr(kind="num", value=-4),
+                ScratchExpr(kind="func", name="max", args=(
+                    ScratchExpr(kind="num", value=1),
+                    ScratchExpr(kind="num", value=2.5),
+                )),
+            )),
+        ),
+    )))
+    target = box2.parm("sizex")
+    assert target is not None and target.expression is not None
+    assert target.expression[0] == (
+        'clamp((-ch("/obj/eee_scratch_expr1/box2/sizex")), -4, max(1, 2.5))'
+    )

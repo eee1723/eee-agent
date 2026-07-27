@@ -31,6 +31,7 @@ numbers, and an explicit size limit.
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -81,11 +82,34 @@ _MAX_ANNOTATION_CHARS = 500
 _MAX_ERRORS = 32
 _MAX_ERROR_CHARS = 1000
 
+# Typed parameter-expression bounds (scratch.v2 C1). Expressions are the ONLY
+# way one parm may reference another: they render to a bounded Hscript string
+# built solely from numeric literals, ch() references inside the sandbox,
+# arithmetic, and whitelisted math functions. The ref charset makes file
+# paths, $VAR/backtick expansion, and expression injection unrepresentable.
+_MAX_EXPR_DEPTH = 8
+_MAX_EXPR_NODES = 32
+_MAX_EXPR_REF_CHARS = 256
+_EXPR_REF_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
+_EXPR_OP_NAMES = frozenset({"add", "sub", "mul", "div", "neg"})
+_EXPR_FUNC_NAMES = frozenset(
+    {
+        "sin", "cos", "tan", "asin", "acos", "atan", "sqrt", "abs",
+        "min", "max", "floor", "ceil", "pow", "clamp",
+    }
+)
+_EXPR_FIELDS = {
+    "num": frozenset({"kind", "value"}),
+    "ref": frozenset({"kind", "path"}),
+    "op": frozenset({"kind", "name", "args"}),
+    "func": frozenset({"kind", "name", "args"}),
+}
+
 # exact field sets for envelope + payload validation
 _PAYLOAD_FIELDS = frozenset(
     {"sandbox_id", "operations", "purpose", "preserve_on_failure"}
 )
-_OP_FIELDS = frozenset({"kind", "node_name", "node_type", "parent", "parm", "value", "input_index", "source", "source_output_index", "note"})
+_OP_FIELDS = frozenset({"kind", "node_name", "node_type", "parent", "parm", "value", "expr", "input_index", "source", "source_output_index", "note"})
 _RESULT_FIELDS = frozenset(
     {"sandbox_root", "applied_ops", "output_node", "errors", "geometry"}
 )
@@ -176,6 +200,139 @@ def _require_bounded_text(value: object, label: str, max_len: int) -> None:
         raise ValueError(f"{label} must be 1..{max_len} characters")
 
 
+def _require_expr_ref(value: object, label: str) -> None:
+    """A parm reference path: relative (``../ctrl/sizex``) or absolute.
+
+    The charset ``[A-Za-z0-9_./-]`` explicitly rejects ``:``, ``\\``, ``$``,
+    backticks, quotes, and whitespace, so file paths, variable/backtick
+    expansion, and Hscript/Python injection are unrepresentable.
+    """
+    if type(value) is not str:
+        raise TypeError(f"{label} must be a string")
+    if not value or len(value) > _MAX_EXPR_REF_CHARS:
+        raise ValueError(f"{label} must be 1..{_MAX_EXPR_REF_CHARS} characters")
+    if _EXPR_REF_RE.fullmatch(value) is None:
+        raise ValueError(f"{label} has characters outside [A-Za-z0-9_./-]")
+    body = value[1:] if value.startswith("/") else value
+    segments = body.split("/")
+    if any(segment in ("", ".") for segment in segments):
+        raise ValueError(f"{label} must not contain empty or '.' segments")
+    if _PARM_NAME_RE.fullmatch(segments[-1]) is None:
+        raise ValueError(f"{label} must end with a parm name")
+
+
+# --------------------------------------------------------------------------
+# parameter-expression DTO (scratch.v2 C1)
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ScratchExpr:
+    """One typed parameter-expression node (an AST, not a string).
+
+    kinds:
+      - num: a finite int/float literal (bool/nan/inf rejected).
+      - ref: a ``ch()`` parm reference path, relative to the target node
+        (``../ctrl/sizex``) or absolute (``/obj/...``); resolved and
+        sandbox-checked on the Houdini side.
+      - op: arithmetic ``add|sub|mul|div`` (exactly 2 args) or ``neg`` (1 arg).
+      - func: a whitelisted math function; ``clamp`` takes exactly 3 args,
+        ``pow`` exactly 2, ``min``/``max`` 1..4, the rest exactly 1.
+
+    The whole tree is bounded: depth <= 8, total nodes <= 32.
+    """
+
+    kind: str
+    value: object = None
+    path: str = ""
+    name: str = ""
+    args: tuple["ScratchExpr", ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.kind not in _EXPR_FIELDS:
+            raise ValueError("ScratchExpr.kind must be num|ref|op|func")
+        if self.kind == "num":
+            if type(self.value) not in (int, float) or type(self.value) is bool:
+                raise TypeError("ScratchExpr num value must be an int or float")
+            if not math.isfinite(self.value):  # type: ignore[arg-type]
+                raise ValueError("ScratchExpr num value must be finite")
+        elif self.kind == "ref":
+            _require_expr_ref(self.path, "ScratchExpr.path")
+        else:
+            if self.kind == "op":
+                if self.name not in _EXPR_OP_NAMES:
+                    raise ValueError("ScratchExpr op name must be add|sub|mul|div|neg")
+                expected = 1 if self.name == "neg" else 2
+            else:
+                if self.name not in _EXPR_FUNC_NAMES:
+                    raise ValueError(
+                        "ScratchExpr func name is not in the whitelist"
+                    )
+                expected = {"clamp": 3, "pow": 2}.get(self.name, 1)
+            args = tuple(self.args)
+            for arg in args:
+                if type(arg) is not ScratchExpr:
+                    raise TypeError("ScratchExpr args must be ScratchExpr instances")
+            if self.kind == "func" and self.name in ("min", "max"):
+                if not 1 <= len(args) <= 4:
+                    raise ValueError("ScratchExpr min/max take 1..4 args")
+            elif len(args) != expected:
+                raise ValueError(
+                    f"ScratchExpr {self.name} takes exactly {expected} arg(s)"
+                )
+            object.__setattr__(self, "args", args)
+        _, total = self._measure(1)
+        if total > _MAX_EXPR_NODES:
+            raise ValueError(
+                f"ScratchExpr exceeds the maximum node count ({_MAX_EXPR_NODES})"
+            )
+
+    def _measure(self, depth: int) -> tuple[int, int]:
+        """Return (deepest depth, node count) of the subtree; enforce depth."""
+        if depth > _MAX_EXPR_DEPTH:
+            raise ValueError(
+                f"ScratchExpr exceeds the maximum depth ({_MAX_EXPR_DEPTH})"
+            )
+        deepest, total = depth, 1
+        for arg in self.args:
+            child_depth, child_total = arg._measure(depth + 1)
+            deepest = max(deepest, child_depth)
+            total += child_total
+        return deepest, total
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "ScratchExpr":
+        d = _require_exact_dict(data, "ScratchExpr")
+        kind = d.get("kind")
+        if type(kind) is not str or kind not in _EXPR_FIELDS:
+            raise ValueError("ScratchExpr.kind must be num|ref|op|func")
+        _require_exact_keys(d, _EXPR_FIELDS[kind], f"ScratchExpr[{kind}]")
+        if kind == "num":
+            return cls(kind="num", value=d["value"])
+        if kind == "ref":
+            return cls(kind="ref", path=d["path"])  # type: ignore[arg-type]
+        args_raw = d["args"]
+        if type(args_raw) is not list:
+            raise TypeError("ScratchExpr args must be a list")
+        args = tuple(cls.from_dict(item) for item in args_raw)
+        return cls(
+            kind=kind,
+            name=d["name"],  # type: ignore[arg-type]
+            args=args,
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        if self.kind == "num":
+            return {"kind": "num", "value": self.value}
+        if self.kind == "ref":
+            return {"kind": "ref", "path": self.path}
+        return {
+            "kind": self.kind,
+            "name": self.name,
+            "args": [arg.to_dict() for arg in self.args],
+        }
+
+
 # --------------------------------------------------------------------------
 # operation DTOs
 # --------------------------------------------------------------------------
@@ -188,7 +345,8 @@ class ScratchOp:
     kinds:
       - create_node: create ``node_type`` named ``node_name`` under ``parent``
         (a sandbox-relative ref or the container root).
-      - set_parm: set ``parm`` on ``node_name`` to ``value``.
+      - set_parm: set ``parm`` on ``node_name`` to a literal ``value``, or to
+        a typed ``expr`` (exactly one of value/expr must be set).
       - connect: wire input ``input_index`` of ``node_name`` from ``source``
         output ``source_output_index``.
     """
@@ -199,6 +357,7 @@ class ScratchOp:
     parent: str = ""
     parm: str = ""
     value: object = None
+    expr: ScratchExpr | None = None
     input_index: int = 0
     source: str = ""
     source_output_index: int = 0
@@ -210,6 +369,11 @@ class ScratchOp:
                 "ScratchOp.kind must be create_node|set_parm|connect|delete_node"
             )
         _require_node_name(self.node_name, "ScratchOp.node_name")
+        if self.expr is not None:
+            if type(self.expr) is not ScratchExpr:
+                raise TypeError("ScratchOp.expr must be a ScratchExpr")
+            if self.kind != "set_parm":
+                raise ValueError("ScratchOp.expr is only valid for set_parm")
         if self.kind == "create_node":
             _require_node_type(self.node_type, "ScratchOp.node_type")
             # parent may be "" (= sandbox root) or a sandbox-relative ref
@@ -217,7 +381,17 @@ class ScratchOp:
                 _require_node_ref(self.parent, "ScratchOp.parent")
         elif self.kind == "set_parm":
             _require_parm_name(self.parm, "ScratchOp.parm")
-            _require_op_value(self.value, "ScratchOp.value")
+            if self.expr is not None:
+                if self.value is not None:
+                    raise ValueError(
+                        "ScratchOp set_parm accepts exactly one of value/expr"
+                    )
+            else:
+                if self.value is None:
+                    raise ValueError(
+                        "ScratchOp set_parm requires exactly one of value/expr"
+                    )
+                _require_op_value(self.value, "ScratchOp.value")
         elif self.kind == "connect":
             _require_exact_int(self.input_index, "ScratchOp.input_index")
             if self.input_index < 0:
@@ -249,6 +423,11 @@ class ScratchOp:
             parent=d.get("parent", ""),  # type: ignore[arg-type]
             parm=d.get("parm", ""),  # type: ignore[arg-type]
             value=d.get("value", None),
+            expr=(
+                ScratchExpr.from_dict(d["expr"])  # type: ignore[arg-type]
+                if d.get("expr") is not None
+                else None
+            ),
             input_index=d.get("input_index", 0),  # type: ignore[arg-type]
             source=d.get("source", ""),  # type: ignore[arg-type]
             source_output_index=d.get("source_output_index", 0),  # type: ignore[arg-type]
@@ -265,7 +444,10 @@ class ScratchOp:
                 d["note"] = self.note
         elif self.kind == "set_parm":
             d["parm"] = self.parm
-            d["value"] = self.value
+            if self.expr is not None:
+                d["expr"] = self.expr.to_dict()
+            else:
+                d["value"] = self.value
         elif self.kind == "connect":
             d["input_index"] = self.input_index
             d["source"] = self.source

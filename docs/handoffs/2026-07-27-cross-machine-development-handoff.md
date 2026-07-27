@@ -131,8 +131,16 @@ actual executable path in the smoke commands.
    - B6: each caught fault emits a bounded structured report
      `{fault, check, location, expected, actual, hint}` designed for direct
      agent feedback.
-4. **Wave C:** C1–C7 typed expressions, components, parameter scans, case
-   library, and eval metrics remain pending.
+4. **Wave C:** **C1 typed parameter expressions COMPLETE (2026-07-27):**
+   `ScratchExpr` AST DTO (`num`/`ref`/`op`/`func`, function whitelist,
+   depth/node caps, strict ref charset) on `set_parm` (value/expr exactly
+   one); the executor resolves relative refs against the target node,
+   refuses sandbox escapes, and renders Hscript `ch()` expressions on
+   numeric parms only. Verified: `EXPR SMOKE OK` on Houdini 21.0.440
+   (tracking cook, escape/forbidden-function refusals), offline DTO and
+   executor-fake coverage, skill Stage 6 note updated. C2–C7 (components,
+   parameter classification, tabs, scans, case library, eval metrics)
+   remain pending.
 5. **Manual Houdini UI:** inspect the read-only task graph block in the docked
    panel after a real modeling run.
 

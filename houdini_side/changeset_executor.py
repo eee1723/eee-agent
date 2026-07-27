@@ -84,7 +84,9 @@ from eee_agent.houdini_bridge.scratch import (
     ScratchDeleteResult,
     ScratchDestroyRequest,
     ScratchDestroyResult,
+    ScratchExpr,
     ScratchGeometry,
+    ScratchOp,
     ScratchRequest,
     ScratchResult,
     ScratchTopologyRequest,
@@ -190,6 +192,93 @@ def _build_commit_receipt(gate_report: dict) -> dict:
 # Bounds mirrored from the scratch DTO module for error-text truncation.
 _MAX_ERROR_CHARS = 1000
 _MAX_ERRORS = 32
+
+_SCRATCH_EXPR_BINOPS = {"add": "+", "sub": "-", "mul": "*", "div": "/"}
+
+
+def _resolve_scratch_ref(
+    hou: object, container_path: str, target_path: str, ref: str
+) -> str:
+    """Resolve a sandbox parm ref to an absolute ``node/parm`` path.
+
+    Relative refs resolve against the TARGET node's path (``..`` walks up).
+    The resolved node must live inside the sandbox container, must exist, and
+    must carry the named parm; anything else fails closed with a bounded
+    message that identifies the offending ref.
+    """
+    if ref.startswith("/"):
+        resolved: list[str] = []
+        segments = ref[1:].split("/")
+    else:
+        resolved = [s for s in target_path.split("/") if s]
+        segments = ref.split("/")
+    for segment in segments:
+        if segment == "..":
+            if not resolved:
+                raise _scratch_failed(
+                    f"expression ref escapes above root: {ref}"
+                )
+            resolved.pop()
+        else:
+            resolved.append(segment)
+    if len(resolved) < 2:
+        raise _scratch_failed(f"expression ref is not a parm path: {ref}")
+    node_path = "/" + "/".join(resolved[:-1])
+    parm_name = resolved[-1]
+    if node_path != container_path and not node_path.startswith(container_path + "/"):
+        raise _scratch_failed(
+            f"expression ref escapes the sandbox: {ref}"
+        )
+    ref_node = hou.node(node_path)  # type: ignore[attr-defined]
+    if ref_node is None:
+        raise _scratch_failed(f"expression ref node not found: {ref}")
+    if ref_node.parm(parm_name) is None:
+        raise _scratch_failed(f"expression ref parm not found: {ref}")
+    return f"{node_path}/{parm_name}"
+
+
+def _render_scratch_expr(
+    hou: object, container_path: str, target_path: str, expr: ScratchExpr
+) -> str:
+    """Render a validated ScratchExpr to a bounded Hscript expression string."""
+    if expr.kind == "num":
+        return repr(expr.value)
+    if expr.kind == "ref":
+        abs_parm = _resolve_scratch_ref(hou, container_path, target_path, expr.path)
+        return f'ch("{abs_parm}")'
+    if expr.kind == "op":
+        if expr.name == "neg":
+            inner = _render_scratch_expr(hou, container_path, target_path, expr.args[0])
+            return f"(-{inner})"
+        symbol = _SCRATCH_EXPR_BINOPS[expr.name]
+        left = _render_scratch_expr(hou, container_path, target_path, expr.args[0])
+        right = _render_scratch_expr(hou, container_path, target_path, expr.args[1])
+        return f"({left} {symbol} {right})"
+    rendered_args = ", ".join(
+        _render_scratch_expr(hou, container_path, target_path, arg)
+        for arg in expr.args
+    )
+    return f"{expr.name}({rendered_args})"
+
+
+def _apply_scratch_expr(
+    hou: object, container_path: str, node: object, parm: object, op: ScratchOp
+) -> None:
+    """Set a typed expression on a numeric scratch parm (fail-closed)."""
+    template = parm.parmTemplate()  # type: ignore[attr-defined]
+    template_type = template.type() if template is not None else None
+    numeric = (hou.parmTemplateType.Float, hou.parmTemplateType.Int)  # type: ignore[attr-defined]
+    if template_type not in numeric:
+        raise _scratch_failed(
+            f"expression target parm is not numeric: {op.node_name}/{op.parm}"
+        )
+    rendered = _render_scratch_expr(hou, container_path, node.path(), op.expr)  # type: ignore[attr-defined,arg-type]
+    try:
+        parm.setExpression(rendered, hou.exprLanguage.Hscript)  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001 — a rejected expression is an op failure
+        raise _scratch_failed(
+            f"expression rejected on {op.node_name}/{op.parm}: {exc}"[:_MAX_ERROR_CHARS]
+        ) from exc
 
 
 def _ambiguous() -> HoudiniAdapterError:
@@ -2147,7 +2236,12 @@ class ChangeSetExecutor:
                             raise _scratch_failed(
                                 f"parm not found on {op.node_name}: {op.parm}"
                             )
-                        parm.set(op.value)
+                        if op.expr is not None:
+                            _apply_scratch_expr(
+                                hou, container_path, node, parm, op
+                            )
+                        else:
+                            parm.set(op.value)
                         applied += 1
                     elif op.kind == "connect":
                         node = node_index.get(op.node_name)

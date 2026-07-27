@@ -81,12 +81,26 @@ re-verify. **Only after `ok: true` may you `scratch_commit`.**
 
 ## Stage 6 — Parameter decomposition record
 
-Catalog parms are currently literal-only, so channel references cannot be
-built yet. Still deliver the decomposition as a record (it becomes the input
-to the expression-support phase):
+`set_parm` supports typed expressions (`expr` instead of a literal `value`), so
+**derived** dimensions can be built as live channel references, not just
+recorded for later. An expression is a small JSON AST of: `num` literals,
+`ref` parm references (relative like `../ctrl/sizex` or absolute, always
+resolving inside the sandbox), arithmetic (`add`/`sub`/`mul`/`div`/`neg`), and
+whitelisted functions (`sin cos tan asin acos atan sqrt abs min max floor
+ceil pow clamp`). Example — `box2.sizex` tracks `box1`:
+
+```json
+{"kind": "set_parm", "node_name": "box2", "parm": "sizex",
+ "expr": {"kind": "op", "name": "mul", "args": [
+   {"kind": "ref", "path": "../box1/sizex"},
+   {"kind": "num", "value": 2.0}]}}
+```
+
+Still deliver the decomposition as a record:
 
 - Every dimension classified: **design intent** (expose as parameter) /
-  **derived** (expression over parameters) / **constant** (bake)
+  **derived** (expression over parameters — build it with `expr`) /
+  **constant** (bake)
 - Dependency patterns noted per component (tracker / proportional / offset)
 - Components listed with their candidate parameter tabs
 
