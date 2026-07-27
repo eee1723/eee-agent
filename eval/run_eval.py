@@ -23,6 +23,7 @@ import json
 import subprocess
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List
 
 import yaml
@@ -161,15 +162,54 @@ def _read_runtime_sqlite(path: str) -> dict[str, Any]:
                 out["e2e_duration_s"] = None
             try:
                 rows = conn.execute(
-                    "SELECT payload_json FROM events WHERE event_type = 'model.usage_updated'"
+                    "SELECT run_id, event_type, payload_json FROM events "
+                    "WHERE event_type IN ('model.usage_updated', 'tool.completed') "
+                    "ORDER BY seq"
                 ).fetchall()
-                tokens = 0
-                for (payload,) in rows:
-                    item = json.loads(payload)
-                    tokens += int(item.get("total_tokens", 0))
-                out["provider_tokens"] = tokens if rows else None
+                tokens = {"input": 0, "output": 0, "total": 0, "cache_read": 0, "cache_creation": 0}
+                repair_counts: dict[str, int] = {}
+                repair_seen_ok: set[str] = set()
+                for run_id, event_type, payload in rows:
+                    try:
+                        item = json.loads(payload)
+                    except (TypeError, json.JSONDecodeError):
+                        continue
+                    if event_type == "model.usage_updated":
+                        tokens["input"] += int(item.get("input_tokens", 0))
+                        tokens["output"] += int(item.get("output_tokens", 0))
+                        tokens["total"] += int(item.get("total_tokens", 0))
+                        tokens["cache_read"] += int(
+                            item.get("cache_read_tokens", item.get("cache_read", 0))
+                        )
+                        tokens["cache_creation"] += int(
+                            item.get("cache_creation_tokens", item.get("cache_creation", 0))
+                        )
+                        continue
+                    if item.get("name") != "verify_geometry":
+                        continue
+                    content = item.get("content")
+                    if isinstance(content, str):
+                        try:
+                            content = json.loads(content)
+                        except json.JSONDecodeError:
+                            continue
+                    if not isinstance(content, dict) or not run_id:
+                        continue
+                    ok = content.get("ok") is True
+                    if ok:
+                        repair_seen_ok.add(str(run_id))
+                    elif str(run_id) not in repair_seen_ok:
+                        repair_counts[str(run_id)] = repair_counts.get(str(run_id), 0) + 1
+                out["provider_tokens"] = tokens["total"] if rows else None
+                out["provider_token_breakdown"] = tokens if rows else None
+                out["avg_repair_rounds"] = (
+                    sum(repair_counts.values()) / len(repair_counts)
+                    if repair_counts else (0.0 if rows else None)
+                )
             except sqlite3.Error:
                 out["provider_tokens"] = None
+                out["provider_token_breakdown"] = None
+                out["avg_repair_rounds"] = None
     except (OSError, sqlite3.Error, ValueError):
         return {}
     return out
@@ -187,8 +227,26 @@ def aggregate_report(report_dir: str, cases: list[dict[str, Any]] | None = None)
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if isinstance(payload, dict) and "name" in payload and ("ok" in payload or "status" in payload):
+        if not isinstance(payload, dict):
+            continue
+        if "name" in payload and ("ok" in payload or "status" in payload):
             evidence_results.append(payload)
+        elif "case" in payload:
+            evidence_results.append(
+                {**payload, "name": payload["case"], "ok": payload.get("status") == "passed"}
+            )
+        elif "asset" in payload and "parameters" in payload:
+            evidence_results.append(
+                {
+                    **payload,
+                    "name": str(payload["asset"]),
+                    "ok": all(
+                        tier.get("ok") is True
+                        for parameter in payload.get("parameters", [])
+                        for tier in parameter.get("tiers", [])
+                    ),
+                }
+            )
     report = build_report(evidence_results, selected)
     sqlite_candidates = list(root.rglob("*.sqlite")) + list(root.rglob("*.db"))
     runtime = _read_runtime_sqlite(str(sqlite_candidates[0])) if sqlite_candidates else {}
