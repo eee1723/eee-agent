@@ -8,16 +8,14 @@ Runtime Control panel.
 ## Current development handoff
 
 The source of truth is
-`docs/handoffs/2026-07-26-node-lifecycle-task-graph-handoff.md`. The sandbox +
-verify + commit (Pi model) workflow is merged to `main` (originally
-`feature/sandbox-verify-commit`, merged 2026-07-24):
-the agent now builds iteratively in an isolated `/obj/eee_scratch_<run>`
-container (`scratch_build`), observes cooked results, and promotes verified
-geometry through four hard gates (`scratch_commit` → bake / structure /
-orientation / health) inside one undo group. `propose_modeling` is retired
-from the agent graph (module retained). Full offline gate: 3458 passed, 11
-skipped. The remaining acceptance gate is a real-Houdini end-to-end smoke of
-the full build → observe → commit cycle.
+`docs/handoffs/2026-07-27-cross-machine-development-handoff.md`. Active
+development is on `feature/html-to-houdini-pipeline`. The sandbox + verify +
+commit workflow, HTML-to-Houdini validation, scratch-native Provider evidence,
+and node lifecycle/task graph wave are implemented. Full offline gate: 3546
+passed, 12 skipped. Remaining acceptance is explicit: resolve the Houdini
+display/render-flag persistence observation, complete three real-Provider
+scratch-native runs, finish Waves B/C, and manually inspect the panel task
+block. Do not collapse an unrun acceptance layer into an offline pass.
 
 Do not merge `main`, rewrite accepted history, or weaken trusted Workspace,
 the ChangeSet/ownership/recovery kernel (the commit persistence seam),

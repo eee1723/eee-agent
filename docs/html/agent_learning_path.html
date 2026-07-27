@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agent 开发者从零到精通 - 基于本项目的学习路线图与真实代码指南</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0b0f19;
+            --bg-secondary: #111827;
+            --bg-card: #1f2937;
+            --accent-cyan: #06b6d4;
+            --accent-green: #10b981;
+            --accent-amber: #f59e0b;
+            --accent-purple: #8b5cf6;
+            --accent-blue: #3b82f6;
+            --text-primary: #f9fafb;
+            --text-secondary: #9ca3af;
+            --text-muted: #6b7280;
+            --border-color: #374151;
+            --code-bg: #030712;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background-color: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            padding-bottom: 60px;
+        }
+
+        header {
+            background: linear-gradient(135deg, #065f46 0%, #064e3b 50%, #0f172a 100%);
+            border-bottom: 1px solid var(--border-color);
+            padding: 40px 20px;
+            text-align: center;
+            position: relative;
+        }
+
+        header::after {
+            content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 3px;
+            background: linear-gradient(90deg, var(--accent-green), var(--accent-cyan), var(--accent-blue));
+        }
+
+        .badge {
+            display: inline-block; padding: 4px 12px; border-radius: 9999px; font-size: 0.75rem;
+            font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 12px;
+            background: rgba(16, 185, 129, 0.15); color: var(--accent-green); border: 1px solid var(--accent-green);
+        }
+
+        h1 {
+            font-size: 2.25rem; font-weight: 700; letter-spacing: -0.025em; margin-bottom: 12px;
+            background: linear-gradient(90deg, #ffffff, #a7f3d0);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+        }
+
+        .subtitle { color: var(--text-secondary); font-size: 1.1rem; max-width: 800px; margin: 0 auto; }
+
+        .nav-bar {
+            display: flex; justify-content: center; gap: 15px; background-color: var(--bg-secondary);
+            padding: 12px; border-bottom: 1px solid var(--border-color); position: sticky; top: 0; z-index: 100;
+            backdrop-filter: blur(10px);
+        }
+
+        .nav-btn {
+            padding: 8px 16px; border-radius: 6px; background: transparent; color: var(--text-secondary);
+            border: none; font-weight: 500; cursor: pointer; transition: all 0.2s ease; text-decoration: none; font-size: 0.9rem;
+        }
+
+        .nav-btn:hover, .nav-btn.active {
+            background: var(--bg-card); color: var(--accent-green); box-shadow: 0 0 10px rgba(16, 185, 129, 0.3);
+        }
+
+        .container { max-width: 1200px; margin: 40px auto 0; padding: 0 20px; }
+
+        .section-title {
+            font-size: 1.5rem; font-weight: 600; margin-bottom: 20px; display: flex; align-items: center; gap: 10px;
+            border-left: 4px solid var(--accent-green); padding-left: 12px;
+        }
+
+        /* Progress Dashboard */
+        .progress-box {
+            background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 16px;
+            padding: 24px; margin-bottom: 40px; display: flex; align-items: center; gap: 24px; flex-wrap: wrap;
+        }
+
+        .progress-circle {
+            width: 100px; height: 100px; border-radius: 50%;
+            background: conic-gradient(var(--accent-green) 0%, var(--bg-card) 0%);
+            display: flex; align-items: center; justify-content: center; position: relative;
+        }
+
+        .progress-circle-inner {
+            width: 80px; height: 80px; border-radius: 50%; background: var(--bg-secondary);
+            display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 1.2rem; color: var(--accent-green);
+        }
+
+        .progress-info { flex: 1; }
+        .progress-info h3 { font-size: 1.2rem; margin-bottom: 6px; }
+        .progress-info p { color: var(--text-secondary); font-size: 0.9rem; }
+
+        /* Timeline Roadmap */
+        .timeline { position: relative; margin-bottom: 50px; }
+        .timeline::before {
+            content: ''; position: absolute; left: 20px; top: 0; bottom: 0; width: 4px; background: var(--border-color);
+        }
+
+        .timeline-step { position: relative; padding-left: 60px; margin-bottom: 40px; }
+        .timeline-marker {
+            position: absolute; left: 6px; top: 0; width: 32px; height: 32px; border-radius: 50%;
+            background: var(--bg-card); border: 3px solid var(--accent-green);
+            display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 0.9rem; color: var(--accent-green);
+        }
+
+        .step-card {
+            background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; padding: 24px;
+        }
+
+        .step-card h3 { font-size: 1.3rem; margin-bottom: 8px; color: var(--text-primary); display: flex; align-items: center; justify-content: space-between; }
+        .step-desc { color: var(--text-secondary); font-size: 0.95rem; margin-bottom: 16px; }
+
+        .task-list { list-style: none; display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
+        .task-item {
+            display: flex; align-items: flex-start; gap: 12px; background: var(--bg-secondary); padding: 12px 16px; border-radius: 8px; border: 1px solid var(--border-color); cursor: pointer; transition: background 0.2s ease;
+        }
+
+        .task-item:hover { background: #1f293d; }
+        .task-item input[type="checkbox"] { margin-top: 4px; width: 18px; height: 18px; accent-color: var(--accent-green); cursor: pointer; }
+
+        .task-content { flex: 1; }
+        .task-title { font-weight: 600; font-size: 0.95rem; color: var(--text-primary); margin-bottom: 2px; }
+        .task-detail { font-size: 0.85rem; color: var(--text-secondary); }
+
+        .code-link {
+            font-family: 'Fira Code', monospace; color: var(--accent-cyan); background: rgba(6, 182, 212, 0.1); padding: 2px 6px; border-radius: 4px; font-size: 0.8rem;
+        }
+
+        /* Sub Code Snippet */
+        .sub-code {
+            background: var(--code-bg); border: 1px solid var(--border-color); border-radius: 8px; padding: 14px;
+            font-family: 'Fira Code', monospace; font-size: 0.85rem; color: #e5e7eb; overflow-x: auto; white-space: pre; margin-top: 10px;
+        }
+
+        .kw { color: #c084fc; font-weight: 600; }
+        .func { color: #38bdf8; }
+        .str { color: #4ade80; }
+        .comment { color: #6b7280; font-style: italic; }
+
+        footer {
+            text-align: center; color: var(--text-muted); font-size: 0.85rem; border-top: 1px solid var(--border-color); padding-top: 20px; margin-top: 40px;
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="badge">Agent Developer Path</div>
+        <h1>Agent 开发者从零到精通学习路线图</h1>
+        <p class="subtitle">以 EEE Procedural Modeling Agent 为实战模板，掌握工业级 Agent 开发与代码实现</p>
+    </header>
+
+    <div class="nav-bar">
+        <a href="project_overview.html" class="nav-btn">1. 项目全景架构</a>
+        <a href="deepagents_framework.html" class="nav-btn">2. DeepAgents 核心机制</a>
+        <a href="agent_learning_path.html" class="nav-btn active">3. Agent 学习路线图</a>
+    </div>
+
+    <div class="container">
+
+        <!-- Progress Dashboard -->
+        <div class="progress-box">
+            <div class="progress-circle" id="progress-circle">
+                <div class="progress-circle-inner" id="progress-text">0%</div>
+            </div>
+            <div class="progress-info">
+                <h3>你的 Agent 学习进度仪表盘</h3>
+                <p>点击下方各阶段的 CheckBox，实时追踪你的代码学习与实战演练进度！</p>
+            </div>
+        </div>
+
+        <!-- Timeline Roadmap -->
+        <div class="section-title">🗺️ 4 阶段渐进式代码学习路径</div>
+
+        <div class="timeline">
+
+            <!-- LEVEL 1 -->
+            <div class="timeline-step">
+                <div class="timeline-marker">1</div>
+                <div class="step-card">
+                    <h3>Level 1: Agent 核心概念与 System Prompt 约束 <span class="code-link">基础入门</span></h3>
+                    <p class="step-desc">理解 LLM 的系统指令 (System Prompt) 如何确立安全边界，禁止 LLM 越权生成代码或直接操作场景。</p>
+                    <ul class="task-list">
+                        <li class="task-item" onclick="toggleTask(this)">
+                            <input type="checkbox" onchange="updateProgress()">
+                            <div class="task-content">
+                                <div class="task-title">研读安全边界 Prompt 规则</div>
+                                <div class="task-detail">在 <span class="code-link">eee_agent/system_prompt.py</span> 中学习强约束规则的写法：</div>
+                                <div class="sub-code"><span class="comment"># eee_agent/system_prompt.py 核心片段</span>
+BASE_PROMPT = <span class="str">"""
+SECURITY BOUNDARY
+- The available Runtime tools are: scene_status, query_scene, inspect_workspace...
+- Never invent a tool, call direct HOM/Python, or assume a scene write is possible.
+- A modeling request must first become a typed proposal/ChangeSet through propose_modeling.
+"""</span></div>
+                            </div>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- LEVEL 2 -->
+            <div class="timeline-step">
+                <div class="timeline-marker">2</div>
+                <div class="step-card">
+                    <h3>Level 2: LangChain / DeepAgents 自定义 Tool 编写 <span class="code-link" style="color: var(--accent-purple); background: rgba(139, 92, 246, 0.1);">工具开发</span></h3>
+                    <p class="step-desc">掌握如何在 LangChain / DeepAgents 中使用 `@tool` 装饰器编写只读工具并定义强类型参数规范 (Pydantic / Type Hint)。</p>
+                    <ul class="task-list">
+                        <li class="task-item" onclick="toggleTask(this)">
+                            <input type="checkbox" onchange="updateProgress()">
+                            <div class="task-content">
+                                <div class="task-title">看懂 `@tool` 装饰器与 Tool 参数 Schema</div>
+                                <div class="task-detail">参考 <span class="code-link">eee_agent/runtime/agent_tools.py</span>，编写自己的 Tool：</div>
+                                <div class="sub-code"><span class="kw">from</span> langchain_core.tools <span class="kw">import</span> tool
+
+<span class="dec">@tool</span>
+<span class="kw">def</span> <span class="func">query_scene_node_count</span>(parent_path: <span class="kw">str</span> = <span class="str">"/obj"</span>) -&gt; <span class="kw">str</span>:
+    <span class="str">"""返回指定节点路径下的子节点总数 (仅读)"""</span>
+    <span class="comment"># 调用 Secure Bridge 执行安全查询</span>
+    result = bridge.<span class="func">query</span>({<span class="str">"action"</span>: <span class="str">"count_nodes"</span>, <span class="str">"path"</span>: parent_path})
+    <span class="kw">return</span> <span class="str">f"Node count under {parent_path}: {result['count']}"</span></div>
+                            </div>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- LEVEL 3 -->
+            <div class="timeline-step">
+                <div class="timeline-marker">3</div>
+                <div class="step-card">
+                    <h3>Level 3: 工业级 ChangeSet 修改提案模式 <span class="code-link" style="color: var(--accent-amber); background: rgba(245, 158, 11, 0.1);">安全范式</span></h3>
+                    <p class="step-desc">理解“Proposal -> Approval -> Transactional Apply”的架构设计，杜绝 LLM 盲目修改生产环境。</p>
+                    <ul class="task-list">
+                        <li class="task-item" onclick="toggleTask(this)">
+                            <input type="checkbox" onchange="updateProgress()">
+                            <div class="task-content">
+                                <div class="task-title">理解 ChangeSet 强类型数据结构</div>
+                                <div class="task-detail">在 <span class="code-link">eee_agent/changesets/</span> 中查看 typed ChangeSet 契约：</div>
+                                <div class="sub-code"><span class="comment"># 每一个修改都是强类型的 Action 对象，而非随意拼接的 Python 代码</span>
+{
+    <span class="str">"changeset_id"</span>: <span class="str">"cs_20260722_001"</span>,
+    <span class="str">"intent"</span>: <span class="str">"Create parametric sci-fi base"</span>,
+    <span class="str">"actions"</span>: [
+        {<span class="str">"op"</span>: <span class="str">"create_node"</span>, <span class="str">"type"</span>: <span class="str">"geo"</span>, <span class="str">"name"</span>: <span class="str">"building_base"</span>},
+        {<span class="str">"op"</span>: <span class="str">"set_parm"</span>, <span class="str">"node"</span>: <span class="str">"building_base"</span>, <span class="str">"parm"</span>: <span class="str">"height"</span>, <span class="str">"val"</span>: <span class="num">12.5</span>}
+    ]
+}</div>
+                            </div>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- LEVEL 4 -->
+            <div class="timeline-step">
+                <div class="timeline-marker">4</div>
+                <div class="step-card">
+                    <h3>Level 4: 离线自动化测试网与调试 <span class="code-link" style="color: var(--accent-green); background: rgba(16, 185, 129, 0.1);">实战演练</span></h3>
+                    <p class="step-desc">使用 pytest 运行离线测试套件，在不连接 LLM 和 Houdini 的情况下验证 Agent 的逻辑健全性。</p>
+                    <ul class="task-list">
+                        <li class="task-item" onclick="toggleTask(this)">
+                            <input type="checkbox" onchange="updateProgress()">
+                            <div class="task-content">
+                                <div class="task-title">运行离线 PyTest 套件</div>
+                                <div class="task-detail">打开 Powershell 或 CMD 终端，输入以下命令：</div>
+                                <div class="sub-code">uv run --extra eval pytest -q</div>
+                            </div>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+
+        </div>
+
+        <footer>
+            Agent Developer Learning Roadmap · Tailored for EEE Procedural Modeling Project
+        </footer>
+    </div>
+
+    <script>
+        function toggleTask(item) {
+            const checkbox = item.querySelector('input[type="checkbox"]');
+            if (event.target !== checkbox) {
+                checkbox.checked = !checkbox.checked;
+            }
+            updateProgress();
+        }
+
+        function updateProgress() {
+            const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+            let checkedCount = 0;
+            checkboxes.forEach(cb => {
+                if (cb.checked) checkedCount++;
+            });
+            const percent = Math.round((checkedCount / checkboxes.length) * 100);
+
+            document.getElementById('progress-text').innerText = percent + '%';
+            document.getElementById('progress-circle').style.background = `conic-gradient(#10b981 ${percent}%, #1f2937 ${percent}%)`;
+        }
+    </script>
+</body>
+</html>
