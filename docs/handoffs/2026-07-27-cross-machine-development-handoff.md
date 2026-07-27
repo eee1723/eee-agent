@@ -114,8 +114,23 @@ actual executable path in the smoke commands.
    disconnected probe node cannot hijack the commit gates/display flag;
    (b) observed model hygiene gap (probe/default nodes left in the sandbox
    and committed) is mitigated by (a) and recorded as B6 feedback material.
-   B3–B6 (sketch stability ×3, zero-parm-error on a new object, five-class
-   fault injection, and feedback reports) remain pending.
+   **B3–B6 COMPLETE (2026-07-27):**
+   - B3: three consecutive `--sketch-only` chair runs passed — valid nonblank
+     PNG, zero pre-approval writes, and the static HTML checklist
+     (self-contained Three.js, no animation timers, const dimension block).
+   - B4: all three cases re-ran with ZERO parameter-name errors (a hard gate
+     in the journey fails the run on any "parm not found"). The brief now
+     injects the catalog parm cheat-sheet and forbids stalling when the
+     knowledge base is unavailable (an earlier brief revision caused the
+     model to refuse building when the KB cache was empty).
+   - B5: `tests/runtime/fault_injection_houdini_smoke.py` — all five fault
+     classes (disconnected part, wrong size, pivot error, missing part,
+     wrong color) are caught on real Houdini by the extended
+     `eval/geometry_assertions.py` (`mesh_component_count`,
+     `evaluate_parts`, `evaluate_color`).
+   - B6: each caught fault emits a bounded structured report
+     `{fault, check, location, expected, actual, hint}` designed for direct
+     agent feedback.
 4. **Wave C:** C1–C7 typed expressions, components, parameter scans, case
    library, and eval metrics remain pending.
 5. **Manual Houdini UI:** inspect the read-only task graph block in the docked

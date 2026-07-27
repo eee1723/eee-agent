@@ -93,6 +93,18 @@ _EVIDENCE_FIELDS = frozenset(
 )
 _MAX_EVIDENCE_BYTES = 16 * 1024
 
+_SKETCH_EVIDENCE_FIELDS = frozenset(
+    {
+        "case",
+        "run_a_status",
+        "render_sketch_ok",
+        "png_ok",
+        "pre_approval_houdini_writes",
+        "sketch_html_ok",
+        "scene_cleanup",
+    }
+)
+
 # Run A must not start ANY Houdini write tool before the user approves.
 _PRE_APPROVAL_FORBIDDEN_TOOLS = ("scratch_build", "scratch_commit", "cleanup_nodes")
 _RUN_B_REQUIRED_TOOLS = ("scratch_build", "verify_geometry", "scratch_commit")
@@ -209,7 +221,18 @@ def _brief_b(spec: _CaseSpec) -> str:
         "Step 1: build the asset step by step with scratch_build in "
         "functional units - catalog node types only, literal parameter "
         "values, semantic part node names - iterating build -> observe -> "
-        "adjust inside your run sandbox. Every node in the sandbox is part "
+        "adjust inside your run sandbox. Parameter names come from the "
+        "catalog, never from memory: a box is sized with sizex/sizey/sizez "
+        "(there is NO 'size' or 'radx' parm on a box), an xform translates "
+        "with tx/ty/tz and rotates with rx/ry/rz, a tube rod is line+sweep, "
+        "and parts are combined with merge and terminated in an output "
+        "null. You may confirm other names with search_houdini_knowledge, "
+        "but if the knowledge base has no answer, proceed with the "
+        "parameter names listed in this message and validate through the "
+        "geometry readback - never stall or stop because the knowledge "
+        "base is unavailable. A wrong parameter name is a hard failure; "
+        "refusing to build is also a failure. Every node in the "
+        "sandbox is part "
         "of the committed asset: NEVER create test, probe, or throwaway "
         "nodes (a default 1x1x1 box at the origin is a failure), create "
         "only the asset's parts, and delete any node you no longer need "
@@ -256,15 +279,20 @@ def _record_not_run(case: str | None, reason: str) -> int:
     return 0
 
 
-def _parse_case(argv: list[str] | None) -> str | None:
+def _parse_args(argv: list[str] | None) -> tuple[str | None, bool]:
     parser = argparse.ArgumentParser(
         prog="html_session_journey",
         description="L4 two-round HTML-sketch agent session acceptance journey.",
     )
     parser.add_argument("--case", help="one of: chair, desk, shelf")
+    parser.add_argument(
+        "--sketch-only",
+        action="store_true",
+        help="B3 mode: run only the design round plus static HTML checks.",
+    )
     args = parser.parse_args(argv)
     case = (args.case or "").strip().lower()
-    return case if case in _CASES else None
+    return (case if case in _CASES else None), bool(args.sketch_only)
 
 
 def _commit_preview_is_success(event: object, final_path: str) -> bool:
@@ -394,6 +422,57 @@ def _check_run_a(paths: object, events: list[object], case: str) -> None:
     _status(f"run A ({case}) completed: sketch rendered, zero Houdini writes")
 
 
+def _check_sketch_html(paths: object, case: str) -> None:
+    """B3 static-quality checks on the persisted sketch HTML.
+
+    Objective subset of the sketch checklist: self-contained Three.js,
+    static (no animation/timer loop), dimension constants collected in a
+    const block, bounded size.
+    """
+    html_path = (
+        paths.artifacts_dir / "sketches" / f"{case}_sketch.html"  # type: ignore[attr-defined]
+    )
+    try:
+        text = html_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        raise _StepError("sketch_html", "persisted sketch HTML is missing") from None
+    if not 1024 <= len(text) <= 256 * 1024:
+        raise _StepError("sketch_html", "sketch HTML size is out of bounds")
+    lowered = text.lower()
+    if "three" not in lowered:
+        raise _StepError("sketch_html", "sketch HTML does not reference three.js")
+    for token in ("requestanimationframe", "setinterval", "settimeout("):
+        if token in lowered:
+            raise _StepError("sketch_html", f"sketch HTML is not static ({token})")
+    if not re.search(r"const\s+[A-Za-z_$][\w$]*\s*=", text):
+        raise _StepError("sketch_html", "sketch HTML has no const dimension block")
+
+
+async def _run_sketch_journey(
+    paths: object, case: str, spec: _CaseSpec
+) -> dict[str, object]:
+    """B3 sketch-only round: run A checks plus the static HTML checklist."""
+    from eee_agent.runtime.lock import RuntimeLock
+    from eee_agent.runtime.service import RuntimeService
+
+    with RuntimeLock(paths.lock_file):
+        async with RuntimeService.open(paths, **_pj._service_wiring(paths)) as service:
+            session = await service.create_session(f"HTML sketch stability ({case})")
+            run_a = await service.start_run(session.session_id, _brief_a(case, spec))
+            await _wait_completed(service, run_a, "run_a")
+            events_a, _ = await _pj._replay_all(service, session.session_id)
+            _check_run_a(paths, events_a, case)
+            _check_sketch_html(paths, case)
+    return {
+        "case": case,
+        "run_a_status": "completed",
+        "render_sketch_ok": True,
+        "png_ok": True,
+        "pre_approval_houdini_writes": 0,
+        "sketch_html_ok": True,
+    }
+
+
 def _check_run_b_build(events: list[object]) -> str:
     """Hard checks for build/verify/commit; returns the built output node name."""
     tool_events = {
@@ -435,6 +514,11 @@ def _check_run_b_build(events: list[object]) -> str:
     )
     if verified is None:
         raise _StepError("run_b", "geometry verification did not pass")
+    # B4: zero parameter-name errors tolerated in the translation round.
+    for event in tool_events["scratch_build"][1]:
+        result = _pj._tool_result(event)
+        if result is not None and "parm not found" in str(result.get("message", "")):
+            raise _StepError("run_b", "parm name error in scratch_build")
     return output_name
 
 
@@ -665,10 +749,19 @@ def _write_evidence(path: Path, evidence: dict[str, object]) -> None:
     path.write_bytes(payload)
 
 
+def _write_sketch_evidence(path: Path, evidence: dict[str, object]) -> None:
+    if frozenset(evidence) != _SKETCH_EVIDENCE_FIELDS:
+        raise _StepError("evidence", "sketch evidence fields are invalid")
+    payload = json.dumps(evidence, sort_keys=True).encode("utf-8")
+    if len(payload) > _MAX_EVIDENCE_BYTES:
+        raise _StepError("evidence", "evidence record is too large")
+    path.write_bytes(payload)
+
+
 def main() -> int:
-    case = _parse_case(None)
+    case, sketch_only = _parse_args(None)
     if case is None:
-        print("usage: html_session_journey.py --case {chair,desk,shelf}")
+        print("usage: html_session_journey.py --case {chair,desk,shelf} [--sketch-only]")
         return _record_not_run(None, "case_required")
     spec = _CASES[case]
 
@@ -691,16 +784,23 @@ def main() -> int:
         worker = _pj._start_worker(config)
         _pj._wait_for_bridge(config, worker)
         _status("secure bridge ready")
-        evidence, session_id, split = asyncio.run(
-            _run_journey(config.paths, case, spec)
-        )
-        evidence["restart_replay_last_seq"] = asyncio.run(
-            _restart_replay(config.paths, session_id, split)
-        )
-        evidence["scene_cleanup"] = _pj._finish_scene_cleanup(config, worker)
-        _pj._close_worker_log(worker)
-        worker = None
-        _write_evidence(config.evidence_path, evidence)
+        if sketch_only:
+            evidence = asyncio.run(_run_sketch_journey(config.paths, case, spec))
+            evidence["scene_cleanup"] = _pj._finish_scene_cleanup(config, worker)
+            _pj._close_worker_log(worker)
+            worker = None
+            _write_sketch_evidence(config.evidence_path, evidence)
+        else:
+            evidence, session_id, split = asyncio.run(
+                _run_journey(config.paths, case, spec)
+            )
+            evidence["restart_replay_last_seq"] = asyncio.run(
+                _restart_replay(config.paths, session_id, split)
+            )
+            evidence["scene_cleanup"] = _pj._finish_scene_cleanup(config, worker)
+            _pj._close_worker_log(worker)
+            worker = None
+            _write_evidence(config.evidence_path, evidence)
     except _StepError as exc:
         print(
             f"html-journey: failed step={exc.step} detail={exc.detail}",
