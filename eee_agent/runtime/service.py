@@ -1775,19 +1775,25 @@ class RuntimeService:
                 )
                 current = None
             if current is not None and current.status in _TERMINAL_STATUSES:
-                # Best-effort scratch sandbox cleanup so a crashed/cancelled run
-                # does not leak its /obj/eee_scratch_<run> container. Failure
-                # is logged but never blocks the already-terminal run.
-                await self._cleanup_scratch_sandbox(run_id)
+                # A terminal Run is not the same thing as a disposable
+                # sandbox. In particular, Stop/Cancelled and a completed run
+                # whose commit was refused are inspection/retry states. A
+                # successful scratch_commit promotes (renames) the container
+                # itself, so there is no sandbox left to reap on that path.
+                #
+                # Do not call scratch.destroy here: doing so made Stop erase
+                # the user's work and also removed an uncommitted sandbox as
+                # soon as the model returned its final explanation.
                 self._tasks.pop(run_id, None)
 
     async def _cleanup_scratch_sandbox(self, run_id: str) -> None:
-        """Best-effort destroy of the run-scoped scratch sandbox container.
+        """Explicitly destroy one run-scoped scratch sandbox container.
 
-        Called on every terminal transition (completed/failed/cancelled). A
-        missing container (already committed or cleaned up) is a normal
-        non-error outcome. Cleanup failure is logged and swallowed so it can
-        never block the terminal transition or mask the run's real outcome.
+        This helper is intentionally *not* part of terminal Run convergence:
+        cancelled, failed, and uncommitted completed runs preserve their
+        sandbox for inspection or manual recovery. A missing container
+        (already committed or explicitly cleaned up) is a normal outcome.
+        Cleanup failure is logged and swallowed.
         """
         provider = getattr(self, "_scratch_bridge_provider", None)
         if provider is None:

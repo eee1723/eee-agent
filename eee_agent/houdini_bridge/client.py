@@ -826,9 +826,10 @@ class BridgeClient:
     ) -> ScratchDestroyResult:
         """Send a ``scratch.destroy`` request and return the cleanup result.
 
-        Best-effort cleanup of one run-scoped sandbox container. Unlike
-        exec/commit, destroy bypasses the write-freeze gate on the server side
-        (cleanup must run even after an uncertain recovery).
+        Explicit best-effort cleanup of one run-scoped sandbox container.
+        Unlike exec/commit, destroy bypasses the write-freeze gate on the
+        server side so an operator-requested disposal can run after uncertain
+        recovery. Terminal Runs do not call this automatically.
         """
         if type(request) is not ScratchDestroyRequest:
             raise TypeError("request must be a ScratchDestroyRequest")

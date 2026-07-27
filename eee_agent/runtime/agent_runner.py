@@ -357,11 +357,13 @@ def build_agent_runner(
             render_sketch,
             verify_geometry,
         )
+        from eee_agent.runtime.modeling_brief_tools import prepare_modeling_brief
 
         tools.append(scratch_build)
         tools.append(scratch_commit)
         tools.append(cleanup_nodes)
         tools.append(task_graph_status)
+        tools.append(prepare_modeling_brief)
         tools.append(render_sketch)
         tools.append(verify_geometry)
     graph = build_agent(

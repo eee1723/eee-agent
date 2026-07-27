@@ -2395,11 +2395,12 @@ class ChangeSetExecutor:
     def scratch_destroy(self, request: ScratchDestroyRequest) -> ScratchDestroyResult:
         """Best-effort destroy of one run-scoped sandbox container.
 
-        Run-end/cancel/restart hooks call this to avoid leaking
-        ``/obj/eee_scratch_<sandbox_id>`` containers. If the container does not
-        exist (already committed or cleaned up), returns ``missing=True`` — a
-        normal, non-error outcome. Any destroy failure is swallowed and the
-        surviving path is simply not reported as destroyed.
+        Explicit disposal/recovery flows call this for
+        ``/obj/eee_scratch_<sandbox_id>`` containers. Ordinary terminal Runs
+        preserve their sandbox. If the container does not exist (already
+        committed or cleaned up), ``missing=True`` is a normal outcome. Any
+        destroy failure is swallowed and the surviving path is not reported as
+        destroyed.
         """
         hou = self._hou
         container_path = request.container_path
@@ -2411,11 +2412,10 @@ class ChangeSetExecutor:
         if container is None:
             return ScratchDestroyResult(destroyed_paths=(), missing=True)
         try:
-            # Cleanup is terminal: destroy must NOT be a user-undoable chunk.
-            # If it were grouped, a later hou.undos.undo() (by the user or any
-            # code path) could resurrect /obj/eee_scratch_<sandbox_id> after the
-            # run is already terminal, leaving an orphan that collides with the
-            # next run of the same id. Run it with undo recording disabled.
+            # Explicit disposal must NOT be a user-undoable chunk. If it were
+            # grouped, a later hou.undos.undo() could silently resurrect a
+            # sandbox the operator deliberately discarded. Run it with undo
+            # recording disabled.
             with hou.undos.disabler():  # type: ignore[union-attr]
                 container.destroy()
                 destroyed.append(container_path)

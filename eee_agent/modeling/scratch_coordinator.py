@@ -51,6 +51,10 @@ _log = logging.getLogger(__name__)
 # by the DTO layer in scratch.py (ScratchOp.from_dict / ScratchRequest), so
 # they are not duplicated here.
 _MAX_OPS_PER_CALL = 64
+# ScratchCommitRequest uses the same bounded collection limit on the wire.
+# Task history can legitimately exceed it across iterative scratch_build
+# calls, so commit metadata must be reduced before constructing the DTO.
+_MAX_COMMIT_ANNOTATIONS = 64
 
 
 class ScratchError(ValueError):
@@ -222,7 +226,7 @@ class ScratchCoordinator:
             self._validate_manifest_refs(manifest)
         except ScratchError as exc:
             return {"ok": False, "code": exc.code, "message": str(exc)}
-        annotations = await self._commit_annotations()
+        annotations, omitted_annotations = await self._commit_annotations()
         try:
             commit_kwargs = dict(
                 sandbox_id=sandbox_id,
@@ -242,7 +246,19 @@ class ScratchCoordinator:
             return _bridge_or_op_failure(exc, default="scratch.op_failed")
         if result.committed:
             await self._record_commit(result)
-        return self._summarize_commit(result)
+        summary = self._summarize_commit(result)
+        if omitted_annotations:
+            warnings = summary.get("warnings")
+            if type(warnings) is not list:
+                warnings = []
+            summary["warnings"] = [
+                *warnings,
+                (
+                    f"{omitted_annotations} older task annotations were omitted "
+                    "to stay within the commit metadata limit."
+                ),
+            ]
+        return summary
 
     async def _record_build(
         self,
@@ -257,17 +273,31 @@ class ScratchCoordinator:
             step = await store.record_step(
                 run_id=self._context.run_id, tool="scratch_build", purpose=purpose
             )
+            # Only the prefix reported as applied reached Houdini. Recording
+            # the entire requested batch after a partial result invents nodes
+            # that never existed and later pollutes commit annotations.
+            applied_ops = typed_ops[:result.applied_ops]
             created = tuple(
                 (
                     f"{result.sandbox_root}/{op.parent + '/' if op.parent else ''}{op.node_name}",
                     op.node_type,
                     op.note or None,
                 )
-                for op in typed_ops
+                for op in applied_ops
                 if op.kind == "create_node"
             )
             if created:
                 await store.record_nodes(step_id=step.step_id, nodes=created)
+            deleted = tuple(
+                f"{result.sandbox_root}/{op.node_name}"
+                for op in applied_ops
+                if op.kind == "delete_node"
+            )
+            if deleted:
+                await store.mark_deleted(
+                    run_id=self._context.run_id,
+                    node_paths=deleted,
+                )
         except Exception:  # noqa: BLE001
             self._store_failed = True
             _log.exception(
@@ -275,10 +305,12 @@ class ScratchCoordinator:
                 self._context.run_id,
             )
 
-    async def _commit_annotations(self) -> tuple[tuple[str, str], ...]:
+    async def _commit_annotations(
+        self,
+    ) -> tuple[tuple[tuple[str, str], ...], int]:
         store = self._context.task_store
         if store is None or self._store_failed:
-            return ()
+            return (), 0
         try:
             steps = await store.list_run_steps(self._context.run_id)
         except Exception:  # noqa: BLE001
@@ -287,16 +319,32 @@ class ScratchCoordinator:
                 "task graph read failed; committing without annotations (run=%s)",
                 self._context.run_id,
             )
-            return ()
-        annotations: dict[str, str] = {}
+            return (), 0
+        # Keep recency metadata separately from the wire payload. When an
+        # iterative run creates more nodes than the DTO can annotate, the most
+        # recent nodes include final merges/OUTs and are more useful than early
+        # probes. Sorting the selected payload by relative path keeps the wire
+        # deterministic.
+        annotations: dict[str, tuple[int, int, str]] = {}
         for step in steps:
             for node in step.nodes:
                 if node.status != "sandbox":
                     continue
                 root = f"/obj/eee_scratch_{self._context.sandbox_id}"
                 relative = node.node_path[len(root) + 1:] if node.node_path.startswith(root + "/") else node.node_path.rsplit("/", 1)[-1]
-                annotations[relative] = (node.note or step.purpose)[:500]
-        return tuple(sorted(annotations.items()))
+                annotations[relative] = (
+                    step.seq,
+                    node.node_id,
+                    (node.note or step.purpose)[:500],
+                )
+        ordered = sorted(
+            annotations.items(),
+            key=lambda item: (item[1][0], item[1][1], item[0]),
+        )
+        omitted = max(0, len(ordered) - _MAX_COMMIT_ANNOTATIONS)
+        selected = ordered[-_MAX_COMMIT_ANNOTATIONS:]
+        payload = tuple(sorted((path, meta[2]) for path, meta in selected))
+        return payload, omitted
 
     async def _record_commit(self, result: ScratchCommitResult) -> None:
         store = self._context.task_store

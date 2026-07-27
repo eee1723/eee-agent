@@ -74,7 +74,7 @@ class RuntimeToolContext:
     knowledge: KnowledgeProvider
     modeling: object | None = None
     scratch: object | None = None
-    sketch: object | None = None
+    sketch: SketchRenderProvider | None = None
     task_graph: object | None = None
 
     def __post_init__(self) -> None:

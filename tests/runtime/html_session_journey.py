@@ -6,8 +6,10 @@ lifecycle, wiring, replay, and bounded-evidence mechanics) to the full
 HTML-sketch pipeline contract:
 
 Run A (user request): the agent must analyze the component list and
-real-world dimensions, author ONE self-contained Three.js HTML sketch, call
-``render_sketch`` once, report the PNG path, and STOP for review — with ZERO
+real-world dimensions, compile one ready brief with
+``prepare_modeling_brief``, author ONE self-contained Three.js HTML sketch,
+call ``render_sketch`` once with the matching digest, report the PNG path,
+and STOP for review — with ZERO
 Houdini write tool calls (``scratch_build`` / ``scratch_commit`` /
 ``cleanup_nodes`` tool.started counts must all be 0; this is the core
 acceptance point).
@@ -195,15 +197,21 @@ def _brief_a(case: str, spec: _CaseSpec) -> str:
         "that never reaches the tool call is a failure. "
         "Step 1: reason briefly about the component list and the real-world "
         f"dimensions (meters): {spec.dimensions}. "
-        "Step 2: author exactly one self-contained Three.js HTML document "
+        "Step 2: call prepare_modeling_brief with a complete ready brief "
+        "(no clarification questions in this deterministic acceptance run). "
+        "Use Y-up, an explicit forward axis, standard detail, named components, "
+        "orientation rules, structural constraints, three-quarter/side/front "
+        "review views, and executable acceptance statements. "
+        "Step 3: author exactly one self-contained Three.js HTML document "
         f"that renders a static 3/4 view of the {spec.label}. Put ALL "
         "dimension constants in one const block at the top of the file, use "
         f"semantic part names ({spec.parts}), add a ground plane and a fixed "
         "camera that frames the whole asset, and use no animation loop and "
         "no external assets other than the Three.js CDN script. "
-        f"Step 3: call the render_sketch tool once with sketch_name "
-        f"'{case}_sketch' and that HTML document. "
-        "Step 4: report the rendered PNG file path to the user and STOP - "
+        f"Step 4: call the render_sketch tool once with sketch_name "
+        f"'{case}_sketch', that HTML document, and the exact brief_digest "
+        "returned by prepare_modeling_brief. "
+        "Step 5: report the rendered PNG file path to the user and STOP - "
         "wait for the user's review. "
         "Hard constraint: in this run you must NOT call scratch_build, "
         "scratch_commit, cleanup_nodes, propose_modeling, or any other "

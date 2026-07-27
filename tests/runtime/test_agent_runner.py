@@ -694,6 +694,7 @@ def test_factory_opt_in_modeling_adds_modeling_tools(monkeypatch) -> None:
             "scratch_commit",
             "cleanup_nodes",
             "task_graph_status",
+            "prepare_modeling_brief",
             "render_sketch",
         "verify_geometry",
     }
@@ -717,6 +718,7 @@ def test_agent_runner_builds_only_secure_tools(monkeypatch) -> None:
             "scratch_commit",
             "cleanup_nodes",
             "task_graph_status",
+        "prepare_modeling_brief",
         "render_sketch",
         "verify_geometry",
     }

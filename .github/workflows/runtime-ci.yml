@@ -76,6 +76,8 @@ jobs:
           eee_agent/runtime/agent_context.py
           eee_agent/runtime/knowledge.py
           eee_agent/runtime/agent_tools.py
+          eee_agent/runtime/modeling_brief_tools.py
+          eee_agent/runtime/sketch_tools.py
           eee_agent/vision
       - name: Audit the frozen runtime dependency export
         shell: pwsh

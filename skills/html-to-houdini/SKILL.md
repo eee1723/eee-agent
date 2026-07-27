@@ -75,4 +75,4 @@ y=1, z=2 · `endcaptype`: none=0, single=1.
 Catalog parms use literals or the C1 typed `expr` AST; channel references are
 safe relative refs. While translating, still **record** the parameterization intent
 (design intent / derived / constant per dimension, plus dependency
-patterns) — the procedural-modeling skill's Stage 6 delivers this record.
+patterns) — the procedural-modeling skill's Stage 7 delivers this record.

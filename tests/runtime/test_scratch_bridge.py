@@ -1939,6 +1939,140 @@ class TestScratchCoordinatorCommit:
         assert annotations == {"tabletop": "输出"}
 
 
+    def test_commit_annotations_are_bounded_to_recent_live_nodes(
+        self, tmp_path: Path
+    ) -> None:
+        """Large iterative task graphs must never block scratch_commit."""
+        from eee_agent.runtime.database import RuntimeDatabase
+        from eee_agent.runtime.task_graph import TaskGraphStore
+
+        async def run() -> tuple[_CommitFakeProvider, dict[str, object]]:
+            database = await RuntimeDatabase.open(tmp_path / "bounded.sqlite")
+            try:
+                store = TaskGraphStore(database)
+                now = datetime.now(timezone.utc).isoformat()
+                async with database.write_transaction() as conn:
+                    await conn.execute(
+                        "INSERT INTO sessions(session_id,title,status,created_at,"
+                        "updated_at,last_seq,replay_floor_seq) VALUES "
+                        "('sess_1','t','active',?,?,0,0)",
+                        (now, now),
+                    )
+                    await conn.execute(
+                        "INSERT INTO runs(run_id,session_id,status,user_input,"
+                        "created_at,model_snapshot_json) VALUES "
+                        "('run_1','sess_1','Planning','build',?,'{}')",
+                        (now,),
+                    )
+                for start, stop in ((0, 35), (35, 70)):
+                    step = await store.record_step(
+                        run_id="run_1",
+                        tool="scratch_build",
+                        purpose=f"functional unit {start}",
+                    )
+                    await store.record_nodes(
+                        step_id=step.step_id,
+                        nodes=[
+                            (
+                                f"/obj/eee_scratch_run1/n{i:03d}",
+                                "box",
+                                None,
+                            )
+                            for i in range(start, stop)
+                        ],
+                    )
+                provider = _CommitFakeProvider(committed=True)
+                coord = ScratchCoordinator(
+                    ScratchSessionContext(
+                        provider=provider,
+                        sandbox_id="run1",
+                        run_id="run_1",
+                        task_store=store,
+                    )
+                )
+                result = await coord.commit(
+                    target_parent_path="/obj", target_name="asset"
+                )
+                return provider, result
+            finally:
+                await database.close()
+
+        provider, result = asyncio.run(run())
+        assert result["committed"] is True
+        annotations = provider.commit_calls[0]["annotations"]
+        assert type(annotations) is dict
+        assert len(annotations) == 64
+        assert "n000" not in annotations
+        assert "n005" not in annotations
+        assert "n006" in annotations
+        assert "n069" in annotations
+        assert result["warnings"] == [
+            "6 older task annotations were omitted to stay within the "
+            "commit metadata limit."
+        ]
+
+    def test_scratch_build_delete_updates_task_node_lifecycle(
+        self, tmp_path: Path
+    ) -> None:
+        """delete_node operations must not leave stale commit annotations."""
+        from eee_agent.runtime.database import RuntimeDatabase
+        from eee_agent.runtime.task_graph import TaskGraphStore
+
+        async def run() -> tuple[str, dict[str, str], int]:
+            database = await RuntimeDatabase.open(tmp_path / "delete.sqlite")
+            try:
+                store = TaskGraphStore(database)
+                now = datetime.now(timezone.utc).isoformat()
+                async with database.write_transaction() as conn:
+                    await conn.execute(
+                        "INSERT INTO sessions(session_id,title,status,created_at,"
+                        "updated_at,last_seq,replay_floor_seq) VALUES "
+                        "('sess_1','t','active',?,?,0,0)",
+                        (now, now),
+                    )
+                    await conn.execute(
+                        "INSERT INTO runs(run_id,session_id,status,user_input,"
+                        "created_at,model_snapshot_json) VALUES "
+                        "('run_1','sess_1','Planning','build',?,'{}')",
+                        (now,),
+                    )
+                provider = _FakeScratchProvider()
+                coord = ScratchCoordinator(
+                    ScratchSessionContext(
+                        provider=provider,
+                        sandbox_id="run1",
+                        run_id="run_1",
+                        task_store=store,
+                    )
+                )
+                await coord.build(
+                    purpose="temporary probe",
+                    operations=[
+                        {
+                            "kind": "create_node",
+                            "node_name": "probe",
+                            "node_type": "box",
+                        }
+                    ],
+                )
+                await coord.build(
+                    purpose="remove temporary probe",
+                    operations=[
+                        {"kind": "delete_node", "node_name": "probe"}
+                    ],
+                )
+                steps = await store.list_run_steps("run_1")
+                annotations, omitted = await coord._commit_annotations()
+                return steps[0].nodes[0].status, dict(annotations), omitted
+            finally:
+                await database.close()
+
+        status, annotations, omitted = asyncio.run(run())
+        assert status == "deleted"
+        assert annotations == {}
+        assert omitted == 0
+
+
 # ==========================================================================
 # Phase 2.3: scratch_commit tool
 # ==========================================================================
@@ -2190,7 +2324,7 @@ async def test_scratch_destroy_sent_frame_carries_operation() -> None:
 
 
 # --------------------------------------------------------------------------
-# Phase 3.2: service-level cleanup hook (_cleanup_scratch_sandbox)
+# Explicit service-level cleanup helper (_cleanup_scratch_sandbox)
 # --------------------------------------------------------------------------
 
 

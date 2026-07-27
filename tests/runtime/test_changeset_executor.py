@@ -295,8 +295,8 @@ class _Undos:
 
     def disabler(self):
         # Mirrors hou.undos.disabler(): a context manager that suppresses undo
-        # recording. Used by terminal cleanup (scratch.destroy) so the destroy
-        # cannot be undone back into an orphan node.
+        # recording. Used by explicit scratch.destroy so disposal cannot be
+        # undone back into an orphan node.
         spy = self._spy
 
         @contextlib.contextmanager

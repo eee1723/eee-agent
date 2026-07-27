@@ -1326,10 +1326,11 @@ class ScratchDestroyRequest:
     """A parsed, validated ``scratch.destroy`` request envelope.
 
     Best-effort cleanup of one run-scoped sandbox container
-    (``/obj/eee_scratch_<sandbox_id>``). Run-end/cancel/restart hooks call this
-    to avoid leaking scratch containers across runs. Unlike exec/commit, destroy
-    bypasses the write-freeze gate: cleanup MUST run even after an uncertain
-    recovery, otherwise a crashed run leaks its sandbox forever.
+    (``/obj/eee_scratch_<sandbox_id>``). It is reserved for explicit disposal
+    and recovery flows; ordinary Run completion/cancellation preserves the
+    sandbox for inspection. Unlike exec/commit, destroy bypasses the
+    write-freeze gate so an explicitly requested cleanup can still run after
+    uncertain recovery.
     """
 
     request_id: str

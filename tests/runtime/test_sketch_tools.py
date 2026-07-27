@@ -119,6 +119,9 @@ def test_render_sketch_rejects_invalid_input() -> None:
     assert _run(render_sketch.coroutine("<html/>", "n" * 65, runtime))["code"] == (
         "runtime.tool_input_invalid"
     )
+    assert _run(
+        render_sketch.coroutine("<html/>", "ok-name", runtime, "not-a-digest")
+    )["code"] == "runtime.tool_input_invalid"
 
 
 def test_render_sketch_fails_closed_without_provider() -> None:
@@ -132,6 +135,17 @@ def test_render_sketch_passes_through_provider_result() -> None:
     result = _run(render_sketch.coroutine("<html/>", "bike", _runtime(sketch=sketch)))
     assert result == {"ok": True, "image_path": "/tmp/bike.png", "image_bytes": 1234}
     assert sketch.calls == [{"html_content": "<html/>", "sketch_name": "bike"}]
+
+
+def test_render_sketch_returns_modeling_brief_digest() -> None:
+    digest = "a" * 64
+    result = _run(
+        render_sketch.coroutine(
+            "<html/>", "bike", _runtime(), brief_digest=digest
+        )
+    )
+    assert result["ok"] is True
+    assert result["brief_digest"] == digest
 
 
 def test_render_sketch_maps_provider_failure_and_malformed() -> None:

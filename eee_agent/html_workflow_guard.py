@@ -5,7 +5,8 @@ the Knowledge Graph and are not automatically inserted into every model call.
 A model can therefore jump directly from a broad asset request to
 ``scratch_build``.  This middleware makes the critical boundary executable:
 
-* a procedural/parametric request must successfully call ``render_sketch``;
+* a procedural/parametric request must compile a ready modeling brief;
+* ``render_sketch`` must carry the exact digest of that brief;
 * a later Human message must explicitly approve that rendered sketch; and
 * only then may ``scratch_build`` or ``scratch_commit`` execute.
 
@@ -24,12 +25,16 @@ from langchain_core.messages import HumanMessage, ToolMessage
 from typing_extensions import override
 
 
-_GUARDED_TOOLS = frozenset({"scratch_build", "scratch_commit"})
+_GUARDED_TOOLS = frozenset({"render_sketch", "scratch_build", "scratch_commit"})
 _WORKFLOW_MARKERS = (
     "程序化",
     "参数化",
+    "建模",
+    "模型",
     "procedural",
     "parametric",
+    "modeling",
+    "3d model",
 )
 _APPROVAL_MARKERS = (
     "批准",
@@ -77,8 +82,36 @@ def _render_succeeded(message: Any) -> bool:
     return isinstance(payload, dict) and payload.get("ok") is True
 
 
-def _workflow_state(messages: Sequence[Any]) -> tuple[bool, bool, bool]:
-    """Return ``(required, rendered, approved_after_render)``."""
+def _tool_payload(message: Any, name: str) -> dict[str, Any] | None:
+    if not isinstance(message, ToolMessage) or message.name != name:
+        return None
+    try:
+        payload = json.loads(_message_text(message))
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _ready_brief(message: Any) -> tuple[str, dict[str, Any]] | None:
+    payload = _tool_payload(message, "prepare_modeling_brief")
+    if (
+        payload is None
+        or payload.get("ok") is not True
+        or payload.get("ready") is not True
+    ):
+        return None
+    digest = payload.get("brief_digest")
+    brief = payload.get("brief")
+    if (
+        type(digest) is not str
+        or len(digest) != 64
+        or not isinstance(brief, dict)
+    ):
+        return None
+    return digest, brief
+
+
+def _workflow_trigger_index(messages: Sequence[Any]) -> int | None:
     trigger_index: int | None = None
     for index, message in enumerate(messages):
         if not isinstance(message, HumanMessage):
@@ -87,15 +120,58 @@ def _workflow_state(messages: Sequence[Any]) -> tuple[bool, bool, bool]:
         if any(marker in text for marker in _WORKFLOW_MARKERS):
             trigger_index = index
             break
-    if trigger_index is None:
-        return False, False, False
+    return trigger_index
 
+
+def _latest_ready_brief_after_latest_human(
+    messages: Sequence[Any], trigger_index: int
+) -> tuple[str, dict[str, Any]] | None:
+    latest_human_index = trigger_index
+    latest_ready: tuple[int, str, dict[str, Any]] | None = None
+    for index in range(trigger_index + 1, len(messages)):
+        message = messages[index]
+        if isinstance(message, HumanMessage):
+            latest_human_index = index
+        ready = _ready_brief(message)
+        if ready is not None:
+            latest_ready = (index, ready[0], ready[1])
+    if latest_ready is None or latest_ready[0] <= latest_human_index:
+        return None
+    return latest_ready[1], latest_ready[2]
+
+
+def _workflow_state(messages: Sequence[Any]) -> tuple[bool, bool, bool, bool]:
+    """Return ``(required, brief_ready, rendered, approved_after_render)``."""
+    trigger_index = _workflow_trigger_index(messages)
+    if trigger_index is None:
+        return False, False, False, False
+
+    brief_ready = False
+    latest_human_index = trigger_index
+    latest_brief_index: int | None = None
+    latest_brief_digest: str | None = None
     render_index: int | None = None
     for index in range(trigger_index + 1, len(messages)):
-        if _render_succeeded(messages[index]):
+        message = messages[index]
+        if isinstance(message, HumanMessage):
+            latest_human_index = index
+        ready = _ready_brief(message)
+        if ready is not None:
+            brief_ready = True
+            latest_brief_index = index
+            latest_brief_digest = ready[0]
+        if not _render_succeeded(message):
+            continue
+        payload = _tool_payload(message, "render_sketch")
+        render_digest = payload.get("brief_digest") if payload else None
+        if (
+            latest_brief_index is not None
+            and latest_brief_index > latest_human_index
+            and render_digest == latest_brief_digest
+        ):
             render_index = index
     if render_index is None:
-        return True, False, False
+        return True, brief_ready, False, False
 
     approved = False
     for message in messages[render_index + 1 :]:
@@ -107,7 +183,7 @@ def _workflow_state(messages: Sequence[Any]) -> tuple[bool, bool, bool]:
         ):
             approved = True
             break
-    return True, True, approved
+    return True, brief_ready, True, approved
 
 
 def _tool_name(request: Any) -> str:
@@ -142,9 +218,42 @@ def _blocked_result(request: Any) -> ToolMessage | None:
         return None
     state = getattr(request, "state", None)
     messages = state.get("messages", ()) if isinstance(state, dict) else ()
-    required, rendered, approved = _workflow_state(messages)
+    required, brief_ready, rendered, approved = _workflow_state(messages)
     if not required:
         return None
+    if name == "render_sketch":
+        trigger_index = _workflow_trigger_index(messages)
+        ready = (
+            _latest_ready_brief_after_latest_human(messages, trigger_index)
+            if trigger_index is not None
+            else None
+        )
+        if ready is None:
+            return _guard_error(
+                request,
+                "workflow.modeling_brief_required",
+                "生成程序化/参数化草图前必须先调用 prepare_modeling_brief。"
+                "只有组件范围或细节等级存在实质歧义时，才可一次性提出最多三个问题；"
+                "否则采用合理默认值并生成可验收的建模简报。",
+            )
+        call = getattr(request, "tool_call", None)
+        args = call.get("args") if isinstance(call, dict) else None
+        supplied_digest = args.get("brief_digest") if isinstance(args, dict) else None
+        if supplied_digest != ready[0]:
+            return _guard_error(
+                request,
+                "workflow.modeling_brief_mismatch",
+                "render_sketch.brief_digest 必须与最近一次已就绪建模简报的"
+                " brief_digest 完全一致。",
+            )
+        return None
+    if not brief_ready:
+        return _guard_error(
+            request,
+            "workflow.modeling_brief_required",
+            "程序化/参数化资产必须先完成 prepare_modeling_brief，"
+            "再生成与该简报摘要绑定的 HTML 草图。",
+        )
     if not rendered:
         return _guard_error(
             request,

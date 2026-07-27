@@ -7,6 +7,7 @@ bounded plain-dict results that never raise into the graph.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ _MAX_ISSUES = 32
 _EXPECT_INT_KEYS = frozenset({"min_verts", "max_verts", "min_faces", "max_faces"})
 _EXPECT_BBOX_KEYS = frozenset({"bbox_min", "bbox_max"})
 _MAX_EXPECT_INT = 10**9
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _error(code: str, message: str) -> dict[str, object]:
@@ -70,12 +72,16 @@ async def render_sketch(
     html_content: str,
     sketch_name: str,
     runtime: ToolRuntime,
+    brief_digest: str = "",
 ) -> dict[str, object]:
     """Render a Three.js/HTML sketch to a PNG for user review.
 
     Writes the bounded HTML under the runtime sketches directory and renders
     it with a local headless browser. Returns the image path on success, or
     a structured error (browser missing / timeout / render failure).
+    Procedural-design requests must pass the exact ``brief_digest`` returned
+    by ``prepare_modeling_brief`` so the sketch is bound to its approved axes,
+    component scope, detail level, constraints, and acceptance criteria.
     """
     if (
         type(html_content) is not str
@@ -84,6 +90,8 @@ async def render_sketch(
         or type(sketch_name) is not str
         or not sketch_name
         or len(sketch_name) > _MAX_NAME_CHARS
+        or type(brief_digest) is not str
+        or (brief_digest != "" and _SHA256_RE.fullmatch(brief_digest) is None)
     ):
         return _error("runtime.tool_input_invalid", "render_sketch input is invalid.")
     context = _context(runtime)
@@ -106,7 +114,10 @@ async def render_sketch(
             "bridge.unavailable",
             "The trusted sketch render provider returned a malformed result.",
         )
-    return dict(result)
+    payload = dict(result)
+    if brief_digest:
+        payload["brief_digest"] = brief_digest
+    return payload
 
 
 def _valid_expect(expect: Any) -> dict[str, Any] | None:

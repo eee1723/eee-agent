@@ -163,11 +163,16 @@ uv run --extra eval python -m eee_agent.runtime serve --help   # options
 - **Read-only + sandbox boundary (v2)** — the Runtime agent uses an exact
   read-only tool allowlist (`scene_status`, `query_scene`, `inspect_workspace`,
   `geometry_stats`, `work_status`, `search_houdini_knowledge`,
-  `get_houdini_knowledge`) plus two sandbox tools for modeling runs:
-  `scratch_build` (build/observe in an isolated `/obj/eee_scratch_<run>`
-  container) and `scratch_commit` (promote verified geometry through hard gates).
+  `get_houdini_knowledge`) plus bounded modeling tools:
+  `prepare_modeling_brief` (compile axes/components/detail/constraints/acceptance,
+  with at most one batch of three component/detail questions), `render_sketch`
+  (digest-bound HTML preview), `scratch_build` (build/observe in an isolated
+  `/obj/eee_scratch_<run>` container), `verify_geometry`, and `scratch_commit`
+  (promote verified geometry through hard gates).
   No raw write/save/export tool and no implicit general-purpose subagent.
-  Sandbox containers are cleaned up on run end/cancel/restart.
+  Stop/Cancelled, failed, and completed-but-uncommitted runs preserve their
+  run-scoped sandbox for inspection or recovery. A successful commit promotes
+  the container; `scratch.destroy` is reserved for explicit disposal.
   Conversation continuity uses `thread_id = session_id`.
 - **Docked Runtime control** — the Houdini panel can create/select Sessions,
   start/stop Runs, recover bounded output/activity, and render bounded
@@ -217,7 +222,7 @@ uv run --extra eval python -m eee_agent.runtime serve --help   # options
 | **Foundation milestone** | ✅ done — uv-locked deps, core contracts, provider registry (DeepSeek via official Anthropic endpoint), normalized events, explicit harness (no implicit `task`), `cli versions`. See `docs/handoffs/2026-07-13-foundation-migration.md` |
 | **Live Runtime acceptance on current machine** | real provider journey **passed 2026-07-20** (DeepSeek + Houdini 21.0.440, strict evidence harness); the RC tag remains (the interactive GUI checklist passed in Stage B acceptance) — see `docs/handoffs/2026-07-20-runtime-development-transfer.md` |
 | Runtime + typed Houdini ChangeSets | Complete through local Task 16-E acceptance (merged to `main`): trusted Workspace, ordered created references, transactional Apply, atomic receipts, and no-replay restart recovery. |
-| **Sandbox + verify + commit (Pi model)** | ✅ merged to `main`: iterative `scratch_build` in an isolated `/obj/eee_scratch_<run>` container, four hard verify gates (`houdini_side/scratch_verify.py`: bake/structure/orientation/health), `scratch_commit` promotion wrapped in one undo group, and `scratch.destroy` cleanup on run end/cancel/restart. Pure-Python orientation math ported to `eee_agent/modeling/orientation_math.py`. Legacy `propose_modeling` retired from the agent graph (module retained). Current full offline gate is **3546 passed, 12 skipped**. |
+| **Sandbox + verify + commit (Pi model)** | ✅ merged to `main`: iterative `scratch_build` in an isolated `/obj/eee_scratch_<run>` container, four hard verify gates (`houdini_side/scratch_verify.py`: bake/structure/orientation/health), and `scratch_commit` promotion wrapped in one undo group. Stop/failure/uncommitted completion preserve the sandbox; `scratch.destroy` is explicit disposal only. Pure-Python orientation math ported to `eee_agent/modeling/orientation_math.py`. Legacy `propose_modeling` retired from the agent graph (module retained). Current full offline gate is **3618 passed, 12 skipped**. |
 | **HTML-to-Houdini + node lifecycle wave** | 🚧 branch implementation complete through deterministic/offline coverage: scratch-native Provider evidence, task graph schema/projection, `scratch.v2`, safe two-phase cleanup, and panel task view. Real-Provider three-run acceptance, Waves B/C, panel manual review, and Houdini SOP display/render-flag persistence remain open. See `docs/handoffs/2026-07-27-cross-machine-development-handoff.md`. |
 | Docked Runtime panel | Task 17-A and Task 17-B are accepted. The complete Houdini 21.0.440 gate passed Chinese IME/default Session behavior, read-only Run, high-volume reopen, Runtime restart recovery, Stop to Cancelled, empty approvals/no Apply, Scene regression, and zero mutation. See `docs/superpowers/reviews/2026-07-16-task17-b-review-result.md` and `docs/handoffs/2026-07-16-runtime-17b-transfer.md` |
 | Strict modeling foundation | Task 18-A through 18-H, all deterministic validators (Spec/Graph/Cook/Geometry/Sensitivity/Semantic), bounded repair tickets, Golden Case catalog batches, and the MODEL/REVIEW product flow are implemented (merged to `main`): strict Brief/Spec contracts, catalog-gated compilation, trusted bootstrap persistence, approval-to-single-flight Apply, durable validation evidence, and verified assembly/surface/boolean replays. Dedicated Houdini 21 hython Golden Case replay passed. Richer asset batches remain iterative. See `docs/superpowers/plans/2026-07-17-task18-h-product-ui.md` and `docs/superpowers/plans/2026-07-17-task18-g-catalog-golden-cases.md` |

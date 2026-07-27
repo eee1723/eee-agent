@@ -586,6 +586,53 @@ def test_force_stop_persists_full_cancel_path(paths: RuntimePaths) -> None:
     _run(scenario())
 
 
+def test_terminal_runs_preserve_scratch_sandboxes(paths: RuntimePaths) -> None:
+    """Stop and an uncommitted normal return must not call scratch.destroy."""
+
+    class _DestroyTracker:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def scratch_destroy(self, *, sandbox_id: str):
+            self.calls.append(sandbox_id)
+
+    completed_runner = FakeRunner(_success_items("sandbox still needs commit"))
+
+    async def scenario() -> None:
+        async with RuntimeService.open(
+            paths, runner_factory=_factory_for(completed_runner)
+        ) as service:
+            tracker = _DestroyTracker()
+            # The production provider is optional in this offline service
+            # test; inject only the terminal-lifecycle observation seam.
+            service._scratch_bridge_provider = tracker  # type: ignore[assignment]
+
+            completed_session = await service.create_session("Completed")
+            completed = await service.start_run(
+                completed_session.session_id, "build but do not commit"
+            )
+            assert (
+                await service.wait_for_run(completed.run_id)
+            ).status is RunStatus.COMPLETED
+
+            gate = asyncio.Event()
+            cancelled_runner = FakeRunner(_success_items(), gate=gate)
+            service._runner = cancelled_runner  # type: ignore[assignment]
+            cancelled_session = await service.create_session("Cancelled")
+            cancelled = await service.start_run(
+                cancelled_session.session_id, "stop this build"
+            )
+            await _wait_until_streaming(cancelled_runner)
+            await service.stop_run(cancelled.run_id)
+            assert (
+                await service.wait_for_run(cancelled.run_id)
+            ).status is RunStatus.CANCELLED
+
+            assert tracker.calls == []
+
+    _run(scenario())
+
+
 def test_stop_run_idempotent_for_terminal(paths: RuntimePaths) -> None:
     runner = FakeRunner(_success_items("done"))
 

@@ -217,6 +217,22 @@ actual executable path in the smoke commands.
 5. **Manual Houdini UI:** inspect the read-only task graph block in the docked
    panel after a real modeling run.
 
+6. **Sandbox terminal-lifecycle correction (2026-07-27, offline verified):**
+   local Runtime records for `run_07f16371d5b649ba80a61bdb215d7006` and
+   `run_810b1a8b83da464cb54b6c395cd3059a` exposed two coupled defects.
+   `_run_guarded` called `scratch.destroy` for every terminal status, so Stop
+   erased the cancelled run and a completed-but-uncommitted run erased its
+   recovery sandbox immediately after reporting failure. Terminal convergence
+   now preserves those sandboxes; successful commit already promotes the
+   container, while destroy remains an explicit disposal capability. Task-graph
+   recording now marks applied `delete_node` operations deleted and records only
+   the applied prefix of partial batches. Commit metadata deterministically
+   retains the 64 most recent live-node annotations and reports omitted older
+   annotations as a warning instead of failing with
+   `ScratchCommitRequest.annotations exceeds the maximum count`. Offline
+   lifecycle/bridge/task-graph regressions pass; a fresh Runtime restart plus
+   interactive Houdini Stop/commit check remains pending.
+
 The detailed execution and evidence rules are in
 `docs/superpowers/plans/2026-07-26-hython-agent-chain-roadmap.md`.
 

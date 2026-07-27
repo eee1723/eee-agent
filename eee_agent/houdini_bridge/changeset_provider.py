@@ -284,9 +284,10 @@ class BridgeChangeSetProvider:
     ) -> ScratchDestroyResult:
         """Best-effort destroy of one run-scoped sandbox container.
 
-        Called by run-end/cancel/restart hooks to avoid leaking scratch
-        containers. Bypasses the write-freeze gate on the server side. A
-        missing container is a normal (non-error) outcome.
+        Used only by explicit disposal/recovery flows. Ordinary terminal Runs
+        preserve their sandbox for inspection and retry. This operation
+        bypasses the write-freeze gate on the server side; a missing container
+        is a normal (non-error) outcome.
         """
         binding = await self.current_binding()
         request = ScratchDestroyRequest.build(

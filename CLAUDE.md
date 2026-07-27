@@ -76,6 +76,10 @@ authoritative documentation; never rely on memory for version/API details.
    `spareParms()`. Scalar parameters have no suffix; vector components use
    `x/y/z`. Strict slider ranges use `setMinValue`, `setMaxValue`,
    `setMinIsStrict`, and `setMaxIsStrict`.
+5. A terminal Run is not a sandbox-disposal signal. Stop/Cancelled, failed,
+   and completed-but-uncommitted runs preserve `/obj/eee_scratch_<run>` for
+   inspection or recovery. Successful `scratch_commit` promotes the container;
+   `scratch.destroy` is explicit disposal only.
 
 ## Houdini installation
 
@@ -158,6 +162,10 @@ Bridge advertises `scratch.v2` for read-only topology and Runtime-allowlisted
 deletion. Commit finalization applies deterministic layout, comments, and
 display/render flags as best-effort warnings. The model receives a bounded task
 summary before async calls, and the panel has a read-only task block.
+Deleted scratch nodes are marked deleted in the task graph. Commit annotations
+include at most the 64 most recent live nodes, so long iterative runs cannot be
+blocked by the wire metadata limit; omitted older annotations are reported as a
+warning.
 
 The Houdini headless smoke currently confirms build, promotion, layout, topology,
 and allowlisted deletion. A remaining adversarial item is deferred persistence of
