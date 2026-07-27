@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,27 @@ _HOLD_SCRIPT = (
 
 def _lock_path(tmp_path: Path) -> Path:
     return tmp_path / "state" / "runtime.lock"
+
+
+def _acquire_after_holder_exit(path: Path, timeout: float = 10.0) -> RuntimeLock:
+    """Acquire the lock after the holder process exited.
+
+    On Windows, ``proc.wait()`` returns as soon as the child is reaped, but
+    the kernel can take a few more milliseconds to tear down the child's file
+    handles and release the byte-range lock. Retry contention briefly instead
+    of failing on that window.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return RuntimeLock(path).__enter__()
+        except AgentException as exc:
+            if (
+                exc.error.code != "runtime.already_running"
+                or time.monotonic() >= deadline
+            ):
+                raise
+            time.sleep(0.05)
 
 
 # --------------------------------------------------------------------------
@@ -154,9 +176,11 @@ def test_os_releases_lock_on_subprocess_termination(tmp_path: Path) -> None:
         proc.wait(timeout=15)
 
     # The OS released the lock when the holder process died (no graceful
-    # __exit__), so a new acquire succeeds.
-    with RuntimeLock(path):
-        pass
+    # __exit__), so a new acquire succeeds. On Windows the byte-range lock
+    # release can lag process reaping by a few milliseconds, so acquire via
+    # the bounded-retry helper.
+    lock = _acquire_after_holder_exit(path)
+    lock.close()
 
 
 def test_second_in_process_lock_is_rejected(tmp_path: Path) -> None:
