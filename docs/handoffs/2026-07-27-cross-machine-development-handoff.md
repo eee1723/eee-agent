@@ -156,14 +156,14 @@ actual executable path in the smoke commands.
    `tests/runtime/param_scan_houdini_smoke.py`, five tagged case YAMLs, and
    `eval.run_eval --report` aggregation with `null` + `not_run` for unavailable
    runtime/provider evidence. Updated component/modeling/cookbook guidance for
-   subnet + ctrl-node + typed expr conventions.
+   subnet public-parameter + typed expr conventions.
    Offline evidence: `252 passed` across the Wave C targeted gate
    (`test_wave_c_offline.py`, scratch bridge/finalize/task graph/executor,
    geometry assertions). Hython/real-provider C2–C7 scans remain `not_run`
    pending a Houdini credentialed run; no live acceptance is claimed.
    **Deterministic Hython continuation (2026-07-27):** added
    `tests/runtime/component_houdini_smoke.py`, which builds two nested SOP
-   subnets with ctrl-node parameters and typed relative/derived expressions,
+   subnets with public parameters and typed relative/derived expressions,
    commits the manifest into the container comment, verifies receipt tabs and
    ranges, checks nested annotations plus top-level OUT display/render flags,
    and deletes descendants in depth-safe order. It prints `COMPONENT SMOKE OK`
@@ -180,10 +180,18 @@ actual executable path in the smoke commands.
    (`EXPR SMOKE OK`), `scratch_houdini_smoke.py` (`SCRATCH SMOKE OK`),
    `fault_injection_houdini_smoke.py` (`FAULT INJECTION SMOKE OK`, five
    structured B6 reports), and `scratch_bridge_houdini_journey.py`
-   (`SCRATCH BRIDGE JOURNEY OK`). Offline runtime tests: `2316 passed`
+   (`SCRATCH BRIDGE JOURNEY OK`). Offline runtime tests: `2317 passed`
    (`uv run --frozen --extra eval pytest -q tests/runtime`); focused Wave C
-   plus scratch/task/executor/geometry gate: `239 passed`. Provider credentials,
-   screenshot/UI review, and real three-run acceptance remain `not_run`.
+   plus scratch/task/executor/geometry gate: `240 passed`. Provider credentials,
+     screenshot/UI review, and real three-run acceptance remain `not_run`.
+   **Public parameter interface correction (2026-07-27):** the component
+   smoke now uses bounded `declare_parm` operations to put `wheel_width` and
+   `frame_width` directly on their subnet parameter panels. No
+   `<component>_ctrl` nodes are created or required; derived geometry refs use
+   `../wheel_width` / `../frame_width`, and the manifest binds to the public
+   subnet parameter. The resulting HIP was inspected headlessly: each subnet
+   has a spare public parm and the committed component contains only `wheel`,
+   `frame`, `assembled`, and `OUT` at the top level.
 5. **Manual Houdini UI:** inspect the read-only task graph block in the docked
    panel after a real modeling run.
 

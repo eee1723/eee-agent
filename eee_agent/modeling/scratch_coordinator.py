@@ -527,10 +527,12 @@ class ScratchCoordinator:
                     expected_leaf = (
                         f"{dep_binding['node'].rsplit('/', 1)[-1]}/{dep_binding['parm']}"
                     )
+                    expected_public_ref = f"../{dep_binding['parm']}"
                     if not any(
                         ref == expected_suffix
                         or ref.endswith("/" + expected_suffix)
                         or ref.endswith("/" + expected_leaf)
+                        or ref == expected_public_ref
                         for ref in self._expr_refs
                     ):
                         raise ScratchError(
@@ -722,7 +724,7 @@ async def scratch_build(
       builds and why. It is recorded in the run task graph.
 
     operations — a non-empty list (<=64) of operation objects. Each has:
-      kind: "create_node" | "set_parm" | "connect"
+      kind: "create_node" | "declare_parm" | "set_parm" | "connect"
       For create_node:
         node_name: identifier (^[A-Za-z_][A-Za-z0-9_]*$, <=64 chars)
         node_type: a catalog node type (e.g. "box", "grid", "xform",
@@ -730,11 +732,15 @@ async def scratch_build(
           "fuse2", "subdivide", "resample", "boolean2", "line", "geo")
         parent: (optional) sandbox-relative name of a geo node to parent under;
           omit or "" to create directly under the sandbox container
+      For declare_parm:
+        node_name: a subnet or sandbox geo container
+        parm: public parameter name; label, unit, default value, min, and max
+          are bounded and exposed in that node's parameter panel
       For set_parm:
         node_name: the node to modify (must exist in the sandbox)
         parm: the parameter name (^[A-Za-z_][A-Za-z0-9_]*$)
         value: a number, integer, boolean, string, or a homogeneous list of
-          <=16 numbers; literal values only — no expressions, no file paths
+          <=16 numbers, or a typed C1 expr; no file paths or arbitrary code
       For connect:
         node_name: the node whose input to wire
         input_index: int >= 0

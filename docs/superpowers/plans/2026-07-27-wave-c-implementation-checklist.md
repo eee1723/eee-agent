@@ -27,16 +27,17 @@ offline / hython / real provider / GUI 分层标注，未跑的层写 `not_run`�
 
 ### 0.2 参数载体约定（C3/C4 落地，C5 依赖）
 
-catalog 16 种节点无法新增自定义 parm，因此 design-intent 参数的载体是
-**ctrl 节点约定**：
+design-intent 参数是**组件 subnet 的公开 spare parameters**，不是隐藏的
+几何节点或控制 box：
 
-- 每个组件 subnet 内放一个 `box` 命名 `<component>_ctrl`（资产级参数放顶层
-  `ctrl`），其 `sizex/sizey/sizez/tx/ty/tz` 等数值 parm 作为参数槽位。
-- ctrl 节点不接线进几何链（或接但被 merge 忽略——由案例结构保证不影响
-  `_scratch_output_node` 的 sink 判定：ctrl 是无输入的孤立节点，输给
-  "最多输入的 sink" 兜底逻辑）。
+- `declare_parm` 只允许在 `subnet` 或 sandbox `geo` 容器上增加有界浮点参数；
+  参数名、label、unit、default、min、max 都经过 DTO 校验。
+- 公开参数直接显示在组件 subnet 的参数面板中，例如 `wheel_width`、
+  `frame_width`；manifest 的 `binding` 指向 `wheel/wheel_width`。
 - derived 维度 = 几何节点 parm 上的 C1 `expr`，通过相对 ref
-  （`../seat_ctrl/sizex`）引用 ctrl 槽位；executor 渲染为绝对路径 `ch()`。
+  （`../wheel_width`）引用所属 subnet 的公开参数；executor 渲染为绝对路径
+  `ch()`。
+- 不再创建或要求用户查看 `<component>_ctrl` 节点；顶层仍保持唯一 `OUT` sink。
 - constant 维度 = 直接烘焙的字面量。
 
 ### 0.3 参数清单（Parameter Manifest）schema（C3 定义 DTO，C4 扩展，C5/C7 消费）
@@ -48,7 +49,7 @@ catalog 16 种节点无法新增自定义 parm，因此 design-intent 参数的�
   "name": "seat_width",
   "tab": "Seat",
   "classification": "design_intent | derived | constant",
-  "binding": {"node": "seat/seat_ctrl", "parm": "sizex"},
+  "binding": {"node": "seat", "parm": "seat_width"},
   "default": 0.45,
   "min": 0.35,
   "max": 0.60,

@@ -6,11 +6,11 @@ description: How to build multi-part parametric assets in the sandbox workflow â
 # Procedural Components (multi-part, parameter-driven assets)
 
 `set_parm` accepts literals or the C1 typed `expr` AST (no arbitrary Hscript,
-VEX, or file text). A component is a SOP `subnet`; place a
-`<component>_ctrl` box inside it and use its numeric parms as design-intent
-slots. Derived dimensions use safe relative channel refs and are recorded in
-the Parameter Manifest. Merge component outputs at the top level and keep one
-final `OUT` sink.
+VEX, or file text). A component is a SOP `subnet`; expose bounded public spare
+parameters on the subnet with `declare_parm`. Derived dimensions use safe
+relative channel refs and are recorded in the Parameter Manifest. Merge
+component outputs at the top level and keep one final `OUT` sink. Internal
+control boxes are not part of the user-facing component contract.
 
 ## Component structure in the sandbox
 - A component = a named node chain inside the sandbox: generator
@@ -96,8 +96,8 @@ built from catalog nodes carries no `component_id` prims. Consequences:
 
 ## Gotchas
 - Keep derived values as typed `expr` ASTs where a live channel relationship
-  is useful; use literals for constants and update the ctrl slot when a root
-  parameter changes. The manifest makes dependencies auditable.
+  is useful; use literals for constants and update the public subnet parameter
+  when a root parameter changes. The manifest makes dependencies auditable.
 - One small step per `scratch_build` call; verify counts/bbox after each.
 - A refused commit is a diagnosis, not an error: read `reason` + `gates`,
   fix the named defect in the preserved sandbox, re-commit.

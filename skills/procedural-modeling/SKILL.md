@@ -65,8 +65,8 @@ anti-patterns are binding. Key points:
 
 - You are the **transpiler**: re-author the sketch's intent as
   `scratch_build` op sequences (catalog node types plus C1 typed `expr`
-  parms). Use one SOP subnet per component and a `<component>_ctrl` box for
-  design-intent slots.
+  parms). Use one SOP subnet per component and `declare_parm` for bounded
+  public design-intent parameters.
 - Group ops by component; keep component boundaries visible in node naming and
   record the Parameter Manifest (classification/tab/range/dependencies).
 - Small steps; read the returned geometry (counts + bbox) and errors after
@@ -87,7 +87,7 @@ re-verify. **Only after `ok: true` may you `scratch_commit`.**
 `set_parm` supports typed expressions (`expr` instead of a literal `value`), so
 **derived** dimensions can be built as live channel references, not just
 recorded for later. An expression is a small JSON AST of: `num` literals,
-`ref` parm references (relative like `../ctrl/sizex` or absolute, always
+`ref` parm references (relative like `../wheel_width` or absolute, always
 resolving inside the sandbox), arithmetic (`add`/`sub`/`mul`/`div`/`neg`), and
 whitelisted functions (`sin cos tan asin acos atan sqrt abs min max floor
 ceil pow clamp`). Example — `box2.sizex` tracks `box1`:

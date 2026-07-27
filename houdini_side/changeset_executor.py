@@ -2257,6 +2257,44 @@ class ChangeSetExecutor:
                         node_index[key] = node
                         output_node_path = node.path()
                         applied += 1
+                    elif op.kind == "declare_parm":
+                        node = self._resolve_scratch_node(
+                            container_path, node_index, op.node_name
+                        )
+                        if node is None:
+                            raise _scratch_failed(
+                                f"declare_parm target node not found: {op.node_name}"
+                            )
+                        if node.type().name() not in {"subnet", "geo"}:
+                            raise _scratch_failed(
+                                "declare_parm target must be a subnet or geo container"
+                            )
+                        existing = node.parm(op.parm)
+                        if existing is not None:
+                            if not getattr(existing, "isSpare", lambda: False)():
+                                raise _scratch_failed(
+                                    f"declare_parm cannot replace native parm: "
+                                    f"{op.node_name}/{op.parm}"
+                                )
+                            template = existing.parmTemplate()
+                            if template.type().name() != "Float":
+                                raise _scratch_failed(
+                                    f"declare_parm requires a float spare parm: "
+                                    f"{op.node_name}/{op.parm}"
+                                )
+                            existing.set(float(op.value))
+                        else:
+                            template = hou.FloatParmTemplate(
+                                op.parm,
+                                op.label,
+                                1,
+                                default_value=(float(op.value),),
+                                min=float(op.minimum),
+                                max=float(op.maximum),
+                            )
+                            template.setTags({"unit": op.unit})
+                            node.addSpareParmTuple(template)
+                        applied += 1
                     elif op.kind == "set_parm":
                         node = self._resolve_scratch_node(
                             container_path, node_index, op.node_name

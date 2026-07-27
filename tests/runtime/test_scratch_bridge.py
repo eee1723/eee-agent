@@ -195,6 +195,30 @@ class TestScratchOp:
         op = ScratchOp(kind="set_parm", node_name="t", parm="p", value=[1.0, 2.0, 3.0])
         assert ScratchOp.from_dict(op.to_dict()) == op
 
+    def test_declare_public_parm_round_trip(self) -> None:
+        op = ScratchOp(
+            kind="declare_parm",
+            node_name="wheel",
+            parm="wheel_width",
+            label="Wheel width",
+            value=1.0,
+            minimum=0.5,
+            maximum=1.5,
+            unit="m",
+        )
+        assert ScratchOp.from_dict(op.to_dict()) == op
+        with pytest.raises(ValueError):
+            ScratchOp(
+                kind="declare_parm",
+                node_name="wheel",
+                parm="wheel_width",
+                label="Wheel width",
+                value=2.0,
+                minimum=0.5,
+                maximum=1.5,
+                unit="m",
+            )
+
     def test_connect_round_trip(self) -> None:
         op = ScratchOp(
             kind="connect",

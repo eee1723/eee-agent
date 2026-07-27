@@ -20,7 +20,8 @@ preserved across calls so the agent can iterate (build → observe → adjust);
 the agent or the runtime tears it down explicitly when done.
 
 Phase 1 supports **structured single-op mode**: a bounded list of typed
-operations (create_node / set_parm / connect) against the sandbox container.
+operations (create_node / declare_parm / set_parm / connect) against the
+sandbox container.
 Network/raw-Python ``exec`` mode is deferred to a later phase (it requires an
 async job protocol to avoid the 30s deadline ceiling).
 
@@ -109,13 +110,21 @@ _EXPR_FIELDS = {
 _PAYLOAD_FIELDS = frozenset(
     {"sandbox_id", "operations", "purpose", "preserve_on_failure"}
 )
-_OP_FIELDS = frozenset({"kind", "node_name", "node_type", "parent", "parm", "value", "expr", "input_index", "source", "source_output_index", "note"})
+_OP_FIELDS = frozenset(
+    {
+        "kind", "node_name", "node_type", "parent", "parm", "value", "expr",
+        "input_index", "source", "source_output_index", "note", "label",
+        "min", "max", "unit",
+    }
+)
 _RESULT_FIELDS = frozenset(
     {"sandbox_root", "applied_ops", "output_node", "errors", "geometry"}
 )
 _GEOMETRY_FIELDS = frozenset({"point_count", "prim_count", "vertex_count", "bbox_min", "bbox_max"})
 
-_OP_KINDS = frozenset({"create_node", "set_parm", "connect", "delete_node"})
+_OP_KINDS = frozenset(
+    {"create_node", "declare_parm", "set_parm", "connect", "delete_node"}
+)
 _NODE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _NODE_TYPE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_:]*$")
 _PARM_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -483,6 +492,9 @@ class ScratchOp:
     kinds:
       - create_node: create ``node_type`` named ``node_name`` under ``parent``
         (a sandbox-relative ref or the container root).
+      - declare_parm: add one public numeric parameter to a ``subnet`` or
+        sandbox ``geo`` container. ``value`` is its default and ``min`` /
+        ``max`` define the bounded UI range.
       - set_parm: set ``parm`` on ``node_name`` to a literal ``value``, or to
         a typed ``expr`` (exactly one of value/expr must be set).
       - connect: wire input ``input_index`` of ``node_name`` from ``source``
@@ -500,11 +512,15 @@ class ScratchOp:
     source: str = ""
     source_output_index: int = 0
     note: str = ""
+    label: str = ""
+    minimum: float | None = None
+    maximum: float | None = None
+    unit: str = ""
 
     def __post_init__(self) -> None:
         if self.kind not in _OP_KINDS:
             raise ValueError(
-                "ScratchOp.kind must be create_node|set_parm|connect|delete_node"
+                "ScratchOp.kind must be create_node|declare_parm|set_parm|connect|delete_node"
             )
         if self.kind == "create_node":
             _require_node_name(self.node_name, "ScratchOp.node_name")
@@ -520,6 +536,23 @@ class ScratchOp:
             # parent may be "" (= sandbox root) or a sandbox-relative ref
             if self.parent:
                 _require_node_ref(self.parent, "ScratchOp.parent")
+        elif self.kind == "declare_parm":
+            _require_parm_name(self.parm, "ScratchOp.parm")
+            if self.value is None:
+                raise ValueError("ScratchOp declare_parm requires a default value")
+            _require_finite_number(self.value, "ScratchOp.value")
+            if self.minimum is None or self.maximum is None:
+                raise ValueError("ScratchOp declare_parm requires min and max")
+            minimum = _require_finite_number(self.minimum, "ScratchOp.minimum")
+            maximum = _require_finite_number(self.maximum, "ScratchOp.maximum")
+            default = float(self.value)
+            if minimum > default or default > maximum:
+                raise ValueError("ScratchOp declare_parm requires min <= value <= max")
+            _require_bounded_text(self.label, "ScratchOp.label", 80)
+            if self.unit not in _PARAMETER_UNITS:
+                raise ValueError(
+                    "ScratchOp.unit must be one of m|deg|count"
+                )
         elif self.kind == "set_parm":
             _require_parm_name(self.parm, "ScratchOp.parm")
             if self.expr is not None:
@@ -545,6 +578,10 @@ class ScratchOp:
             if self.kind != "create_node":
                 raise ValueError("ScratchOp.note is only valid for create_node")
             _require_bounded_text(self.note, "ScratchOp.note", _MAX_NOTE_CHARS)
+        if self.kind != "declare_parm" and (self.label or self.minimum is not None or self.maximum is not None or self.unit):
+            raise ValueError(
+                "ScratchOp label/min/max/unit are only valid for declare_parm"
+            )
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> "ScratchOp":
@@ -573,6 +610,10 @@ class ScratchOp:
             source=d.get("source", ""),  # type: ignore[arg-type]
             source_output_index=d.get("source_output_index", 0),  # type: ignore[arg-type]
             note=d.get("note", ""),  # type: ignore[arg-type]
+            label=d.get("label", ""),  # type: ignore[arg-type]
+            minimum=d.get("min", None),  # type: ignore[arg-type]
+            maximum=d.get("max", None),  # type: ignore[arg-type]
+            unit=d.get("unit", ""),  # type: ignore[arg-type]
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -583,6 +624,13 @@ class ScratchOp:
                 d["parent"] = self.parent
             if self.note:
                 d["note"] = self.note
+        elif self.kind == "declare_parm":
+            d["parm"] = self.parm
+            d["value"] = self.value
+            d["label"] = self.label
+            d["min"] = self.minimum
+            d["max"] = self.maximum
+            d["unit"] = self.unit
         elif self.kind == "set_parm":
             d["parm"] = self.parm
             if self.expr is not None:

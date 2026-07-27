@@ -11,7 +11,7 @@ node types exist — using anything else fails the call:
 sweep2, merge, null, normal, fuse2, subdivide, resample`.
 
 `set_parm` values are literals or bounded typed `expr` ASTs (number / bool /
-string / list of <=16 numbers). Use a component `<component>_ctrl` box for
+string / list of <=16 numbers). Use `declare_parm` on the component subnet for
 design-intent slots and relative channel refs for derived dimensions. One
 small step per call; check the returned `geometry`
 (counts + bbox) and `errors` after each. When a parm isn't listed here,

@@ -1,8 +1,8 @@
 """Deterministic Wave C component/subnet smoke for Houdini hython.
 
 The smoke exercises the production scratch executor directly (no Runtime,
-Bridge server, Provider, or LLM).  It builds two SOP subnets with ctrl nodes,
-typed derived expressions, a single top-level merge/OUT sink, commits a
+Bridge server, Provider, or LLM).  It builds two SOP subnets with public spare
+parameters, typed derived expressions, a single top-level merge/OUT sink, commits a
 Parameter Manifest into the container comment, and then deletes nested
 targets in dependency-safe order.
 """
@@ -77,7 +77,7 @@ def main() -> int:
         ScratchParmDeclaration(
             name="wheel_width",
             tab="Wheel",
-            binding=(("node", "wheel/wheel_ctrl"), ("parm", "sizex")),
+            binding=(("node", "wheel"), ("parm", "wheel_width")),
             default=1.0,
             min=0.5,
             max=1.5,
@@ -86,7 +86,7 @@ def main() -> int:
         ScratchParmDeclaration(
             name="frame_width",
             tab="Frame",
-            binding=(("node", "frame/frame_ctrl"), ("parm", "sizex")),
+            binding=(("node", "frame"), ("parm", "frame_width")),
             default=2.0,
             min=1.0,
             max=3.0,
@@ -116,17 +116,14 @@ def main() -> int:
                 (
                     ScratchOp(kind="create_node", node_name="wheel", node_type="subnet"),
                     ScratchOp(
-                        kind="create_node",
-                        node_name="wheel_ctrl",
-                        node_type="box",
-                        parent="wheel",
-                        note="wheel design-intent ctrl",
-                    ),
-                    ScratchOp(
-                        kind="set_parm",
-                        node_name="wheel/wheel_ctrl",
-                        parm="sizex",
+                        kind="declare_parm",
+                        node_name="wheel",
+                        parm="wheel_width",
+                        label="Wheel width",
                         value=1.0,
+                        minimum=0.5,
+                        maximum=1.5,
+                        unit="m",
                     ),
                     ScratchOp(
                         kind="create_node",
@@ -139,7 +136,7 @@ def main() -> int:
                         node_name="wheel/wheel_body",
                         parm="sizex",
                         expr=ScratchExpr(
-                            kind="ref", path="../wheel_ctrl/sizex"
+                            kind="ref", path="../wheel_width"
                         ),
                     ),
                     ScratchOp(
@@ -157,17 +154,14 @@ def main() -> int:
                     ),
                     ScratchOp(kind="create_node", node_name="frame", node_type="subnet"),
                     ScratchOp(
-                        kind="create_node",
-                        node_name="frame_ctrl",
-                        node_type="box",
-                        parent="frame",
-                        note="frame design-intent ctrl",
-                    ),
-                    ScratchOp(
-                        kind="set_parm",
-                        node_name="frame/frame_ctrl",
-                        parm="sizex",
+                        kind="declare_parm",
+                        node_name="frame",
+                        parm="frame_width",
+                        label="Frame width",
                         value=2.0,
+                        minimum=1.0,
+                        maximum=3.0,
+                        unit="m",
                     ),
                     ScratchOp(
                         kind="create_node",
@@ -185,7 +179,7 @@ def main() -> int:
                             args=(
                                 ScratchExpr(
                                     kind="ref",
-                                    path="../frame_ctrl/sizex",
+                                    path="../frame_width",
                                 ),
                                 ScratchExpr(kind="num", value=2.0),
                             ),
@@ -238,7 +232,7 @@ def main() -> int:
                 )
             )
         )
-        expect(built.applied_ops == 19, f"applied_ops={built.applied_ops}")
+        expect(built.applied_ops == 17, f"applied_ops={built.applied_ops}")
         expect(not built.errors, f"cook errors={built.errors}")
         expect(
             built.output_node.endswith("/OUT"),
@@ -255,8 +249,8 @@ def main() -> int:
                 target_name=f"eee_component_{token}",
                 skip_structure_check=True,
                 annotations={
-                    "wheel/wheel_ctrl": "wheel ctrl",
-                    "frame/frame_ctrl": "frame ctrl",
+                    "wheel": "Wheel component",
+                    "frame": "Frame component",
                 },
                 parameters=manifest,
             )
@@ -272,11 +266,30 @@ def main() -> int:
         expect(container is not None, "committed container missing")
         stored = json.loads(container.comment())
         expect(len(stored) == 3, f"manifest comment entries={len(stored)}")
+        expect(hou.node(f"{final_path}/wheel").comment() == "Wheel component",
+               "nested wheel annotation missing")
+        expect(container.node("wheel").parm("wheel_width") is not None,
+               "public wheel parameter missing")
+        expect(container.node("frame").parm("frame_width") is not None,
+               "public frame parameter missing")
         expect(
-            hou.node(f"{final_path}/wheel/wheel_ctrl").comment() == "wheel ctrl",
-            "nested wheel annotation missing",
+            not any(child.name().endswith("_ctrl")
+                    for child in container.allSubChildren()),
+            "internal ctrl node leaked into committed component",
         )
+        wheel = container.node("wheel")
+        frame = container.node("frame")
+        wheel.parm("wheel_width").set(1.5)
+        frame.parm("frame_width").set(3.0)
         output = hou.node(f"{final_path}/OUT")
+        expect(output is not None, "OUT node missing")
+        output.cook(force=True)
+        expect(container.node("wheel/wheel_body").parm("sizex").eval() == 1.5,
+               "wheel public parameter did not drive body")
+        expect(container.node("frame/frame_body").parm("sizex").eval() == 6.0,
+               "frame public parameter did not drive derived body")
+        wheel.parm("wheel_width").set(1.0)
+        frame.parm("frame_width").set(2.0)
         expect(output is not None and output.isDisplayFlagSet(), "OUT display flag missing")
         expect(output.isRenderFlagSet(), "OUT render flag missing")
         if args.hip_out:
@@ -286,10 +299,8 @@ def main() -> int:
         # the executor accepts the deep-first order and leaves no committed
         # component node behind.
         paths = (
-            f"{final_path}/wheel/wheel_ctrl",
             f"{final_path}/wheel/wheel_body",
             f"{final_path}/wheel/wheel_output",
-            f"{final_path}/frame/frame_ctrl",
             f"{final_path}/frame/frame_body",
             f"{final_path}/frame/frame_output",
             f"{final_path}/wheel",

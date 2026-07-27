@@ -172,7 +172,11 @@ def scan_component(
         # The committed top-level OUT is still cooked for every tier, but a
         # global merge can mask a smaller component's change (for example a
         # wheel changing while the frame remains larger).
-        component = node.parent()
+        component = (
+            node
+            if node.type().name() == "subnet"
+            else node.parent()
+        )
         component_output = (
             _find_output(component) if component is not container else output
         )
