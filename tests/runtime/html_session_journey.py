@@ -178,7 +178,9 @@ def _brief_a(case: str, spec: _CaseSpec) -> str:
     (normal behavior) but never copied into stdout/stderr or the evidence."""
     return (
         f"Design-review round for a {spec.label}. Do NOT touch Houdini in "
-        "this run. "
+        "this run. Work efficiently: keep your reasoning SHORT and start "
+        "producing the deliverable right away - a long internal monologue "
+        "that never reaches the tool call is a failure. "
         "Step 1: reason briefly about the component list and the real-world "
         f"dimensions (meters): {spec.dimensions}. "
         "Step 2: author exactly one self-contained Three.js HTML document "
@@ -207,7 +209,11 @@ def _brief_b(spec: _CaseSpec) -> str:
         "Step 1: build the asset step by step with scratch_build in "
         "functional units - catalog node types only, literal parameter "
         "values, semantic part node names - iterating build -> observe -> "
-        "adjust inside your run sandbox. The final scratch_build call must "
+        "adjust inside your run sandbox. Every node in the sandbox is part "
+        "of the committed asset: NEVER create test, probe, or throwaway "
+        "nodes (a default 1x1x1 box at the origin is a failure), create "
+        "only the asset's parts, and delete any node you no longer need "
+        "before committing. The final scratch_build call must "
         "terminate the network in a single output null SOP with a semantic "
         "name so its cooked result is the complete assembled asset. "
         "Step 2: call verify_geometry on that output node. Only after it "
@@ -326,8 +332,8 @@ def _geometry_within_envelope(stats: object, envelope: _Envelope) -> bool:
     bbox_min = bbox.get("min")
     bbox_max = bbox.get("max")
     if (
-        type(bbox_min) is not list
-        or type(bbox_max) is not list
+        not isinstance(bbox_min, (list, tuple))
+        or not isinstance(bbox_max, (list, tuple))
         or len(bbox_min) != 3
         or len(bbox_max) != 3
     ):
@@ -444,7 +450,7 @@ def _committed_child_paths(paths: object, run_id: str, final_path: str) -> list[
 
     db = paths.state_dir / "app.sqlite"  # type: ignore[attr-defined]
     try:
-        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        con = sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True)
         try:
             rows = con.execute(
                 "SELECT committed_path FROM task_nodes "
@@ -473,15 +479,38 @@ async def _check_run_b_scene(
     if final_query.get("ok") is not True or final_query.get("node_count") != 1:
         raise _StepError("final_query", "committed path is unavailable")
 
-    # Whole-asset read-back: union the geometry of every committed child
-    # recorded in the task graph store. The build event's output_node is only
-    # the last-created node of one call (often a mid-chain part), so the
-    # asset-level envelope is computed over all committed parts instead.
-    # Falls back to the build-result output node when the store is empty.
+    # Whole-asset read-back. The asset is the geometry of the committed
+    # output sink (commit places the display flag on it); stray probe nodes
+    # the model left in the container are NOT part of the asset. The sink is
+    # resolved via scratch.topology over the committed children recorded in
+    # the task graph store. Two fallbacks: the union bbox of all committed
+    # parts, then the build-result output node.
     candidates = _committed_child_paths(paths, run_b.run_id, final_path)  # type: ignore[attr-defined]
     geometry: object | None = None
     read_path = f"{final_path}/{output_name}"
     if candidates:
+        from eee_agent.houdini_bridge.changeset_provider import (
+            BridgeChangeSetProvider,
+        )
+
+        sink_path: str | None = None
+        try:
+            changeset = BridgeChangeSetProvider(paths.state_dir)  # type: ignore[attr-defined]
+            topo = await changeset.scene_topology(paths=tuple(candidates[:64]))
+            live = [node for node in topo.nodes if node.get("exists")]
+            flagged = [node["path"] for node in live if node.get("display_flag")]
+            sinks = [node["path"] for node in live if not node.get("outputs")]
+            resolved = (flagged or sinks or [None])[0]
+            if type(resolved) is str:
+                sink_path = resolved
+        except Exception:  # noqa: BLE001 - topology read is best-effort here
+            sink_path = None
+        if sink_path is not None:
+            sink_stats = await read_only.geometry_stats(sink_path)
+            if sink_stats.get("ok") is True:
+                geometry = sink_stats.get("geometry_stats")
+                read_path = sink_path
+    if geometry is None and candidates:
         merged_points = 0
         merged_prims = 0
         mins = [float("inf")] * 3
@@ -496,7 +525,7 @@ async def _check_run_b_scene(
             if not isinstance(bbox, Mapping):
                 continue
             bmin, bmax = bbox.get("min"), bbox.get("max")
-            if type(bmin) is not list or type(bmax) is not list:
+            if not isinstance(bmin, (list, tuple)) or not isinstance(bmax, (list, tuple)):
                 continue
             merged_points += int(part.get("points", 0))
             merged_prims += int(part.get("primitives", 0))

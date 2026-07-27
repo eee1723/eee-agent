@@ -102,8 +102,20 @@ actual executable path in the smoke commands.
    credential must be injected into the harness process environment (the
    harness intentionally does not load `.env` itself).
 
-3. **Wave B:** B1 Chrome quality gate is complete; B2–B6 multi-session HTML
-   cases, stability, fault injection, and feedback reports remain pending.
+3. **Wave B:** B1 Chrome quality gate is complete. **B2 L4 two-round
+   sessions COMPLETE (2026-07-27):** `tests/runtime/html_session_journey.py`
+   passed all three simple cases with real DeepSeek on Houdini 21.0.440 —
+   chair (bbox 0.46×0.90×0.45, grounded), desk (1.20×0.72×0.60), shelf
+   (0.80×1.50×0.30). Every run: sketch rendered with zero pre-approval
+   Houdini writes, same-session build→verify→commit, in-envelope final
+   geometry, sandbox absent, restart replay, bounded worker cleanup.
+   Hardening that fell out of B2: (a) `_scratch_output_node` multi-sink
+   ambiguity now prefers the sink with the most wired inputs, so a stray
+   disconnected probe node cannot hijack the commit gates/display flag;
+   (b) observed model hygiene gap (probe/default nodes left in the sandbox
+   and committed) is mitigated by (a) and recorded as B6 feedback material.
+   B3–B6 (sketch stability ×3, zero-parm-error on a new object, five-class
+   fault injection, and feedback reports) remain pending.
 4. **Wave C:** C1–C7 typed expressions, components, parameter scans, case
    library, and eval metrics remain pending.
 5. **Manual Houdini UI:** inspect the read-only task graph block in the docked
