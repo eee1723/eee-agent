@@ -140,7 +140,27 @@ actual executable path in the smoke commands.
    (tracking cook, escape/forbidden-function refusals), offline DTO and
    executor-fake coverage, skill Stage 6 note updated. C2–C7 (components,
    parameter classification, tabs, scans, case library, eval metrics)
-   remain pending.
+   remain pending; the full file-level implementation and test checklist
+   for C2–C7 (subnet componentization, parameter manifest, scan harness,
+   five-case library, eval metrics) is
+   `docs/superpowers/plans/2026-07-27-wave-c-implementation-checklist.md` —
+   executing agents start there.
+   **C2–C7 implementation pass (2026-07-27, offline layer):** nested
+   sandbox-relative refs now resolve across calls and nested subnets; task
+   graph recording, relative-path annotations, and depth-first cleanup preserve
+   full paths. `ScratchParmDeclaration` adds a fail-closed Parameter Manifest
+   (64 entries / 8 KiB), optional on `ScratchCommitRequest`; the executor
+   persists it in the promoted container comment and returns tab/range receipt
+   metadata. Coordinator validates manifest bindings, expr-ref/dependency
+   agreement, and dependency cycles. Added deterministic
+   `tests/runtime/param_scan_houdini_smoke.py`, five tagged case YAMLs, and
+   `eval.run_eval --report` aggregation with `null` + `not_run` for unavailable
+   runtime/provider evidence. Updated component/modeling/cookbook guidance for
+   subnet + ctrl-node + typed expr conventions.
+   Offline evidence: `252 passed` across the Wave C targeted gate
+   (`test_wave_c_offline.py`, scratch bridge/finalize/task graph/executor,
+   geometry assertions). Hython/real-provider C2–C7 scans remain `not_run`
+   pending a Houdini credentialed run; no live acceptance is claimed.
 5. **Manual Houdini UI:** inspect the read-only task graph block in the docked
    panel after a real modeling run.
 

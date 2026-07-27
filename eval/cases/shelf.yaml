@@ -1,0 +1,13 @@
+- name: shelf
+  prompt: "Build a parametric three-tier shelf with two uprights."
+  export_path: output/shelf_eval.obj
+  expect: {min_verts: 24, min_faces: 12, bbox_min: [-0.7, -0.05, -0.4], bbox_max: [0.7, 2.0, 0.4]}
+  parts:
+    shelf_boards: {required: true, min_verts: 8}
+    uprights: {required: false, min_verts: 8}
+  parameters:
+    - {name: shelf_width, tab: Boards, classification: design_intent, min: 0.5, default: 0.8, max: 1.2, unit: m}
+    - {name: shelf_height, tab: Boards, classification: design_intent, min: 1.0, default: 1.5, max: 2.0, unit: m}
+  scan_expect: {mesh_components: 1, scan_tol: 0.5}
+  tags: [l4-journey, parametric]
+  regression: journey

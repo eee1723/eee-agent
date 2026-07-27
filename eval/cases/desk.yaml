@@ -1,0 +1,13 @@
+- name: desk
+  prompt: "Build a parametric writing desk with a tabletop and four legs."
+  export_path: output/desk_eval.obj
+  expect: {min_verts: 24, min_faces: 12, bbox_min: [-1.0, -0.05, -0.6], bbox_max: [1.0, 1.2, 0.6]}
+  parts:
+    tabletop: {required: true, min_verts: 8}
+    legs: {required: false, min_verts: 8}
+  parameters:
+    - {name: desk_width, tab: Top, classification: design_intent, min: 0.8, default: 1.2, max: 1.8, unit: m}
+    - {name: desk_height, tab: Top, classification: design_intent, min: 0.5, default: 0.72, max: 1.1, unit: m}
+  scan_expect: {mesh_components: 1, scan_tol: 0.5}
+  tags: [l4-journey, parametric]
+  regression: journey

@@ -1,0 +1,15 @@
+- name: parametric hut
+  prompt: "Build a small parameterized hut with box walls, a pitched roof, and a door opening."
+  export_path: output/parametric_hut_eval.obj
+  expect: {min_verts: 24, min_faces: 12, bbox_min: [-3.0, -0.05, -3.0], bbox_max: [3.0, 4.0, 3.0]}
+  parts:
+    walls: {required: true, min_verts: 8}
+    roof: {required: true, min_verts: 8}
+  parameters:
+    - {name: hut_width, tab: Shell, classification: design_intent, min: 2.0, default: 3.0, max: 5.0, unit: m}
+    - {name: hut_depth, tab: Shell, classification: design_intent, min: 2.0, default: 3.0, max: 5.0, unit: m}
+    - {name: wall_height, tab: Shell, classification: design_intent, min: 2.0, default: 2.5, max: 4.0, unit: m}
+    - {name: roof_pitch, tab: Roof, classification: design_intent, min: 15.0, default: 30.0, max: 45.0, unit: deg}
+  scan_expect: {mesh_components: 1, scan_tol: 0.5}
+  tags: [parametric, deterministic]
+  regression: deterministic

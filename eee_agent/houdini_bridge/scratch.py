@@ -177,13 +177,151 @@ def _require_op_value(value: object, label: str) -> None:
 
 
 def _require_node_ref(value: object, label: str) -> None:
-    """A node reference inside the sandbox: a relative name or /obj path."""
+    """A safe sandbox-relative node reference.
+
+    Nested component paths (``wheel/tube1``) are intentionally supported.
+    Absolute paths, traversal segments, empty segments, and backslashes are
+    rejected so every reference remains inside the current scratch container.
+    """
     if type(value) is not str:
         raise TypeError(f"{label} must be a string")
-    if not value:
-        raise ValueError(f"{label} must be non-empty")
-    if len(value) > _MAX_NODE_NAME_LEN * 4:
-        raise ValueError(f"{label} exceeds the maximum length")
+    if (
+        not value
+        or value.startswith("/")
+        or "\\" in value
+        or any(segment in ("", ".", "..") for segment in value.split("/"))
+        or len(value) > _MAX_NODE_NAME_LEN * 4
+        or any(_NODE_NAME_RE.fullmatch(segment) is None for segment in value.split("/"))
+    ):
+        raise ValueError(f"{label} must be a safe sandbox-relative node reference")
+
+
+_PARAMETER_FIELDS = frozenset(
+    {"name", "tab", "classification", "binding", "default", "min", "max", "depends_on", "unit"}
+)
+_PARAMETER_BINDING_FIELDS = frozenset({"node", "parm"})
+_PARAMETER_CLASSIFICATIONS = frozenset({"design_intent", "derived", "constant"})
+_PARAMETER_UNITS = frozenset({"m", "deg", "count"})
+_PARAMETER_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_MAX_PARAMETERS = 64
+_MAX_PARAMETER_MANIFEST_BYTES = 8 * 1024
+
+
+def _require_finite_number(value: object, label: str) -> float:
+    if type(value) not in (int, float) or isinstance(value, bool):
+        raise TypeError(f"{label} must be a finite number")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"{label} must be a finite number")
+    return number
+
+
+@dataclass(frozen=True, slots=True)
+class ScratchParmDeclaration:
+    """One bounded Parameter Manifest entry carried by ``scratch.commit``."""
+
+    name: str
+    tab: str = "Main"
+    classification: str = "design_intent"
+    binding: tuple[tuple[str, str], ...] = ()
+    default: float | int | None = None
+    min: float | int | None = None
+    max: float | int | None = None
+    depends_on: tuple[str, ...] = ()
+    unit: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.name) is not str or _PARAMETER_NAME_RE.fullmatch(self.name) is None:
+            raise ValueError("ScratchParmDeclaration.name is invalid")
+        if type(self.tab) is not str or not self.tab or len(self.tab) > 64:
+            raise ValueError("ScratchParmDeclaration.tab must be a non-empty bounded string")
+        if self.classification not in _PARAMETER_CLASSIFICATIONS:
+            raise ValueError("ScratchParmDeclaration.classification is invalid")
+        binding = dict(self.binding)
+        if set(binding) != {"node", "parm"}:
+            raise ValueError("ScratchParmDeclaration.binding requires node and parm")
+        _require_node_ref(binding["node"], "ScratchParmDeclaration.binding.node")
+        _require_parm_name(binding["parm"], "ScratchParmDeclaration.binding.parm")
+        object.__setattr__(self, "binding", tuple(sorted(binding.items())))
+        if self.default is None:
+            raise ValueError("ScratchParmDeclaration.default is required")
+        default = _require_finite_number(self.default, "ScratchParmDeclaration.default")
+        object.__setattr__(self, "default", default)
+        if self.classification == "design_intent":
+            if self.min is None or self.max is None:
+                raise ValueError("design_intent requires min and max")
+            minimum = _require_finite_number(self.min, "ScratchParmDeclaration.min")
+            maximum = _require_finite_number(self.max, "ScratchParmDeclaration.max")
+            if minimum > default or default > maximum:
+                raise ValueError("design_intent requires min <= default <= max")
+            object.__setattr__(self, "min", minimum)
+            object.__setattr__(self, "max", maximum)
+            if self.depends_on:
+                raise ValueError("design_intent must not declare depends_on")
+        elif self.classification == "derived":
+            if not self.depends_on:
+                raise ValueError("derived requires non-empty depends_on")
+            deps = tuple(self.depends_on)
+            if any(type(dep) is not str or _PARAMETER_NAME_RE.fullmatch(dep) is None for dep in deps):
+                raise ValueError("derived depends_on contains an invalid name")
+            object.__setattr__(self, "depends_on", deps)
+            if self.min is not None:
+                minimum = _require_finite_number(self.min, "ScratchParmDeclaration.min")
+                object.__setattr__(self, "min", minimum)
+            if self.max is not None:
+                maximum = _require_finite_number(self.max, "ScratchParmDeclaration.max")
+                object.__setattr__(self, "max", maximum)
+            if self.min is not None and self.max is not None and self.min > self.max:
+                raise ValueError("derived requires min <= max")
+        else:
+            if self.min is not None or self.max is not None or self.depends_on:
+                raise ValueError("constant must not declare min/max/depends_on")
+        if self.unit is not None and self.unit not in _PARAMETER_UNITS:
+            raise ValueError("ScratchParmDeclaration.unit is invalid")
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "ScratchParmDeclaration":
+        d = _require_exact_dict(data, "ScratchParmDeclaration")
+        unknown = set(d) - _PARAMETER_FIELDS
+        if unknown:
+            raise ValueError(f"ScratchParmDeclaration has unknown fields: {sorted(unknown)}")
+        binding = _require_exact_dict(d.get("binding"), "ScratchParmDeclaration.binding")
+        _require_exact_keys(binding, _PARAMETER_BINDING_FIELDS, "ScratchParmDeclaration.binding")
+        deps = d.get("depends_on", [])
+        if type(deps) is not list:
+            raise TypeError("ScratchParmDeclaration.depends_on must be a list")
+        return cls(
+            name=d.get("name"), tab=d.get("tab", "Main"),
+            classification=d.get("classification", "design_intent"),
+            binding=tuple(binding.items()),
+            default=d.get("default"), min=d.get("min"), max=d.get("max"),
+            depends_on=tuple(deps), unit=d.get("unit"),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        d: dict[str, object] = {
+            "name": self.name, "tab": self.tab, "classification": self.classification,
+            "binding": dict(self.binding), "default": self.default,
+        }
+        if self.min is not None: d["min"] = self.min
+        if self.max is not None: d["max"] = self.max
+        if self.depends_on: d["depends_on"] = list(self.depends_on)
+        if self.unit is not None: d["unit"] = self.unit
+        return d
+
+
+def _require_parameters(value: object, label: str = "ScratchCommitRequest.parameters") -> tuple[ScratchParmDeclaration, ...]:
+    if type(value) not in (list, tuple):
+        raise TypeError(f"{label} must be a list")
+    if len(value) > _MAX_PARAMETERS:
+        raise ValueError(f"{label} exceeds {_MAX_PARAMETERS} entries")
+    out = tuple(item if type(item) is ScratchParmDeclaration else ScratchParmDeclaration.from_dict(item) for item in value)
+    names = [item.name for item in out]
+    if len(set(names)) != len(names):
+        raise ValueError(f"{label} contains duplicate names")
+    if len(canonical_json_dumps([item.to_dict() for item in out])) > _MAX_PARAMETER_MANIFEST_BYTES:
+        raise ValueError(f"{label} exceeds {_MAX_PARAMETER_MANIFEST_BYTES} bytes")
+    return out
 
 
 def _require_error_text(value: object, label: str) -> None:
@@ -368,7 +506,10 @@ class ScratchOp:
             raise ValueError(
                 "ScratchOp.kind must be create_node|set_parm|connect|delete_node"
             )
-        _require_node_name(self.node_name, "ScratchOp.node_name")
+        if self.kind == "create_node":
+            _require_node_name(self.node_name, "ScratchOp.node_name")
+        else:
+            _require_node_ref(self.node_name, "ScratchOp.node_name")
         if self.expr is not None:
             if type(self.expr) is not ScratchExpr:
                 raise TypeError("ScratchOp.expr must be a ScratchExpr")
@@ -774,7 +915,7 @@ class ScratchResponse:
 
 _COMMIT_PAYLOAD_FIELDS = frozenset(
     {"sandbox_id", "target_parent_path", "target_name",
-     "orientation_checks", "skip_structure_check", "annotations"}
+     "orientation_checks", "skip_structure_check", "annotations", "parameters"}
 )
 _COMMIT_RESULT_FIELDS = frozenset(
     {"committed", "refused", "final_path", "reason", "gates", "receipt", "warnings"}
@@ -843,6 +984,7 @@ class ScratchCommitRequest:
     orientation_checks: tuple[dict[str, object], ...]
     skip_structure_check: bool = False
     annotations: tuple[tuple[str, str], ...] = ()
+    parameters: tuple[ScratchParmDeclaration, ...] = ()
 
     def __post_init__(self) -> None:
         _require_request_id(self.request_id, "ScratchCommitRequest.request_id")
@@ -872,7 +1014,7 @@ class ScratchCommitRequest:
                     "ScratchCommitRequest.annotations items must be pairs"
                 )
             name, comment = item
-            _require_node_name(name, "ScratchCommitRequest.annotations key")
+            _require_node_ref(name, "ScratchCommitRequest.annotations key")
             _require_bounded_text(
                 comment,
                 "ScratchCommitRequest.annotations value",
@@ -882,6 +1024,7 @@ class ScratchCommitRequest:
                 raise ValueError("ScratchCommitRequest.annotations has duplicate keys")
             names.add(name)
         object.__setattr__(self, "annotations", tuple(sorted(annotations)))
+        object.__setattr__(self, "parameters", _require_parameters(self.parameters))
 
     @property
     def container_path(self) -> str:
@@ -900,6 +1043,7 @@ class ScratchCommitRequest:
         orientation_checks: Sequence[Mapping[str, object]] | None = None,
         skip_structure_check: bool = False,
         annotations: Mapping[str, str] | None = None,
+        parameters: Sequence[ScratchParmDeclaration | Mapping[str, object]] | None = None,
     ) -> "ScratchCommitRequest":
         checks = [dict(c) for c in (orientation_checks or [])]
         return cls(
@@ -912,9 +1056,20 @@ class ScratchCommitRequest:
             orientation_checks=checks,  # type: ignore[arg-type]
             skip_structure_check=skip_structure_check,
             annotations=tuple((annotations or {}).items()),
+            parameters=tuple(parameters or ()),  # type: ignore[arg-type]
         )
 
     def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "sandbox_id": self.sandbox_id,
+            "target_parent_path": self.target_parent_path,
+            "target_name": self.target_name,
+            "orientation_checks": [dict(c) for c in self.orientation_checks],
+            "skip_structure_check": self.skip_structure_check,
+            "annotations": dict(self.annotations),
+        }
+        if self.parameters:
+            payload["parameters"] = [item.to_dict() for item in self.parameters]
         return {
             "protocol": PROTOCOL,
             "kind": "request",
@@ -922,14 +1077,7 @@ class ScratchCommitRequest:
             "operation": SCRATCH_COMMIT_OPERATION,
             "deadline_ms": self.deadline_ms,
             "scene_epoch": self.scene_epoch,
-            "payload": {
-                "sandbox_id": self.sandbox_id,
-                "target_parent_path": self.target_parent_path,
-                "target_name": self.target_name,
-                "orientation_checks": [dict(c) for c in self.orientation_checks],
-                "skip_structure_check": self.skip_structure_check,
-                "annotations": dict(self.annotations),
-            },
+            "payload": payload,
         }
 
     def to_json(self) -> str:
@@ -946,7 +1094,9 @@ class ScratchCommitRequest:
         if envelope["operation"] != SCRATCH_COMMIT_OPERATION:
             raise ValueError("ScratchCommitRequest operation must be scratch.commit")
         payload = _require_exact_dict(envelope["payload"], "ScratchCommitRequest payload")
-        _require_exact_keys(payload, _COMMIT_PAYLOAD_FIELDS, "ScratchCommitRequest payload")
+        required = _COMMIT_PAYLOAD_FIELDS - {"parameters"}
+        if not required.issubset(payload) or set(payload) - _COMMIT_PAYLOAD_FIELDS:
+            raise ValueError("ScratchCommitRequest payload has invalid fields")
         annotations = _require_exact_dict(
             payload["annotations"], "ScratchCommitRequest.annotations"
         )
@@ -962,6 +1112,7 @@ class ScratchCommitRequest:
             ),
             skip_structure_check=payload["skip_structure_check"],  # type: ignore[arg-type]
             annotations=tuple(annotations.items()),  # type: ignore[arg-type]
+            parameters=_require_parameters(payload.get("parameters", [])),
         )
 
 

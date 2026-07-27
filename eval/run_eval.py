@@ -19,6 +19,10 @@ import argparse
 import os
 import sys
 import traceback
+import json
+import subprocess
+import sqlite3
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 import yaml
@@ -39,6 +43,16 @@ def load_cases(rel_dir: str = "eval/cases") -> List[Dict[str, Any]]:
             out.extend(data)
         elif isinstance(data, dict):
             out.append(data)
+    for case in out:
+        if not isinstance(case.get("name"), str) or not case["name"].strip():
+            raise ValueError("case.name must be a non-empty string")
+        for field in ("parts", "color", "parameters", "scan_expect", "tags"):
+            if field in case and case[field] is None:
+                case[field] = {} if field != "tags" else []
+        if "tags" in case and not isinstance(case["tags"], list):
+            raise ValueError(f"case {case['name']}: tags must be a list")
+        if "parameters" in case and not isinstance(case["parameters"], list):
+            raise ValueError(f"case {case['name']}: parameters must be a list")
     return out
 
 
@@ -71,15 +85,134 @@ def evaluate_dry(case: Dict[str, Any]) -> Dict[str, Any]:
     return res
 
 
+def _git_sha() -> str | None:
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=repo_root(), text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip() or None
+    except Exception:
+        return None
+
+
+def build_report(results: list[dict[str, Any]], cases: list[dict[str, Any]]) -> dict[str, Any]:
+    param_cases = [
+        case for case in cases
+        if "parametric" in set(case.get("tags", []))
+    ]
+    param_covered = sum(
+        1 for case in param_cases
+        if case.get("parameters")
+        and all(all(key in parm for key in ("min", "default", "max"))
+                for parm in case["parameters"])
+    )
+    assertion_passed = sum(1 for r in results if r.get("ok"))
+    notes: list[str] = []
+    report = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "git_sha": _git_sha(),
+        "evidence_sources": ["eval cases YAML", "dry geometry assertion results"],
+        "metrics": {
+            "translation_success_rate": (
+                assertion_passed / len(results) if results else None
+            ),
+            "param_coverage": (
+                param_covered / len(param_cases) if param_cases else None
+            ),
+            "geometry_assertion_pass_rate": (
+                assertion_passed / len(results) if results else None
+            ),
+            "avg_repair_rounds": None,
+            "e2e_duration_s": None,
+            "provider_tokens": None,
+            "est_cost": None,
+        },
+        "cases": results,
+    }
+    if not results:
+        notes.append("not_run")
+    if any(report["metrics"][key] is None for key in (
+        "avg_repair_rounds", "e2e_duration_s", "provider_tokens", "est_cost"
+    )):
+        notes.append("runtime/provider evidence not_run")
+    report["notes"] = notes
+    return report
+
+
+def _read_runtime_sqlite(path: str) -> dict[str, Any]:
+    """Read optional runtime evidence without mutating or requiring its schema."""
+    out: dict[str, Any] = {}
+    try:
+        uri = f"file:{os.path.abspath(path)}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as conn:
+            try:
+                row = conn.execute(
+                    "SELECT started_at, finished_at FROM runs "
+                    "WHERE started_at IS NOT NULL AND finished_at IS NOT NULL"
+                ).fetchall()
+                durations = []
+                from datetime import datetime
+                for started, finished in row:
+                    durations.append(
+                        (datetime.fromisoformat(finished) - datetime.fromisoformat(started)).total_seconds()
+                    )
+                out["e2e_duration_s"] = sum(durations) / len(durations) if durations else None
+            except sqlite3.Error:
+                out["e2e_duration_s"] = None
+            try:
+                rows = conn.execute(
+                    "SELECT payload_json FROM events WHERE event_type = 'model.usage_updated'"
+                ).fetchall()
+                tokens = 0
+                for (payload,) in rows:
+                    item = json.loads(payload)
+                    tokens += int(item.get("total_tokens", 0))
+                out["provider_tokens"] = tokens if rows else None
+            except sqlite3.Error:
+                out["provider_tokens"] = None
+    except (OSError, sqlite3.Error, ValueError):
+        return {}
+    return out
+
+
+def aggregate_report(report_dir: str, cases: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Aggregate existing evidence JSON files into the stable C7 report shape."""
+    selected = cases if cases is not None else load_cases()
+    evidence_results: list[dict[str, Any]] = []
+    root = Path(report_dir)
+    for path in sorted(root.rglob("*.json")) if root.exists() else ():
+        if path.name == "eval_report.json":
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict) and "name" in payload and ("ok" in payload or "status" in payload):
+            evidence_results.append(payload)
+    report = build_report(evidence_results, selected)
+    sqlite_candidates = list(root.rglob("*.sqlite")) + list(root.rglob("*.db"))
+    runtime = _read_runtime_sqlite(str(sqlite_candidates[0])) if sqlite_candidates else {}
+    report["metrics"].update(runtime)
+    if runtime.get("provider_tokens") is None:
+        report["notes"].append("provider token evidence not_run")
+    return report
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry", action="store_true", help="evaluate existing files only")
     ap.add_argument("--case", default=None, help="substring of case name to run")
+    ap.add_argument("--report", default=None, help="write an aggregated JSON report to this directory")
     args = ap.parse_args()
 
     cases = load_cases()
     if args.case:
-        cases = [c for c in cases if args.case.lower() in c["name"].lower()]
+        selector = args.case.lower()
+        if selector.startswith("tag:"):
+            tag = selector[4:]
+            cases = [c for c in cases if tag in {str(t).lower() for t in c.get("tags", [])}]
+        else:
+            cases = [c for c in cases if selector in c["name"].lower()]
     if not cases:
         print("no cases selected")
         return 1
@@ -106,6 +239,14 @@ def main() -> int:
             print("    -", iss)
 
     passed = sum(1 for r in results if r["ok"])
+    if args.report:
+        report = build_report(results, cases)
+        os.makedirs(args.report, exist_ok=True)
+        report_path = os.path.join(args.report, "eval_report.json")
+        with open(report_path, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, ensure_ascii=False, sort_keys=True, indent=2)
+        print(f"report={report_path}")
+        print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     print(f"\n==== {passed}/{len(results)} passed ====")
     return 0 if passed == len(results) else 2
 

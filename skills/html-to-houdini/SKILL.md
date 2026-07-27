@@ -72,7 +72,7 @@ y=1, z=2 · `endcaptype`: none=0, single=1.
 
 ## Parameter decomposition note
 
-Catalog parms are literal-only; channel references are a future compiler
-feature. While translating, still **record** the parameterization intent
+Catalog parms use literals or the C1 typed `expr` AST; channel references are
+safe relative refs. While translating, still **record** the parameterization intent
 (design intent / derived / constant per dimension, plus dependency
 patterns) — the procedural-modeling skill's Stage 6 delivers this record.

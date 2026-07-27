@@ -163,7 +163,9 @@ def _gate_failure_reason(gate_report: dict) -> str:
     return "; ".join(parts)[:_MAX_ERROR_CHARS]
 
 
-def _build_commit_receipt(gate_report: dict) -> dict:
+def _build_commit_receipt(
+    gate_report: dict, parameters: tuple[object, ...] = ()
+) -> dict:
     """Build the tamper-evident verification receipt for a commit verdict.
 
     The agent's report must reference fields from this receipt rather than
@@ -175,7 +177,7 @@ def _build_commit_receipt(gate_report: dict) -> dict:
     health_detail = health_gate.get("detail", {}) if isinstance(health_gate, dict) else {}
     orientation_gate = next((g for g in gates if g.get("gate") == "orientation"), {})
     orientation_detail = orientation_gate.get("detail", {}) if isinstance(orientation_gate, dict) else {}
-    return {
+    receipt = {
         "passed": gate_report.get("passed", False),
         "orientation": {
             "passed": orientation_detail.get("passed", 0) if isinstance(orientation_detail, dict) else 0,
@@ -187,6 +189,18 @@ def _build_commit_receipt(gate_report: dict) -> dict:
             "soft_warnings_count": health_detail.get("soft_warnings_count", 0) if isinstance(health_detail, dict) else 0,
         },
     }
+    if parameters:
+        tabs: dict[str, list[str]] = {}
+        ranges: dict[str, dict[str, object]] = {}
+        for item in parameters:
+            tabs.setdefault(item.tab, []).append(item.name)
+            if item.classification == "design_intent":
+                ranges[item.name] = {
+                    "min": item.min, "default": item.default, "max": item.max
+                }
+        receipt["parameter_tabs"] = tabs
+        receipt["parameter_ranges"] = ranges
+    return receipt
 
 
 # Bounds mirrored from the scratch DTO module for error-text truncation.
@@ -2166,6 +2180,21 @@ class ChangeSetExecutor:
 
     # --------------------------------------------------------------- scratch sandbox
 
+    def _resolve_scratch_node(
+        self, container_path: str, node_index: dict[str, object], ref: str,
+    ) -> object | None:
+        """Resolve a scratch-relative ref without silently falling back to root."""
+        if ref == "":
+            return self._hou.node(container_path)
+        node = node_index.get(ref)
+        if node is not None:
+            return node
+        if ref.startswith("/") or "\\" in ref or any(
+            segment in ("", ".", "..") for segment in ref.split("/")
+        ):
+            return None
+        return self._hou.node(f"{container_path}/{ref}")
+
     def scratch_exec(self, request: ScratchRequest) -> ScratchResult:
         """Build/extend a reserved scratch container and return diagnostics.
 
@@ -2215,18 +2244,23 @@ class ChangeSetExecutor:
 
                 for op in request.operations:
                     if op.kind == "create_node":
-                        parent = node_index.get(op.parent, container)
+                        parent = self._resolve_scratch_node(
+                            container_path, node_index, op.parent
+                        )
+                        if parent is None:
+                            raise _scratch_failed(
+                                f"create_node parent not found: {op.parent}"
+                            )
                         node = parent.createNode(op.node_type, op.node_name)
                         created_this_call.append(node)
-                        node_index[op.node_name] = node
+                        key = f"{op.parent}/{op.node_name}" if op.parent else op.node_name
+                        node_index[key] = node
                         output_node_path = node.path()
                         applied += 1
                     elif op.kind == "set_parm":
-                        node = node_index.get(op.node_name)
-                        if node is None:
-                            node = hou.node(
-                                f"{container_path}/{op.node_name}"
-                            )
+                        node = self._resolve_scratch_node(
+                            container_path, node_index, op.node_name
+                        )
                         if node is None:
                             raise _scratch_failed(
                                 f"set_parm target node not found: {op.node_name}"
@@ -2244,16 +2278,12 @@ class ChangeSetExecutor:
                             parm.set(op.value)
                         applied += 1
                     elif op.kind == "connect":
-                        node = node_index.get(op.node_name)
-                        if node is None:
-                            node = hou.node(
-                                f"{container_path}/{op.node_name}"
-                            )
-                        source = node_index.get(op.source)
-                        if source is None:
-                            source = hou.node(
-                                f"{container_path}/{op.source}"
-                            )
+                        node = self._resolve_scratch_node(
+                            container_path, node_index, op.node_name
+                        )
+                        source = self._resolve_scratch_node(
+                            container_path, node_index, op.source
+                        )
                         if node is None or source is None:
                             raise _scratch_failed(
                                 f"connect endpoints not found: "
@@ -2262,15 +2292,17 @@ class ChangeSetExecutor:
                         node.setInput(op.input_index, source, op.source_output_index)
                         applied += 1
                     elif op.kind == "delete_node":
-                        node = node_index.get(op.node_name)
-                        if node is None:
-                            node = hou.node(f"{container_path}/{op.node_name}")
+                        node = self._resolve_scratch_node(
+                            container_path, node_index, op.node_name
+                        )
                         if node is None:
                             raise _scratch_failed(
                                 f"delete_node target node not found: {op.node_name}"
                             )
                         node.destroy()
-                        node_index.pop(op.node_name, None)
+                        for key, value in list(node_index.items()):
+                            if value is node:
+                                node_index.pop(key, None)
                         if output_node_path == node.path():
                             output_node_path = container_path
                         applied += 1
@@ -2491,7 +2523,7 @@ class ChangeSetExecutor:
 
         if not gate_report["passed"]:
             # Refused: preserve the sandbox. Build a receipt + verdict.
-            receipt = _build_commit_receipt(gate_report)
+            receipt = _build_commit_receipt(gate_report, request.parameters)
             return ScratchCommitResult(
                 committed=False,
                 refused=True,
@@ -2533,7 +2565,8 @@ class ChangeSetExecutor:
                     container.move(target_parent)
                     moved = True
                 finalize_warnings = self._finalize_commit(
-                    container, output_node, final_path, request.annotations
+                    container, output_node, final_path, request.annotations,
+                    request.parameters,
                 )
         except HoudiniAdapterError:
             promote_failure = sys.exc_info()[1]  # type: ignore[assignment]
@@ -2578,7 +2611,8 @@ class ChangeSetExecutor:
         fresh_output = hou.node(f"{final_path}/{output_name}") or output_node
         finalize_warnings.extend(
             self._finalize_commit(
-                fresh_container, fresh_output, final_path, request.annotations
+                fresh_container, fresh_output, final_path, request.annotations,
+                request.parameters,
             )
         )
         # Idempotent safety net: re-assert the flags on freshly resolved
@@ -2602,7 +2636,7 @@ class ChangeSetExecutor:
                 finalize_warnings.append("render flag did not persist")
         except Exception as exc:  # noqa: BLE001
             finalize_warnings.append(f"display flag failed: {exc}"[:_MAX_ERROR_CHARS])
-        receipt = _build_commit_receipt(gate_report)
+        receipt = _build_commit_receipt(gate_report, request.parameters)
         return ScratchCommitResult(
             committed=True,
             refused=False,
@@ -2669,6 +2703,7 @@ class ChangeSetExecutor:
         output_node: object,
         final_path: str,
         annotations: tuple[tuple[str, str], ...],
+        parameters: tuple[object, ...] = (),
     ) -> list[str]:
         """Best-effort cosmetic finalization inside the commit undo group."""
         warnings: list[str] = []
@@ -2691,7 +2726,14 @@ class ChangeSetExecutor:
                 edges: dict[str, tuple[str, ...]] = {}
                 xs: list[float] = []
                 ys: list[float] = []
-                for child in children:
+                def descendants(parent: object) -> list[object]:
+                    found: list[object] = []
+                    for child in parent.children() or ():  # type: ignore[attr-defined]
+                        found.append(child)
+                        found.extend(descendants(child))
+                    return found
+                all_children = descendants(container)
+                for child in all_children:
                     upstream: list[str] = []
                     # node.inputs() is the reliable upstream accessor;
                     # inputConnections().outputNode() returns the node itself
@@ -2704,11 +2746,11 @@ class ChangeSetExecutor:
                     xs.append(float(pos[0]))
                     ys.append(float(pos[1]))
                 positions = _layered_layout(
-                    [child.path() for child in children],
+                    [child.path() for child in all_children],
                     edges,
                     anchor=(min(xs), max(ys)),
                 )
-                for child in children:
+                for child in all_children:
                     target = positions.get(child.path())
                     if target is not None:
                         child.setPosition(target)
@@ -2728,19 +2770,36 @@ class ChangeSetExecutor:
 
         if annotations:
             try:
-                by_name = {child.name(): child for child in children}
+                root = container.path().rstrip("/")
+                all_nodes: dict[str, object] = {}
+                for child in (container.children() or ()):  # type: ignore[attr-defined]
+                    stack = [child]
+                    while stack:
+                        current = stack.pop()
+                        rel = current.path()[len(root) + 1:]
+                        all_nodes[rel] = current
+                        stack.extend(list(current.children() or ()))
+                by_name = all_nodes
             except Exception:  # noqa: BLE001
                 by_name = {}
             for name, comment in annotations:
                 node = by_name.get(name)
                 if node is None:
-                    warnings.append(f"comment skipped: no committed node named {name}")
+                    warnings.append(f"comment skipped: no committed node at {name}")
                     continue
                 try:
                     node.setComment(comment)
                     node.setGenericFlag(hou.nodeFlag.DisplayComment, True)  # type: ignore[attr-defined]
                 except Exception as exc:  # noqa: BLE001
                     warnings.append(f"comment failed on {name}: {exc}")
+        if parameters:
+            try:
+                manifest_json = canonical_json_dumps(
+                    [item.to_dict() for item in parameters]
+                )
+                container.setComment(manifest_json[:8192])
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"parameter manifest comment failed: {exc}")
         return [warning[:_MAX_ERROR_CHARS] for warning in warnings[:_MAX_ERRORS]]
 
     def _run_scratch_gates(

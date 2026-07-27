@@ -64,8 +64,11 @@ Follow the `html-to-houdini` skill (search it via
 anti-patterns are binding. Key points:
 
 - You are the **transpiler**: re-author the sketch's intent as
-  `scratch_build` op sequences (catalog node types only, literal parms)
-- Group ops by component; keep component boundaries visible in node naming
+  `scratch_build` op sequences (catalog node types plus C1 typed `expr`
+  parms). Use one SOP subnet per component and a `<component>_ctrl` box for
+  design-intent slots.
+- Group ops by component; keep component boundaries visible in node naming and
+  record the Parameter Manifest (classification/tab/range/dependencies).
 - Small steps; read the returned geometry (counts + bbox) and errors after
   each batch
 - Confirm unknown parms with `search_houdini_knowledge` — never guess

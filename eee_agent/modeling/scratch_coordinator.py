@@ -35,8 +35,10 @@ from eee_agent.houdini_bridge.scratch import (
     ScratchCommitResult,
     ScratchDestroyResult,
     ScratchGeometry,
+    ScratchParmDeclaration,
     ScratchOp,
     ScratchResult,
+    ScratchExpr,
 )
 from eee_agent.runtime.agent_context import RuntimeToolContext
 from eee_agent.runtime.task_graph import TaskGraphStore
@@ -88,6 +90,7 @@ class ScratchProvider(Protocol):
         orientation_checks: tuple = (),
         skip_structure_check: bool = False,
         annotations: tuple[tuple[str, str], ...] = (),
+        parameters: tuple[ScratchParmDeclaration, ...] = (),
     ) -> ScratchCommitResult: ...
 
     async def scratch_destroy(
@@ -140,6 +143,7 @@ class ScratchCoordinator:
             raise TypeError("context must be an exact ScratchSessionContext")
         self._context = context
         self._store_failed = False
+        self._expr_refs: set[str] = set()
 
     async def build(
         self,
@@ -161,6 +165,9 @@ class ScratchCoordinator:
             }
         try:
             typed_ops = self._parse_operations(operations)
+            self._expr_refs.update(
+                ref for op in typed_ops if op.expr is not None for ref in _expr_refs(op.expr)
+            )
         except ScratchError as exc:
             return {"ok": False, "code": exc.code, "message": str(exc)}
         try:
@@ -182,6 +189,7 @@ class ScratchCoordinator:
         target_name: str,
         orientation_checks: list[Mapping[str, object]] | None = None,
         skip_structure_check: bool = False,
+        parameters: list[Mapping[str, object]] | None = None,
     ) -> dict[str, object]:
         """Commit a verified sandbox into the real scene through hard gates.
 
@@ -209,9 +217,14 @@ class ScratchCoordinator:
             checks = self._parse_orientation_checks(orientation_checks)
         except ScratchError as exc:
             return {"ok": False, "code": exc.code, "message": str(exc)}
+        try:
+            manifest = self._parse_parameters(parameters)
+            self._validate_manifest_refs(manifest)
+        except ScratchError as exc:
+            return {"ok": False, "code": exc.code, "message": str(exc)}
         annotations = await self._commit_annotations()
         try:
-            result = await self._context.provider.scratch_commit(
+            commit_kwargs = dict(
                 sandbox_id=sandbox_id,
                 target_parent_path=target_parent_path,
                 target_name=target_name,
@@ -222,6 +235,9 @@ class ScratchCoordinator:
                 # rely on .items().
                 annotations=dict(annotations),
             )
+            if manifest:
+                commit_kwargs["parameters"] = manifest
+            result = await self._context.provider.scratch_commit(**commit_kwargs)
         except Exception as exc:  # noqa: BLE001 - bounded at this seam
             return _bridge_or_op_failure(exc, default="scratch.op_failed")
         if result.committed:
@@ -243,7 +259,7 @@ class ScratchCoordinator:
             )
             created = tuple(
                 (
-                    f"{result.sandbox_root}/{op.node_name}",
+                    f"{result.sandbox_root}/{op.parent + '/' if op.parent else ''}{op.node_name}",
                     op.node_type,
                     op.note or None,
                 )
@@ -277,8 +293,9 @@ class ScratchCoordinator:
             for node in step.nodes:
                 if node.status != "sandbox":
                     continue
-                name = node.node_path.rsplit("/", 1)[-1]
-                annotations[name] = (node.note or step.purpose)[:500]
+                root = f"/obj/eee_scratch_{self._context.sandbox_id}"
+                relative = node.node_path[len(root) + 1:] if node.node_path.startswith(root + "/") else node.node_path.rsplit("/", 1)[-1]
+                annotations[relative] = (node.note or step.purpose)[:500]
         return tuple(sorted(annotations.items()))
 
     async def _record_commit(self, result: ScratchCommitResult) -> None:
@@ -376,12 +393,9 @@ class ScratchCoordinator:
             elif node.status == "sandbox":
                 sandbox_root = f"/obj/eee_scratch_{self._context.sandbox_id}"
                 relative = path[len(sandbox_root) + 1:] if path.startswith(sandbox_root + "/") else ""
-                # The current delete_node DTO names one direct child only.
-                # Nested paths are skipped rather than risking a same-name
-                # deletion in a different sandbox branch.
-                if not relative or "/" in relative:
+                if not relative:
                     skipped.append(
-                        {"path": path, "reason": "nested sandbox deletion is unsupported"}
+                        {"path": path, "reason": "sandbox root deletion is unsupported"}
                     )
                 else:
                     sandbox_targets.append(path)
@@ -410,9 +424,17 @@ class ScratchCoordinator:
         committed_targets = [path for path in committed_targets if path in safe]
         deleted: list[str] = []
         if sandbox_targets:
+            root = f"/obj/eee_scratch_{self._context.sandbox_id}"
             ops = tuple(
-                ScratchOp(kind="delete_node", node_name=path.rsplit("/", 1)[-1])
-                for path in sandbox_targets
+                ScratchOp(
+                    kind="delete_node",
+                    node_name=path[len(root) + 1:],
+                )
+                for path in sorted(
+                    sandbox_targets,
+                    key=lambda p: p.count("/"),
+                    reverse=True,
+                )
             )
             try:
                 await self._context.provider.scratch_exec(
@@ -475,6 +497,84 @@ class ScratchCoordinator:
                     clean[key] = item[key]
             out.append(clean)
         return tuple(out)
+
+    def _parse_parameters(self, parameters: object) -> tuple[ScratchParmDeclaration, ...]:
+        if parameters is None:
+            return ()
+        if type(parameters) is not list:
+            raise ScratchError("scratch.input_invalid", "parameters must be a list.")
+        try:
+            return tuple(ScratchParmDeclaration.from_dict(item) for item in parameters)
+        except (TypeError, ValueError) as exc:
+            raise ScratchError("scratch.input_invalid", f"parameter manifest is invalid: {exc}") from exc
+
+    def _validate_manifest_refs(self, manifest: tuple[ScratchParmDeclaration, ...]) -> None:
+        if not manifest:
+            return
+        by_name = {item.name: item for item in manifest}
+        for item in manifest:
+            if item.classification == "derived":
+                missing = [dep for dep in item.depends_on if dep not in by_name]
+                if missing:
+                    raise ScratchError(
+                        "scratch.manifest_invalid",
+                        f"parameter {item.name} depends on undeclared {missing[0]}",
+                    )
+                for dep in item.depends_on:
+                    dep_decl = by_name[dep]
+                    dep_binding = dict(dep_decl.binding)
+                    expected_suffix = f"{dep_binding['node']}/{dep_binding['parm']}"
+                    expected_leaf = (
+                        f"{dep_binding['node'].rsplit('/', 1)[-1]}/{dep_binding['parm']}"
+                    )
+                    if not any(
+                        ref == expected_suffix
+                        or ref.endswith("/" + expected_suffix)
+                        or ref.endswith("/" + expected_leaf)
+                        for ref in self._expr_refs
+                    ):
+                        raise ScratchError(
+                            "scratch.manifest_invalid",
+                            f"parameter {item.name} depends_on {dep} but no expr ref was recorded",
+                        )
+        declared_parms = {dict(item.binding)["parm"] for item in manifest}
+        for ref in self._expr_refs:
+            parm = ref.rsplit("/", 1)[-1]
+            if parm not in declared_parms:
+                raise ScratchError(
+                    "scratch.manifest_invalid",
+                    f"expr ref {ref} has no manifest binding",
+                )
+        graph = {
+            item.name: tuple(item.depends_on)
+            for item in manifest
+            if item.classification == "derived"
+        }
+        visiting: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(name: str) -> None:
+            if name in visiting:
+                raise ScratchError("scratch.manifest_invalid", f"parameter dependency cycle at {name}")
+            if name in visited:
+                return
+            visiting.add(name)
+            for dep in graph.get(name, ()):
+                visit(dep)
+            visiting.remove(name)
+            visited.add(name)
+
+        for name in graph:
+            visit(name)
+
+    def _manifest_receipt(self, manifest: tuple[ScratchParmDeclaration, ...]) -> dict[str, object]:
+        tabs: dict[str, list[str]] = {}
+        ranges: dict[str, dict[str, float | int | None]] = {}
+        for item in manifest:
+            tabs.setdefault(item.tab, []).append(item.name)
+            if item.classification == "design_intent":
+                ranges[item.name] = {"min": item.min, "default": item.default, "max": item.max}
+        return {"parameter_tabs": tabs, "parameter_ranges": ranges}
 
     @staticmethod
     def _summarize_commit(result: ScratchCommitResult) -> dict[str, object]:
@@ -713,6 +813,7 @@ async def scratch_commit(
     runtime: ToolRuntime,
     orientation_checks: list[dict[str, object]] | None = None,
     skip_structure_check: bool = False,
+    parameters: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """Promote the verified sandbox into the real scene through hard gates.
 
@@ -783,6 +884,7 @@ async def scratch_commit(
         target_name=target_name,
         orientation_checks=orientation_checks,
         skip_structure_check=skip_structure_check,
+        parameters=parameters,
     )
 
 
@@ -847,3 +949,12 @@ __all__ = [
     "cleanup_nodes",
     "task_graph_status",
 ]
+
+
+def _expr_refs(expr: ScratchExpr) -> set[str]:
+    refs: set[str] = set()
+    if expr.kind == "ref":
+        refs.add(expr.path)
+    for arg in expr.args:
+        refs.update(_expr_refs(arg))
+    return refs

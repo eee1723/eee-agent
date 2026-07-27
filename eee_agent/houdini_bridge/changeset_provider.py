@@ -23,6 +23,7 @@ from eee_agent.houdini_bridge.capture import (
 from eee_agent.houdini_bridge.scratch import (
     ScratchCommitRequest,
     ScratchCommitResult,
+    ScratchParmDeclaration,
     ScratchDeleteRequest,
     ScratchDeleteResult,
     ScratchDestroyRequest,
@@ -251,6 +252,7 @@ class BridgeChangeSetProvider:
         orientation_checks: tuple[Mapping[str, object], ...] = (),
         skip_structure_check: bool = False,
         annotations: Mapping[str, str] | None = None,
+        parameters: tuple[ScratchParmDeclaration, ...] = (),
     ) -> ScratchCommitResult:
         """Commit a verified sandbox into the real scene through hard gates.
 
@@ -271,6 +273,7 @@ class BridgeChangeSetProvider:
             orientation_checks=tuple(orientation_checks),
             skip_structure_check=skip_structure_check,
             annotations=annotations,
+            parameters=parameters,
         )
         return await self._call("scratch_commit", request, may_have_changed=True)
 

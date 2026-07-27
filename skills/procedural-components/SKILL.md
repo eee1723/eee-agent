@@ -5,13 +5,12 @@ description: How to build multi-part parametric assets in the sandbox workflow â
 
 # Procedural Components (multi-part, parameter-driven assets)
 
-There are no expressions in the current surface: `set_parm` accepts literal
-values only (no `ch()`, no VEX, no cross-node references). A "parametric"
-asset therefore means: **you are the expression engine.** Keep the root
-parameters in your plan, compute every derived number yourself, and send
-literal results. Structure the asset as one node chain per component so each
-part stays independent, merge the chains at the end, and commit through the
-gates.
+`set_parm` accepts literals or the C1 typed `expr` AST (no arbitrary Hscript,
+VEX, or file text). A component is a SOP `subnet`; place a
+`<component>_ctrl` box inside it and use its numeric parms as design-intent
+slots. Derived dimensions use safe relative channel refs and are recorded in
+the Parameter Manifest. Merge component outputs at the top level and keep one
+final `OUT` sink.
 
 ## Component structure in the sandbox
 - A component = a named node chain inside the sandbox: generator
@@ -96,9 +95,9 @@ built from catalog nodes carries no `component_id` prims. Consequences:
   verified â€” never guess parm names.
 
 ## Gotchas
-- No expressions anywhere: recompute and re-set every dependent literal
-  when a root parameter changes. Forgetting one is the classic bug (a
-  wider tabletop with legs still at the old corners).
+- Keep derived values as typed `expr` ASTs where a live channel relationship
+  is useful; use literals for constants and update the ctrl slot when a root
+  parameter changes. The manifest makes dependencies auditable.
 - One small step per `scratch_build` call; verify counts/bbox after each.
 - A refused commit is a diagnosis, not an error: read `reason` + `gates`,
   fix the named defect in the preserved sandbox, re-commit.
