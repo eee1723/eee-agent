@@ -88,11 +88,15 @@ def main() -> None:
         topo = executor.scratch_topology(
             ScratchTopologyRequest.build(
                 request_id="smoke_topo", deadline_ms=30000, scene_epoch=epoch,
-                paths=(orphan.path(),),
+                paths=(orphan.path(), output.path()),
             )
         )
         if topo.nodes[0]["outputs"]:
             die("orphan unexpectedly has outputs")
+        # Regression: inputs must come from node.inputs(); on real Houdini
+        # 21.0.440 inputConnections().outputNode() returns the node itself.
+        if topo.nodes[1]["inputs"] != [box.path()]:
+            die(f"xform topology inputs wrong: {topo.nodes[1]['inputs']}")
         orphan_path = orphan.path()
         deleted = executor.delete_nodes(
             ScratchDeleteRequest.build(

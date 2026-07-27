@@ -128,6 +128,12 @@ class _Node:
     def inputConnections(self) -> list[_Conn]:
         return [_Conn(node) for _, node in sorted(self._inputs.items())]
 
+    def inputs(self) -> tuple:
+        # Mirrors hou.Node.inputs(): positional, None for unconnected inputs.
+        if not self._inputs:
+            return ()
+        return tuple(self._inputs.get(i) for i in range(max(self._inputs) + 1))
+
     def outputs(self) -> list["_Node"]:
         return list(self._outputs)
 

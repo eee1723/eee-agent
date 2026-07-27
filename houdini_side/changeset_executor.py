@@ -2338,8 +2338,9 @@ class ChangeSetExecutor:
                 )
                 continue
             inputs = [
-                conn.outputNode().path()
-                for conn in (node.inputConnections() or [])
+                src.path()
+                for src in (node.inputs() or ())  # type: ignore[attr-defined]
+                if src is not None
             ][:_MAX_ERRORS]
             outputs = [output.path() for output in (node.outputs() or [])][:_MAX_ERRORS]
             nodes.append(
@@ -2579,10 +2580,12 @@ class ChangeSetExecutor:
                 ys: list[float] = []
                 for child in children:
                     upstream: list[str] = []
-                    for conn in child.inputConnections() or []:
-                        up = conn.outputNode()
-                        if up is not None:
-                            upstream.append(up.path())
+                    # node.inputs() is the reliable upstream accessor;
+                    # inputConnections().outputNode() returns the node itself
+                    # in 21.0.440 (see _read_wire_source).
+                    for src in child.inputs() or ():
+                        if src is not None:
+                            upstream.append(src.path())
                     edges[child.path()] = tuple(upstream)
                     pos = child.position()
                     xs.append(float(pos[0]))
