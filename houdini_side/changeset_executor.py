@@ -2486,8 +2486,9 @@ class ChangeSetExecutor:
                 fresh_container, fresh_output, final_path, request.annotations
             )
         )
-        # Explicit final assertion for HOM implementations that defer network
-        # flag updates from a helper call until the node is touched directly.
+        # Idempotent safety net: re-assert the flags on freshly resolved
+        # handles after the container rename/move, so a stale pre-promotion
+        # handle can never silently drop the write.
         try:
             with hou.undos.disabler():
                 fresh_output.setDisplayFlag(True)
@@ -2518,19 +2519,35 @@ class ChangeSetExecutor:
         )
 
     def _scratch_output_node(self, container: object) -> object:
-        """Return the output (display) node of the sandbox container.
+        """Return the output (terminal) node of the sandbox container.
 
-        Falls back to the container itself if no display flag is set.
+        Prefers the unique sink — the child with no downstream connections.
+        The sandbox display flag is only an accidental creation default
+        (``scratch_exec`` never sets it), so it can point at a mid-chain
+        node; committing the flag holder instead of the chain end would
+        verify and publish the wrong geometry. Ambiguous networks (zero or
+        multiple sinks) fall back to the display-flag holder, then the last
+        child, then the container itself.
         """
         try:
-            children = container.children()  # type: ignore[attr-defined]
-            for child in children:
-                if getattr(child, "isDisplayFlagSet", lambda: False)():
-                    return child
-            # No display flag: use the last child, else the container.
-            return children[-1] if children else container
+            children = list(container.children())  # type: ignore[attr-defined]
         except Exception:
             return container
+        if not children:
+            return container
+        sinks: list[object] = []
+        for child in children:
+            try:
+                if not (child.outputs() or []):  # type: ignore[attr-defined]
+                    sinks.append(child)
+            except Exception:  # noqa: BLE001 — unreadable node is not a sink
+                pass
+        if len(sinks) == 1:
+            return sinks[0]
+        for child in children:
+            if getattr(child, "isDisplayFlagSet", lambda: False)():
+                return child
+        return children[-1]
 
     def _finalize_commit(
         self,

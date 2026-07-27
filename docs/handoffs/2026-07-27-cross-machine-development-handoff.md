@@ -52,7 +52,9 @@ actual executable path in the smoke commands.
 
 ## Verified baseline
 
-- Full offline gate: `3546 passed, 12 skipped`.
+- Full offline gate: `3549 passed, 11 skipped` (includes the Windows
+  RuntimeLock deflake cherry-picked from main and two new output-resolution
+  tests).
 - Dependency/version probe:
   `uv run --frozen --extra eval python -m eee_agent.cli versions` passed.
 - Chrome HTML sketch quality smoke passed with a nonblank 1440×900 PNG.
@@ -66,14 +68,17 @@ actual executable path in the smoke commands.
 
 ## Open acceptance work
 
-1. **Houdini display/render flags:** a fresh read after `scratch_commit` still
-   observed both SOP flags as false, although a direct post-return reassertion
-   worked. Reproduce with a minimal Hython probe, fix the lifecycle boundary,
-   and then require this command to print `SMOKE OK` without an external reset:
-
-   ```powershell
-   & 'C:\Program Files\Side Effects Software\Houdini 21.0.440\bin\hython.exe' tests/runtime/task_graph_houdini_smoke.py
-   ```
+1. ~~Houdini display/render flags~~ **RESOLVED (2026-07-27).** The fresh-read
+   failure was not a Houdini lifecycle/deferred-state issue: `scratch_exec`
+   never sets the sandbox display flag, so the flag stayed on the accidental
+   first-created node (`box1`), and `_scratch_output_node` preferred that
+   flag holder over the chain end — commit verified and flagged the wrong
+   node. Fix: `_scratch_output_node` now prefers the unique terminal sink
+   (child with no downstream connections), falling back to the flag holder
+   then the last child. Verified on Houdini 21.0.440 (`D:\houdini`):
+   `tests/runtime/task_graph_houdini_smoke.py` prints `SMOKE OK` with no
+   external reassert; `SCRATCH SMOKE OK` and `SCRATCH BRIDGE JOURNEY OK`
+   regression-passed; offline gate 3549 passed, 11 skipped.
 
 2. **Real Provider acceptance:** the scratch-native adapter is implemented, but
    the new chain has not completed the planned three real-Provider runs. Use the

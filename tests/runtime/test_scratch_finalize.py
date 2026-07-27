@@ -215,6 +215,31 @@ def _container(scene: dict[str, _Node]) -> _Node:
     return root
 
 
+def test_scratch_output_node_prefers_terminal_sink_over_accidental_flag() -> None:
+    # scratch_exec never sets the display flag, so the flag in a sandbox is
+    # the accidental creation default and can sit on a mid-chain node. The
+    # commit output must be the terminal sink instead.
+    executor, scene, _ = _executor()
+    container = _container(scene)
+    box = scene["/obj/table1/box1"]
+    box.setDisplayFlag(True)
+    output = executor._scratch_output_node(container)
+    assert output.path() == "/obj/table1/xform1"
+
+
+def test_scratch_output_node_falls_back_to_flag_holder_when_ambiguous() -> None:
+    # Two independent chains => two sinks; resolution falls back to the
+    # display-flag holder, then the last child.
+    executor, scene, _ = _executor()
+    container = _container(scene)
+    other = container.createNode("sphere", "sphere1")
+    box = scene["/obj/table1/box1"]
+    box.setDisplayFlag(True)
+    assert executor._scratch_output_node(container).path() == box.path()
+    box.setDisplayFlag(False)
+    assert executor._scratch_output_node(container).path() == other.path()
+
+
 def test_layered_layout_is_deterministic_and_cycle_safe() -> None:
     edges = {"/obj/t/a": (), "/obj/t/b": ("/obj/t/a",)}
     assert _layered_layout(["/obj/t/a", "/obj/t/b"], edges, anchor=(1, 2)) == {
