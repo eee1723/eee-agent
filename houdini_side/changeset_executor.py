@@ -2545,6 +2545,25 @@ class ChangeSetExecutor:
                 pass
         if len(sinks) == 1:
             return sinks[0]
+        if sinks:
+            # Multiple sinks: an assembled asset's output is downstream of
+            # the parts (a merge/output null), while a stray disconnected
+            # node (e.g. a leftover default box) has no inputs. Prefer the
+            # sink with the most wired inputs so junk can never hijack the
+            # commit output and display flag; ties keep children order.
+            def _in_degree(node: object) -> int:
+                try:
+                    return sum(
+                        1
+                        for src in (node.inputs() or ())  # type: ignore[attr-defined]
+                        if src is not None
+                    )
+                except Exception:  # noqa: BLE001
+                    return 0
+
+            connected = [sink for sink in sinks if _in_degree(sink) > 0]
+            if connected:
+                return max(connected, key=_in_degree)
         for child in children:
             if getattr(child, "isDisplayFlagSet", lambda: False)():
                 return child

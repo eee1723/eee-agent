@@ -233,17 +233,30 @@ def test_scratch_output_node_prefers_terminal_sink_over_accidental_flag() -> Non
     assert output.path() == "/obj/table1/xform1"
 
 
-def test_scratch_output_node_falls_back_to_flag_holder_when_ambiguous() -> None:
-    # Two independent chains => two sinks; resolution falls back to the
-    # display-flag holder, then the last child.
+def test_scratch_output_node_prefers_connected_sink_when_ambiguous() -> None:
+    # Two sinks: the chain end (xform1, one wired input) vs a disconnected
+    # sphere (no inputs). The connected sink wins even when the accidental
+    # creation-default flag sits on a mid-chain node — a stray disconnected
+    # node must never hijack the commit output.
     executor, scene, _ = _executor()
     container = _container(scene)
-    other = container.createNode("sphere", "sphere1")
+    container.createNode("sphere", "sphere1")
     box = scene["/obj/table1/box1"]
     box.setDisplayFlag(True)
-    assert executor._scratch_output_node(container).path() == box.path()
-    box.setDisplayFlag(False)
-    assert executor._scratch_output_node(container).path() == other.path()
+    assert executor._scratch_output_node(container).path() == "/obj/table1/xform1"
+
+
+def test_scratch_output_node_falls_back_to_flag_holder_when_all_sinks_bare() -> None:
+    # Every sink is disconnected (no inputs anywhere): resolution falls back
+    # to the display-flag holder, then the last child.
+    executor, scene, _ = _executor()
+    root = scene["/obj"].createNode("geo", "t2")
+    first = root.createNode("box", "a1")
+    second = root.createNode("box", "b1")
+    first.setDisplayFlag(True)
+    assert executor._scratch_output_node(root).path() == first.path()
+    first.setDisplayFlag(False)
+    assert executor._scratch_output_node(root).path() == second.path()
 
 
 def test_layered_layout_is_deterministic_and_cycle_safe() -> None:
