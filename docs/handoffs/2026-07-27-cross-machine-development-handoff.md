@@ -208,7 +208,12 @@ actual executable path in the smoke commands.
    `workflow.html_sketch_required` before a successful render and
    `workflow.sketch_approval_required` before post-render approval. Simple,
    explicit node edits remain on the direct sandbox route. Offline Runtime
-   evidence after the correction: `2324 passed`.
+   evidence after the correction: `2324 passed`. After restarting Runtime,
+   a natural-language live probe `做一个程序化自行车`
+   (`run_92f90b85b180433aa9bd58730e59adb2`) completed with
+   `write_todos -> search_houdini_knowledge -> render_sketch` and **zero**
+   `scratch_build` calls. `render_sketch` returned a non-empty 1440×900 PNG
+   and HTML artifact, and the final response stopped for user review.
 5. **Manual Houdini UI:** inspect the read-only task graph block in the docked
    panel after a real modeling run.
 
