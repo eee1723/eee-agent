@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from langchain.tools import ToolRuntime, tool
@@ -27,6 +28,36 @@ _MAX_EXPECT_INT = 10**9
 
 def _error(code: str, message: str) -> dict[str, object]:
     return {"ok": False, "code": code, "message": message}
+
+
+def _geometry_assertions():
+    """Import the eval geometry assertion helpers, tolerating launch mode.
+
+    The ``eval`` package lives at the repository root, which is on sys.path
+    for pytest and ``python -m`` launches from the repo but NOT for direct
+    script launches (e.g. the provider acceptance journey). Fall back to
+    making the root importable relative to this module instead of relying on
+    how the runtime process happened to be started.
+    """
+    try:
+        from eval.geometry_assertions import evaluate, from_bridge_stats
+
+        return evaluate, from_bridge_stats
+    except ImportError:
+        pass
+    import sys
+
+    root = Path(__file__).resolve().parents[2]
+    if (root / "eval" / "geometry_assertions.py").is_file():
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        try:
+            from eval.geometry_assertions import evaluate, from_bridge_stats
+
+            return evaluate, from_bridge_stats
+        except ImportError:
+            pass
+    return None
 
 
 def _context(runtime: ToolRuntime) -> RuntimeToolContext | None:
@@ -162,14 +193,14 @@ async def verify_geometry(
             "The read-only provider returned malformed geometry stats.",
         )
 
-    try:
-        from eval.geometry_assertions import evaluate, from_bridge_stats
-    except ImportError:
+    assertions = _geometry_assertions()
+    if assertions is None:
         return _error(
             "verify.backend_missing",
             "The geometry assertion library (eval package) is not importable "
             "from this runtime environment.",
         )
+    evaluate, from_bridge_stats = assertions
 
     stats = from_bridge_stats(dict(bridge_stats))
     verdict = evaluate(stats, cleaned_expect)

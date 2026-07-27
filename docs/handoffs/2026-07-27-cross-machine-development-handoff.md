@@ -80,18 +80,27 @@ actual executable path in the smoke commands.
    external reassert; `SCRATCH SMOKE OK` and `SCRATCH BRIDGE JOURNEY OK`
    regression-passed; offline gate 3549 passed, 11 skipped.
 
-2. **Real Provider acceptance:** the scratch-native adapter is implemented, but
-   the new chain has not completed the planned three real-Provider runs. Use the
-   provider-specific key only in the local process environment. For the default
-   DeepSeek provider that is `DEEPSEEK_API_KEY`; never commit it or paste it into
-   chat. The strict harness entry point is:
-
-   ```powershell
-   $env:HFS = 'C:\Program Files\Side Effects Software\Houdini 21.0.440'
-   $env:EEE_RUN_RUNTIME_MVP_PROVIDER_E2E = 'true'
-   $env:EEE_RUNTIME_MVP_PROVIDER_COMMAND = 'python tests/runtime/provider_journey.py'
-   uv run --frozen --extra eval python tests/runtime/runtime_mvp_provider_e2e.py
-   ```
+2. ~~Real Provider acceptance~~ **RESOLVED (2026-07-27).** The strict harness
+   passed 3/3 consecutive real DeepSeek runs on Houdini 21.0.440 (`D:\houdini`):
+   `{"status": "passed", "reason": "provider_journey_completed"}` each time.
+   Every run selected `scratch_build`, ran `verify_geometry`, committed via
+   `scratch_commit`, passed final-geometry readback, proved sandbox absence,
+   restart replay, and worker cleanup. Three defects were found and fixed to
+   get here: (a) `verify_geometry`'s `eval` package import depended on the
+   launch mode (repo root on `sys.path`) — `sketch_tools.py` now resolves it
+   relative to the module; (b) `ScratchCoordinator.commit` forwarded its
+   internal pair-tuple into the provider's `Mapping` contract, crashing every
+   annotated commit — converted to `dict` at the seam, with a regression test
+   (the fake provider had encoded the wrong contract, which is why offline
+   tests stayed green); (c) the journey misreported the bridge's
+   `bridge.houdini_read_failed` ("node not found") for the removed sandbox as
+   "sandbox still exists" — absence is now proven by empty result OR the
+   bounded not-found error. Note for reruns: `EEE_RUNTIME_MVP_PROVIDER_COMMAND`
+   must name the project venv interpreter explicitly (a bare `python` resolves
+   to the PyManager 3.14 on this machine), e.g.
+   `.venv\Scripts\python.exe tests/runtime/provider_journey.py`, and the
+   credential must be injected into the harness process environment (the
+   harness intentionally does not load `.env` itself).
 
 3. **Wave B:** B1 Chrome quality gate is complete; B2–B6 multi-session HTML
    cases, stability, fault injection, and feedback reports remain pending.

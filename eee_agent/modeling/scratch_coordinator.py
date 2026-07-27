@@ -217,7 +217,10 @@ class ScratchCoordinator:
                 target_name=target_name,
                 orientation_checks=checks,
                 skip_structure_check=skip_structure_check,
-                annotations=annotations,
+                # The provider contract is Mapping[str, str]; the internal
+                # pair-tuple is converted here so the request builder can
+                # rely on .items().
+                annotations=dict(annotations),
             )
         except Exception as exc:  # noqa: BLE001 - bounded at this seam
             return _bridge_or_op_failure(exc, default="scratch.op_failed")

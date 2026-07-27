@@ -20,7 +20,9 @@ from __future__ import annotations
 import asyncio
 import functools
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
+from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -1474,7 +1476,9 @@ class _CommitFakeProvider:
         target_name: str,
         orientation_checks: tuple = (),
         skip_structure_check: bool = False,
-        annotations: tuple[tuple[str, str], ...] = (),
+        # Mirrors the real ScratchProvider contract: a Mapping, NOT the
+        # coordinator's internal pair-tuple.
+        annotations: Mapping[str, str] | None = None,
     ) -> ScratchCommitResult:
         self.commit_calls.append({
             "sandbox_id": sandbox_id,
@@ -1603,6 +1607,61 @@ class TestScratchCoordinatorCommit:
 
         asyncio.run(run())
         assert provider.commit_calls[0]["skip_structure_check"] is True
+
+    def test_commit_annotations_reach_provider_as_mapping(self, tmp_path: Path) -> None:
+        # Regression: the coordinator used to forward its internal pair-tuple
+        # straight into the provider's Mapping[str, str] contract; the real
+        # request builder then crashed with "'tuple' object has no attribute
+        # 'items'" on every commit that carried task-graph annotations.
+        from eee_agent.runtime.database import RuntimeDatabase
+        from eee_agent.runtime.task_graph import TaskGraphStore
+
+        async def run() -> tuple[_CommitFakeProvider, dict[str, object]]:
+            database = await RuntimeDatabase.open(tmp_path / "app.sqlite")
+            try:
+                store = TaskGraphStore(database)
+                now = datetime.now(timezone.utc).isoformat()
+                async with database.write_transaction() as conn:
+                    await conn.execute(
+                        "INSERT INTO sessions(session_id,title,status,created_at,"
+                        "updated_at,last_seq,replay_floor_seq) VALUES "
+                        "('sess_1','t','active',?,?,0,0)",
+                        (now, now),
+                    )
+                    await conn.execute(
+                        "INSERT INTO runs(run_id,session_id,status,user_input,"
+                        "created_at,model_snapshot_json) VALUES "
+                        "('run_1','sess_1','Planning','build',?,'{}')",
+                        (now,),
+                    )
+                step = await store.record_step(
+                    run_id="run_1", tool="scratch_build", purpose="build tabletop"
+                )
+                await store.record_nodes(
+                    step_id=step.step_id,
+                    nodes=[("/obj/eee_scratch_run1/tabletop", "box", "输出")],
+                )
+                provider = _CommitFakeProvider(committed=True)
+                coord = ScratchCoordinator(
+                    ScratchSessionContext(
+                        provider=provider,
+                        sandbox_id="run1",
+                        run_id="run_1",
+                        task_store=store,
+                    )
+                )
+                result = await coord.commit(
+                    target_parent_path="/obj", target_name="asset"
+                )
+                return provider, result
+            finally:
+                await database.close()
+
+        provider, result = asyncio.run(run())
+        assert result["committed"] is True
+        annotations = provider.commit_calls[0]["annotations"]
+        assert type(annotations) is dict
+        assert annotations == {"tabletop": "输出"}
 
 
 # ==========================================================================

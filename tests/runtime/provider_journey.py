@@ -470,10 +470,19 @@ async def _run_journey(paths: object) -> tuple[dict[str, object], str]:
                 raise _StepError("final_query", "committed geometry is invalid")
             sandbox_path = f"/obj/eee_scratch_{_sandbox_id_from_run(run.run_id)}"
             sandbox_query = await read_only.query_scene([sandbox_path])
-            if (
-                sandbox_query.get("ok") is not True
-                or sandbox_query.get("node_count") != 0
-            ):
+            # Absence is proven two ways: an empty query result, or the
+            # bridge's not-found read error for the removed container. The
+            # bridge reports a missing node as bridge.houdini_read_failed
+            # rather than ok=True with node_count=0.
+            sandbox_absent = (
+                sandbox_query.get("ok") is True
+                and sandbox_query.get("node_count") == 0
+            ) or (
+                sandbox_query.get("ok") is False
+                and sandbox_query.get("code") == "bridge.houdini_read_failed"
+                and "not found" in str(sandbox_query.get("message", "")).lower()
+            )
+            if not sandbox_absent:
                 raise _StepError("sandbox_cleanup", "run sandbox still exists")
             _status("scratch tools and committed scene verified")
 
